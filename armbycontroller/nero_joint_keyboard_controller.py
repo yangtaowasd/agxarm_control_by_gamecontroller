@@ -56,6 +56,9 @@ class NeroJointKeyboardController(Node):
         self.declare_parameter("keyboard_timeout", 0.3)
         self.declare_parameter("enable_timeout", 5.0)
         self.declare_parameter("feedback_timeout", 3.0)
+        self.declare_parameter("move_home_on_start", True)
+        self.declare_parameter("startup_home_timeout", 30.0)
+        self.declare_parameter("startup_home_tolerance", 0.01)
         self.declare_parameter("clear_errors_on_enable", True)
         self.declare_parameter("execute_motion", True)
 
@@ -68,6 +71,15 @@ class NeroJointKeyboardController(Node):
         self.keyboard_timeout = float(self.get_parameter("keyboard_timeout").value)
         self.enable_timeout = float(self.get_parameter("enable_timeout").value)
         self.feedback_timeout = float(self.get_parameter("feedback_timeout").value)
+        self.move_home_on_start = bool(
+            self.get_parameter("move_home_on_start").value
+        )
+        self.startup_home_timeout = float(
+            self.get_parameter("startup_home_timeout").value
+        )
+        self.startup_home_tolerance = float(
+            self.get_parameter("startup_home_tolerance").value
+        )
         self.clear_errors_on_enable = bool(
             self.get_parameter("clear_errors_on_enable").value
         )
@@ -79,6 +91,10 @@ class NeroJointKeyboardController(Node):
             raise ValueError("speed_percent must be in [1, 100]")
         if self.keyboard_timeout <= 0.0:
             raise ValueError("keyboard_timeout must be > 0")
+        if self.startup_home_timeout <= 0.0:
+            raise ValueError("startup_home_timeout must be > 0")
+        if self.startup_home_tolerance <= 0.0:
+            raise ValueError("startup_home_tolerance must be > 0")
 
         self.firmware = NERO_FIRMWARES.get(self.firmware_name)
         if self.firmware is None:
@@ -152,11 +168,16 @@ class NeroJointKeyboardController(Node):
                 )
                 return
             self.jog.sync_target(joints)
-            self.arm_ready = True
             self.get_logger().info(
                 "synced current NERO joints: "
                 f"{[round(value, 4) for value in self.jog.target_joints]}"
             )
+            if self.move_home_on_start and not self.move_home_and_wait():
+                self.get_logger().error(
+                    "NERO startup home was not reached; keyboard motion is disabled"
+                )
+                return
+            self.arm_ready = True
         except Exception as exc:
             self.arm_ready = False
             self.get_logger().error(f"failed to initialize NERO: {exc}")
@@ -192,6 +213,31 @@ class NeroJointKeyboardController(Node):
                 )
             time.sleep(0.05)
         return None
+
+    def move_home_and_wait(self):
+        home = [0.0] * JOINT_COUNT
+        self.get_logger().info(
+            "commanding NERO startup home [0, 0, 0, 0, 0, 0, 0]"
+        )
+        self.arm.move_j(home)
+        deadline = time.monotonic() + self.startup_home_timeout
+
+        while time.monotonic() < deadline:
+            joints = extract_joint_angles(self.arm.get_joint_angles())
+            if joints is not None:
+                max_error = max(abs(value) for value in joints)
+                if max_error <= self.startup_home_tolerance:
+                    self.jog.sync_target(home)
+                    self.get_logger().info(
+                        f"NERO startup home reached; max error={max_error:.6f} rad"
+                    )
+                    return True
+                self.get_logger().info(
+                    f"waiting for NERO startup home; max error={max_error:.4f} rad",
+                    throttle_duration_sec=1.0,
+                )
+            time.sleep(0.05)
+        return False
 
     def control_tick(self):
         keys = self.key_state
@@ -242,6 +288,9 @@ class NeroJointKeyboardController(Node):
     def destroy_node(self):
         if self.arm is not None and self.arm_connected:
             try:
+                self.get_logger().info(
+                    "Ctrl-C shutdown: disconnecting without motion or enable/disable commands"
+                )
                 self.arm.disconnect()
             except Exception as exc:
                 self.get_logger().error(f"failed to disconnect NERO: {exc}")

@@ -14,6 +14,9 @@ ARGUMENTS = {
     "keyboard_timeout": "0.3",
     "enable_timeout": "5.0",
     "feedback_timeout": "3.0",
+    "move_home_on_start": "true",
+    "startup_home_timeout": "30.0",
+    "startup_home_tolerance": "0.01",
     "clear_errors_on_enable": "true",
     "execute_motion": "true",
 }

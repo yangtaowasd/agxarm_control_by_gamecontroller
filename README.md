@@ -11,9 +11,10 @@ source install/setup.bash
 
 ## NERO: independent joint keyboard control
 
-The NERO program is separate from the Piper controller. It reads the current
-seven-joint feedback before accepting motion commands, so starting the program
-does not command an unexpected zero pose.
+The NERO program is separate from the Piper controller. At startup it connects,
+enables the arm, reads the current seven-joint feedback, commands all joints to
+zero, and waits for the home position before accepting keyboard motion. Pressing
+Ctrl-C only disconnects CAN; it does not move, enable, or disable the arm.
 
 ```bash
 ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
@@ -33,8 +34,11 @@ Key mapping:
 
 The default increment is `step_rad:=0.005` rad per 20 Hz control tick and the
 default arm speed is `speed_percent:=20`. Start conservatively and keep a hand
-near the physical emergency stop. To verify keyboard input and targets without
-sending hardware commands, use:
+near the physical emergency stop. Startup home defaults to a `0.01` rad
+tolerance and a 30-second timeout. These can be changed with
+`startup_home_tolerance` and `startup_home_timeout`; startup homing can be
+disabled with `move_home_on_start:=false`. To verify keyboard input and targets
+without sending hardware commands, use:
 
 ```bash
 ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
