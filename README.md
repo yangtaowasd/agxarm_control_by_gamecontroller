@@ -72,3 +72,4 @@ Key mapping:
   `30` degrees and the default tolerance is `0.0001` rad; if the target is not
   reached, disconnect is blocked. The controller does not disable the arm on
   shutdown.
+# agxarm_control_by_gamecontroller
