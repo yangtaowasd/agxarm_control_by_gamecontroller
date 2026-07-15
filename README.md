@@ -1,6 +1,6 @@
 # armbycontroller
 
-C++ keyboard input and Python Piper controller for ROS 2.
+Independent ROS 2 keyboard controllers for AgileX Piper and NERO arms.
 
 ## Build
 
@@ -9,7 +9,58 @@ colcon build --packages-select armbycontroller
 source install/setup.bash
 ```
 
-## Run
+## NERO: independent joint keyboard control
+
+The NERO program is separate from the Piper controller. It reads the current
+seven-joint feedback before accepting motion commands, so starting the program
+does not command an unexpected zero pose.
+
+```bash
+ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
+  device:=/dev/input/event3 \
+  can_interface:=can0 \
+  firmware:=default
+```
+
+Key mapping:
+
+- `1` ... `7`: select NERO joint 1 ... 7
+- `A`: decrease the selected joint angle
+- `D`: increase the selected joint angle
+- `SPACE`: command all seven joints to zero (within configured limits)
+- `E`: electronic emergency stop; restart the controller after resolving the
+  cause because motion stays locked for the rest of that process
+
+The default increment is `step_rad:=0.005` rad per 20 Hz control tick and the
+default arm speed is `speed_percent:=20`. Start conservatively and keep a hand
+near the physical emergency stop. To verify keyboard input and targets without
+sending hardware commands, use:
+
+```bash
+ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
+  execute_motion:=false
+```
+
+Supported NERO firmware settings:
+
+- `default`: firmware 1.10 and earlier
+- `v111`: firmware 1.11
+- `v112`: firmware 1.12
+- `v120`: firmware 1.20 and later
+
+The keyboard node reads Linux input events directly. Set `device` to the correct
+entry from `/dev/input/by-id/` or `/dev/input/event*`, and make sure the current
+user has read permission. The CAN interface must already be configured and up.
+
+The two NERO nodes can also be run separately:
+
+```bash
+ros2 run armbycontroller nero_keyboard --ros-args -p device:=/dev/input/event3
+ros2 run armbycontroller nero_joint_keyboard_controller.py --ros-args \
+  -p can_interface:=can0 -p firmware:=default
+```
+
+## Piper keyboard control
 
 The package has one launch file. Start both nodes with:
 

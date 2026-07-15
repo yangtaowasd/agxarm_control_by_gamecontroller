@@ -2,7 +2,7 @@
 <package format="3">
   <name>armbycontroller</name>
   <version>0.0.0</version>
-  <description>C++ keyboard input and Python Piper arm controller.</description>
+  <description>Keyboard control for AgileX Piper and NERO robot arms.</description>
 
   <maintainer email="yang@todo.todo">yang</maintainer>
   <license>Apache-2.0</license>
