@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>armbycontroller</name>
+  <version>0.0.0</version>
+  <description>C++ keyboard input and Python Piper arm controller.</description>
+
+  <maintainer email="yang@todo.todo">yang</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>ament_cmake_python</build_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
