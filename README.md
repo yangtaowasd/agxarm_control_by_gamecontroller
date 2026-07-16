@@ -9,7 +9,7 @@ colcon build --packages-select armbycontroller
 source install/setup.bash
 ```
 
-## NERO: independent joint keyboard control
+## NERO: joint/Cartesian keyboard control
 
 The NERO program is separate from the Piper controller. At startup it connects,
 enables the arm, reads the current seven-joint feedback, commands all joints to
@@ -17,7 +17,7 @@ zero, and waits for the home position before accepting keyboard motion. Pressing
 Ctrl-C only disconnects CAN; it does not move, enable, or disable the arm.
 
 ```bash
-ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
+ros2 launch armbycontroller keyboard_control.launch.py robot_model:=nero \
   device:=/dev/input/event3 \
   can_interface:=can0 \
   firmware:=default
@@ -25,15 +25,26 @@ ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
 
 Key mapping:
 
+- `P`: switch between joint mode and Cartesian IK mode
 - `1` ... `7`: select NERO joint 1 ... 7
-- `A`: decrease the selected joint angle
-- `D`: increase the selected joint angle
+- Joint mode: `A/D` decrease/increase the selected joint angle
+- IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - `SPACE`: command all seven joints to zero (within configured limits)
 - `E`: electronic emergency stop; restart the controller after resolving the
   cause because motion stays locked for the rest of that process
 
-The default increment is `step_rad:=0.005` rad per 20 Hz control tick and the
-default arm speed is `speed_percent:=20`. Start conservatively and keep a hand
+IK changes only XYZ. The tool keeps the configured pointing direction
+(`link7 +Z` points toward `base_link -Z` by default), rather than locking the
+orientation captured at mode entry. Rotation about that pointing axis remains
+free; the controller samples it and chooses the solution nearest the current
+joints. The Cartesian increment is
+`cartesian_step:=0.005` m per 20 Hz tick. The controller retains 10 valid IK
+targets; if IK fails it returns to the latest one, logs the cause, and pauses
+Cartesian input for two seconds.
+
+The default joint increment is `step_rad:=0.005` rad per 20 Hz control tick and
+the default arm speed is `speed_percent:=20`. Joint acceleration is constrained
+with `joint_max_acceleration:=1.0`. Start conservatively and keep a hand
 near the physical emergency stop. Startup home defaults to a `0.01` rad
 tolerance and a 30-second timeout. These can be changed with
 `startup_home_tolerance` and `startup_home_timeout`; startup homing can be
@@ -41,7 +52,7 @@ disabled with `move_home_on_start:=false`. To verify keyboard input and targets
 without sending hardware commands, use:
 
 ```bash
-ros2 launch armbycontroller nero_joint_keyboard_control.launch.py \
+ros2 launch armbycontroller keyboard_control.launch.py robot_model:=nero \
   execute_motion:=false
 ```
 
@@ -59,7 +70,8 @@ user has read permission. The CAN interface must already be configured and up.
 The two NERO nodes can also be run separately:
 
 ```bash
-ros2 run armbycontroller nero_keyboard --ros-args -p device:=/dev/input/event3
+ros2 run armbycontroller keyboard --ros-args \
+  -p profile:=nero -p device:=/dev/input/event3
 ros2 run armbycontroller nero_joint_keyboard_controller.py --ros-args \
   -p can_interface:=can0 -p firmware:=default
 ```
@@ -69,7 +81,7 @@ ros2 run armbycontroller nero_joint_keyboard_controller.py --ros-args \
 The package has one launch file. Start both nodes with:
 
 ```bash
-ros2 launch armbycontroller piper_keyboard_control.launch.py
+ros2 launch armbycontroller keyboard_control.launch.py robot_model:=piper
 ```
 
 The C++ keyboard reader and Python controller can still be run separately:
@@ -128,3 +140,108 @@ Key mapping:
   reached, disconnect is blocked. The controller does not disable the arm on
   shutdown.
 # agxarm_control_by_gamecontroller
+
+## NERO Cartesian IK keyboard control and RViz simulation
+
+This package also contains the merged `pytracik` Cartesian controller. It uses
+the official AGX NERO URDF, verifies every IK result with FK, and sends only
+joint-space `move_j()` targets. The real controller configures and verifies
+joint acceleration limits before motion.
+
+Install the non-ROS solver dependency once:
+
+```bash
+sudo apt install libboost-all-dev libeigen3-dev liborocos-kdl-dev \
+  libnlopt-dev libnlopt-cxx-dev
+python3 -m pip install pytracik
+```
+
+Start the CAN-free RViz simulation:
+
+```bash
+ros2 launch armbycontroller agx_ik_rviz.launch.py robot_model:=nero
+```
+
+In another interactive terminal, start Cartesian keyboard control:
+
+```bash
+ros2 run armbycontroller nero_keyboard_teleop.py --ros-args -p step:=0.01
+```
+
+Key mapping in the `base_link` frame:
+
+- `W/S`: `+X/-X`
+- `A/D`: `+Y/-Y`
+- `Z/X`: `+Z/-Z`
+- `R`: reset the accumulated target to the current position
+- `Q`: quit
+
+The target is a fixed pointing direction, not a fully locked quaternion;
+keyboard commands change XYZ only and roll about the pointing axis remains
+free. By default, `link7` local `+Z` points along
+`base_link -Z` (downward). Change it from the keyboard node command line:
+
+```bash
+ros2 run armbycontroller nero_keyboard_teleop.py --ros-args \
+  -p step:=0.01 \
+  -p pointing_direction:="[1.0, 0.0, 0.0]" \
+  -p roll_reference:="[0.0, 0.0, 1.0]"
+```
+
+`roll_reference` provides the first roll candidate. The controller searches
+around the pointing axis and chooses the candidate closest to the seed joints.
+Simulation applies joint velocity and acceleration limits. The controller keeps
+the latest 10 IK/FK-valid targets. On an IK failure or workspace violation it
+returns to the latest valid target, pauses input for two seconds, and publishes
+details on `/nero/ik_status`.
+
+The default radial workspace, measured from `base_link` to `link7`, is
+`0.1947354 ... 0.6374482 m`: 5 cm inside the URDF-derived minimum reach and
+10 cm inside the maximum reach.
+
+Run the Cartesian controller against real NERO hardware separately:
+
+```bash
+ros2 run armbycontroller nero_ik_controller.py --ros-args \
+  -p can_interface:=can0 -p firmware:=v111 -p execute_motion:=true
+```
+
+## Piper-L URDF, IK, and RViz
+
+The same pytracik/FK controller supports the official six-axis Piper-L URDF
+(`piper_l_description.urdf`). Start the CAN-free RViz simulation with:
+
+```bash
+ros2 launch armbycontroller agx_ik_rviz.launch.py robot_model:=piper_l
+```
+
+Then run the terminal keyboard publisher against the Piper-L topics:
+
+```bash
+ros2 run armbycontroller nero_keyboard_teleop.py --ros-args \
+  -p topic_prefix:=/piper_l -p step:=0.01
+```
+
+For real Piper-L hardware, do not run the simulation launch controller. Run:
+
+```bash
+ros2 run armbycontroller nero_ik_controller.py --ros-args \
+  -p robot_model:=piper_l -p topic_prefix:=/piper_l \
+  -p tip_link:=link6 -p firmware:=default \
+  -p initial_joint_positions:="[0.0, 1.3939753, -1.0158306, 0.0, 1.2799181, 0.0]" \
+  -p robot_min_reach:=0.0 -p robot_max_reach:=0.8738043 \
+  -p execute_motion:=true
+```
+
+Its allowed radial shell is `0.05 ... 0.7738043 m`, retaining the requested
+5 cm inner and 10 cm outer safety margins. Position targets use
+`/piper_l/target_pose`; FK feedback uses `/piper_l/current_pose`.
+
+## Revo2 bridge validation
+
+The Revo2 bridge test node is installed as part of this package:
+
+```bash
+ros2 run armbycontroller revo2_hand_test.py --ros-args \
+  -p can_interface:=can0 -p firmware:=v111 -p execute_motion:=true
+```

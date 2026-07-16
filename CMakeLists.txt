@@ -20,29 +20,22 @@ add_executable(keyboard
   src/keyboard.cpp
 )
 
-add_executable(nero_keyboard
-  src/nero_keyboard.cpp
-)
-
 ament_target_dependencies(keyboard
-  rclcpp
-  std_msgs
-)
-
-ament_target_dependencies(nero_keyboard
   rclcpp
   std_msgs
 )
 
 install(TARGETS
   keyboard
-  nero_keyboard
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(PROGRAMS
   armbycontroller/piper_keyboard_controller.py
   armbycontroller/nero_joint_keyboard_controller.py
+  armbycontroller/nero_ik_controller.py
+  armbycontroller/nero_keyboard_teleop.py
+  armbycontroller/revo2_hand_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -61,8 +54,8 @@ if(BUILD_TESTING)
     test/test_orientation_mapping.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
-  ament_add_pytest_test(nero_joint_logic_test
-    test/test_nero_joint_logic.py
+  ament_add_pytest_test(nero_ik_controller_test
+    test/test_nero_ik_controller.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
 endif()
