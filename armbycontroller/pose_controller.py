@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Solve AGX arm IK with pytracik and send limited joint goals."""
+"""Solve AGX arm poses with pytracik and send limited joint goals."""
 
 from collections import deque
 import json
@@ -14,24 +14,27 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from armbycontroller.agx_ik import AgxIkEngine
-from armbycontroller.agx_ik import create_tracik_solver
-from armbycontroller.agx_ik import IkFailure
-from armbycontroller.agx_ik import quaternion_to_rotation_matrix
-from armbycontroller.agx_ik import resolve_urdf_path
-from armbycontroller.agx_ik import rotation_matrix_to_quaternion
+from armbycontroller.ik_core import AgxIkEngine
+from armbycontroller.ik_core import create_tracik_solver
+from armbycontroller.ik_core import IkFailure
+from armbycontroller.ik_core import prepare_planned_joint_mode
+from armbycontroller.ik_core import quaternion_to_rotation_matrix
+from armbycontroller.ik_core import resolve_firmware_name
+from armbycontroller.ik_core import resolve_urdf_path
+from armbycontroller.ik_core import rotation_matrix_to_quaternion
+from armbycontroller.ik_core import set_joint_acceleration_limits
 
 
-class NeroIkController(Node):
-    """Use pytracik IK/FK for NERO or Piper-L joint-space control."""
+class PoseController(Node):
+    """Use pytracik IK/FK for Nero or Piper-L joint-space control."""
 
     def __init__(self):
-        super().__init__("nero_ik_controller")
+        super().__init__("pose_controller")
 
         self.declare_parameter("robot_model", "nero")
         self.declare_parameter("topic_prefix", "/nero")
         self.declare_parameter("can_interface", "can0")
-        self.declare_parameter("firmware", "v111")
+        self.declare_parameter("firmware", "auto")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("tip_link", "link7")
         self.declare_parameter("urdf_path", "")
@@ -47,6 +50,8 @@ class NeroIkController(Node):
         self.declare_parameter("enable_timeout", 5.0)
         self.declare_parameter("command_period", 0.1)
         self.declare_parameter("joint_max_acceleration", 1.0)
+        self.declare_parameter("joint_acc_timeout", 2.0)
+        self.declare_parameter("position_mode_timeout", 2.0)
         self.declare_parameter("joint_max_velocity", 1.0)
         self.declare_parameter("ik_timeout", 0.01)
         self.declare_parameter("ik_tolerance", 1e-5)
@@ -71,7 +76,9 @@ class NeroIkController(Node):
         prefix = str(self.get_parameter("topic_prefix").value).strip("/")
         self.topic_prefix = f"/{prefix}" if prefix else ""
         self.can_interface = str(self.get_parameter("can_interface").value)
-        self.firmware = str(self.get_parameter("firmware").value).lower()
+        self.firmware = resolve_firmware_name(
+            self.robot_model, self.get_parameter("firmware").value
+        )
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tip_link = str(self.get_parameter("tip_link").value)
         self.urdf_path = resolve_urdf_path(
@@ -95,6 +102,12 @@ class NeroIkController(Node):
         self.command_period = float(self.get_parameter("command_period").value)
         self.joint_max_acceleration = float(
             self.get_parameter("joint_max_acceleration").value
+        )
+        self.joint_acc_timeout = float(
+            self.get_parameter("joint_acc_timeout").value
+        )
+        self.position_mode_timeout = float(
+            self.get_parameter("position_mode_timeout").value
         )
         self.joint_max_velocity = float(
             self.get_parameter("joint_max_velocity").value
@@ -308,18 +321,24 @@ class NeroIkController(Node):
         if not self.execute_motion:
             return
 
-        limits_ok = self.robot.set_joint_acc_limits(
-            joint_index=255,
-            max_joint_acc=self.joint_max_acceleration,
-            timeout=1.0,
+        if self.auto_enable:
+            self._enable_robot()
+        limits_ok, failed_joint = set_joint_acceleration_limits(
+            self.robot,
+            self.joint_count,
+            self.joint_max_acceleration,
+            self.joint_acc_timeout,
         )
         if not limits_ok:
             raise RuntimeError(
-                "failed to set/read back one or more joint acceleration limits"
+                "failed to set/read back acceleration limit for joint "
+                f"{failed_joint}"
             )
         self.robot.set_speed_percent(self.speed_percent)
-        if self.auto_enable:
-            self._enable_robot()
+        if not prepare_planned_joint_mode(
+            self.robot, self.position_mode_timeout
+        ):
+            raise RuntimeError("CAN_CTRL/MOVE_J mode timed out")
 
     def _enable_robot(self):
         deadline = time.monotonic() + self.enable_timeout
@@ -568,11 +587,11 @@ class NeroIkController(Node):
 
 
 def main(args=None):
-    """Run the Nero pytracik controller node."""
+    """Run the shared AGX pose controller node."""
     rclpy.init(args=args)
     node = None
     try:
-        node = NeroIkController()
+        node = PoseController()
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass

@@ -1,3 +1,6 @@
+// Copyright 2026 yang
+// SPDX-License-Identifier: Apache-2.0
+
 #include <fcntl.h>
 #include <linux/input.h>
 #include <unistd.h>
@@ -23,9 +26,8 @@ public:
   KeyboardReader()
   : Node("keyboard_reader")
   {
-    const auto profile = declare_parameter<std::string>("profile", "piper");
     device_ = declare_parameter<std::string>("device", "/dev/input/event3");
-    configure_profile(profile);
+    configure_keys();
 
     fd_ = open(device_.c_str(), O_RDONLY | O_NONBLOCK);
     if (fd_ < 0) {
@@ -36,8 +38,8 @@ public:
     publisher_ = create_publisher<std_msgs::msg::Int32MultiArray>(topic_, qos);
     timer_ = create_wall_timer(period_, std::bind(&KeyboardReader::tick, this));
     RCLCPP_INFO(
-      get_logger(), "%s keyboard: %s -> %s (%zu keys)",
-      profile.c_str(), device_.c_str(), topic_.c_str(), states_.size());
+      get_logger(), "Unified arm keyboard: %s -> %s (%zu keys)",
+      device_.c_str(), topic_.c_str(), states_.size());
   }
 
   ~KeyboardReader() override
@@ -48,33 +50,20 @@ public:
   }
 
 private:
-  void configure_profile(const std::string & profile)
+  void configure_keys()
   {
-    if (profile == "piper") {
-      topic_ = "/keyboard_state";
-      period_ = 1ms;
-      bindings_ = {
-        {KEY_W, 0}, {KEY_S, 1}, {KEY_A, 2}, {KEY_D, 3},
-        {KEY_SPACE, 4}, {KEY_UP, 5}, {KEY_DOWN, 6}, {KEY_LEFT, 7},
-        {KEY_RIGHT, 8}, {KEY_PAGEUP, 9}, {KEY_PAGEDOWN, 10},
-        {KEY_MINUS, 11},
-      };
-      states_.assign(12, 0);
-      return;
-    }
-    if (profile == "nero") {
-      topic_ = "/nero_keyboard_state";
-      period_ = 5ms;
-      bindings_ = {
-        {KEY_1, 0}, {KEY_2, 1}, {KEY_3, 2}, {KEY_4, 3},
-        {KEY_5, 4}, {KEY_6, 5}, {KEY_7, 6}, {KEY_A, 7},
-        {KEY_D, 8}, {KEY_SPACE, 9}, {KEY_E, 10}, {KEY_P, 11},
-        {KEY_W, 12}, {KEY_S, 13}, {KEY_Z, 14}, {KEY_X, 15},
-      };
-      states_.assign(16, 0);
-      return;
-    }
-    throw std::invalid_argument("profile must be 'piper' or 'nero'");
+    topic_ = "/arm_keyboard_state";
+    period_ = 5ms;
+    bindings_ = {
+      {KEY_1, 0}, {KEY_2, 1}, {KEY_3, 2}, {KEY_4, 3},
+      {KEY_5, 4}, {KEY_6, 5}, {KEY_7, 6}, {KEY_A, 7},
+      {KEY_D, 8}, {KEY_SPACE, 9}, {KEY_E, 10}, {KEY_P, 11},
+      {KEY_W, 12}, {KEY_S, 13}, {KEY_Z, 14}, {KEY_X, 15},
+      {KEY_I, 16},
+      {KEY_UP, 17}, {KEY_DOWN, 18}, {KEY_LEFT, 19}, {KEY_RIGHT, 20},
+      {KEY_PAGEUP, 21}, {KEY_PAGEDOWN, 22},
+    };
+    states_.assign(23, 0);
   }
 
   void tick()

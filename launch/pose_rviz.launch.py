@@ -1,4 +1,4 @@
-"""Launch Nero or Piper-L pytracik simulation in RViz."""
+"""Launch Nero or Piper-L pose control simulation in RViz."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -6,13 +6,13 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from armbycontroller.agx_ik import resolve_urdf_path
+from armbycontroller.ik_core import resolve_urdf_path
 
 
 PROFILES = {
     "nero": {
         "topic_prefix": "/nero",
-        "firmware": "v111",
+        "firmware": "auto",
         "tip_link": "link7",
         "initial_joint_positions": [0.0, 1.2, 0.0, 0.8, 0.0, 0.0, 0.0],
         "robot_min_reach": 0.1447354,
@@ -20,7 +20,7 @@ PROFILES = {
     },
     "piper_l": {
         "topic_prefix": "/piper_l",
-        "firmware": "default",
+        "firmware": "auto",
         "tip_link": "link6",
         # link6 is near [0.30, 0.00, 0.30] m with local +Z downward.
         "initial_joint_positions": [
@@ -57,6 +57,7 @@ def _nodes(context):
         "joint_max_acceleration": 1.0,
         "valid_history_size": 10,
         "recovery_pause": 2.0,
+        "pointing_axis_only": False,
         "workspace_limit_enabled": True,
         "workspace_inner_margin": 0.05,
         "workspace_outer_margin": 0.10,
@@ -76,7 +77,7 @@ def _nodes(context):
         ),
         Node(
             package="armbycontroller",
-            executable="nero_ik_controller.py",
+            executable="pose_controller.py",
             name=f"{model}_ik_controller",
             output="screen",
             parameters=[common | profile],

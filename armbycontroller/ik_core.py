@@ -3,10 +3,51 @@
 from dataclasses import dataclass
 import math
 from pathlib import Path
+import time
 
 import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
+
+
+VERIFIED_FIRMWARE = {"nero": "v112", "piper_l": "v188"}
+
+
+def resolve_firmware_name(robot_model, requested_firmware):
+    """Resolve ``auto`` to the firmware verified on the project hardware."""
+    requested = str(requested_firmware).lower()
+    if requested != "auto":
+        return requested
+    return VERIFIED_FIRMWARE[robot_model]
+
+
+def set_joint_acceleration_limits(
+    arm, joint_count, max_joint_acceleration, timeout
+):
+    """Set and verify limits per joint, avoiding Piper's broken 255 ACK."""
+    for joint_index in range(1, joint_count + 1):
+        if not arm.set_joint_acc_limits(
+            joint_index=joint_index,
+            max_joint_acc=max_joint_acceleration,
+            timeout=timeout,
+        ):
+            return False, joint_index
+    return True, None
+
+
+def prepare_planned_joint_mode(arm, timeout, poll_period=0.05):
+    """Enter and confirm CAN joint-position mode before the first target."""
+    arm.set_motion_mode(arm.OPTIONS.MOTION_MODE.J)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = arm.get_arm_status()
+        if status is not None and hasattr(status, "msg"):
+            ctrl_mode = str(getattr(status.msg, "ctrl_mode", ""))
+            move_mode = str(getattr(status.msg, "mode_feedback", ""))
+            if "CAN_CTRL" in ctrl_mode and "MOVE_J" in move_mode:
+                return True
+        time.sleep(poll_period)
+    return False
 
 
 def resolve_urdf_path(parameter_value, robot_model):
@@ -125,6 +166,45 @@ def rotation_matrix_to_quaternion(rotation):
             w = (matrix[1, 0] - matrix[0, 1]) / scale
     quaternion = np.asarray([x, y, z, w], dtype=float)
     return quaternion / np.linalg.norm(quaternion)
+
+
+def make_pointing_quaternion(direction, roll_reference):
+    """Point tool-local +Z along direction with a stable first roll."""
+    tool_z = np.asarray(direction, dtype=float)
+    reference = np.asarray(roll_reference, dtype=float)
+    if tool_z.shape != (3,) or not np.all(np.isfinite(tool_z)):
+        raise ValueError("pointing_direction must contain three finite values")
+    if reference.shape != (3,) or not np.all(np.isfinite(reference)):
+        raise ValueError("roll_reference must contain three finite values")
+    norm = float(np.linalg.norm(tool_z))
+    if norm < 1e-12:
+        raise ValueError("pointing_direction must be non-zero")
+    tool_z /= norm
+    tool_x = reference - np.dot(reference, tool_z) * tool_z
+    if np.linalg.norm(tool_x) < 1e-12:
+        fallback = np.zeros(3)
+        fallback[int(np.argmin(np.abs(tool_z)))] = 1.0
+        tool_x = fallback - np.dot(fallback, tool_z) * tool_z
+    tool_x /= np.linalg.norm(tool_x)
+    rotation = np.column_stack((tool_x, np.cross(tool_z, tool_x), tool_z))
+    return rotation_matrix_to_quaternion(rotation)
+
+
+def increment_tool_orientation(rotation, pitch, yaw, roll):
+    """Apply base-frame pitch/yaw and tool-frame roll increments."""
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    cr, sr = math.cos(roll), math.sin(roll)
+    pitch_matrix = np.array(
+        [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]]
+    )
+    yaw_matrix = np.array(
+        [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]]
+    )
+    roll_matrix = np.array(
+        [[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]]
+    )
+    return yaw_matrix @ pitch_matrix @ rotation @ roll_matrix
 
 
 def rotation_error_angle(actual, target):

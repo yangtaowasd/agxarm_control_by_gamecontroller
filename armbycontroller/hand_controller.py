@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test a BrainCo Revo2 Touch hand through the Nero CAN bridge."""
+"""Control a BrainCo Revo2 Touch hand through an AGX arm bridge."""
 
 import json
 import time
@@ -40,7 +40,7 @@ class Revo2HandTest(Node):
     """Control and monitor Revo2 Touch through pyAgxArm's Nero bridge."""
 
     def __init__(self):
-        super().__init__("revo2_hand_test")
+        super().__init__("hand_controller")
 
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "v111")
