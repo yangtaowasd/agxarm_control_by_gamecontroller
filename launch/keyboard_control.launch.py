@@ -14,6 +14,10 @@ COMMON = {
     "impedance_enabled": "false",
     "mit_command_rate": "100.0",
     "mit_handover_duration": "0.5",
+    "mit_gravity_compensation_enabled": "true",
+    "mit_gravity_scale": "1.0",
+    "mit_gravity_ramp_duration": "1.0",
+    "mit_gravity_torque_limit": "10.0",
     "mit_damping_transition_velocity": "0.3",
     "mit_damping_torque_limit": "1.0",
     "joint_acc_timeout": "2.0",
@@ -21,7 +25,11 @@ COMMON = {
     "reset_emergency_stop_on_start": "true",
     "emergency_reset_timeout": "5.0",
 }
-OPTIONAL = {"mit_kd_max": ""}
+OPTIONAL = {
+    "mit_kd_max": "",
+    "urdf_path": "",
+    "gravity_urdf_path": "",
+}
 STARTUP = {
     "move_home_on_start": "true",
     "startup_home_timeout": "30.0",

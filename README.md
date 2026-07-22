@@ -63,6 +63,18 @@ Piper-L takeover `Kp` is 10 on joints 2/3/5 and 6 on joints 1/4/6.
 Only stiffness uses this takeover: speed-adaptive damping and its torque limit
 apply from the first frame, and `Kd` is never switched to an uncapped high value.
 
+MIT mode also reads the bundled, unmodified Nero or Piper-L URDF and computes
+pose-dependent gravity compensation from measured joint angles at every tick.
+Piper-L uses its gripper model and Nero uses its Revo2 left-hand model. The
+accessory joints are evaluated at their URDF zero positions and only the arm's
+6/7 joints receive MIT commands. Compensation ramps in over one second and is
+limited to 10 N·m per arm joint;
+`mit_feedforward` is an additional residual calibration bias and defaults to
+zero. Set `mit_gravity_compensation_enabled:=false` to disable the model,
+`mit_gravity_scale` within `[0, 1]` to reduce its contribution, or tune
+`mit_gravity_ramp_duration` and `mit_gravity_torque_limit`. The default gravity
+vector is `[0, 0, -9.80665]` in `base_link`, assuming an upright base.
+
 Run Nero:
 
 ```bash

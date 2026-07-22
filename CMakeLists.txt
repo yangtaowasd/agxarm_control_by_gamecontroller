@@ -44,6 +44,11 @@ install(DIRECTORY
   PATTERN "__pycache__" EXCLUDE
 )
 
+install(DIRECTORY
+  agx_arm_urdf
+  DESTINATION share/${PROJECT_NAME}
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)

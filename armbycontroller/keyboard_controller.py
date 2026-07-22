@@ -5,6 +5,7 @@ import time
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -19,6 +20,7 @@ from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
 from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
+from armbycontroller.gravity_compensation import UrdfGravityModel
 from armbycontroller.ik_core import AgxIkEngine
 from armbycontroller.ik_core import create_tracik_solver
 from armbycontroller.ik_core import IkFailure
@@ -167,7 +169,9 @@ MIT_GAIN_PROFILES = {
         "kp": [0.3, 0.5, 0.5, 0.5, 1.0, 0.3],
         "kd": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
         "kd_max": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
-        "t_ff": [0.0, 3.0, -4.0, 0.0, -1.0, 0.0],
+        # Dynamic URDF gravity compensation supplies the nominal torque.
+        # This remains a residual calibration bias and defaults to zero.
+        "t_ff": [0.0] * 6,
         "handover_kp": [6.0, 10.0, 10.0, 6.0, 10.0, 6.0],
     },
 }
@@ -224,6 +228,23 @@ def blend_handover_kp(configured, handover, elapsed, duration):
     blend = float(np.clip(float(elapsed) / float(duration), 0.0, 1.0))
     blend = blend * blend * (3.0 - 2.0 * blend)
     return (handover + blend * (configured - handover)).tolist()
+
+
+def bounded_gravity_feedforward(
+    gravity_torque, residual_torque, elapsed, duration, scale, torque_limit
+):
+    """Ramp and bound URDF gravity torque plus a residual calibration bias."""
+    gravity_torque = np.asarray(gravity_torque, dtype=float)
+    residual_torque = np.asarray(residual_torque, dtype=float)
+    torque_limit = np.asarray(torque_limit, dtype=float)
+    blend = float(np.clip(float(elapsed) / float(duration), 0.0, 1.0))
+    blend = blend * blend * (3.0 - 2.0 * blend)
+    gravity_torque = np.clip(
+        float(scale) * blend * gravity_torque, -torque_limit, torque_limit
+    )
+    return np.clip(
+        residual_torque + gravity_torque, -torque_limit, torque_limit
+    )
 
 
 def bounded_velocity_damping(
@@ -318,6 +339,14 @@ class ArmKeyboardController(Node):
         self.declare_parameter(
             "mit_feedforward", default_mit_feedforward_values
         )
+        self.declare_parameter("mit_gravity_compensation_enabled", True)
+        self.declare_parameter("gravity_urdf_path", "")
+        self.declare_parameter("mit_gravity_scale", 1.0)
+        self.declare_parameter("mit_gravity_ramp_duration", 1.0)
+        self.declare_parameter(
+            "mit_gravity_torque_limit", [10.0], scalar_or_array
+        )
+        self.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
         self.declare_parameter("mit_max_joint_step", 0.05)
         self.declare_parameter("mit_handover_duration", 0.5)
         self.declare_parameter("mit_handover_kp", default_handover_kp)
@@ -435,6 +464,26 @@ class ArmKeyboardController(Node):
             self.joint_count,
             "mit_feedforward",
         )
+        self.mit_gravity_compensation_enabled = bool(
+            self.get_parameter("mit_gravity_compensation_enabled").value
+        )
+        self.gravity_urdf_path = str(
+            self.get_parameter("gravity_urdf_path").value
+        )
+        self.mit_gravity_scale = float(
+            self.get_parameter("mit_gravity_scale").value
+        )
+        self.mit_gravity_ramp_duration = float(
+            self.get_parameter("mit_gravity_ramp_duration").value
+        )
+        self.mit_gravity_torque_limit = expand_joint_values(
+            self.get_parameter("mit_gravity_torque_limit").value,
+            self.joint_count,
+            "mit_gravity_torque_limit",
+        )
+        self.gravity_vector = np.asarray(
+            self.get_parameter("gravity_vector").value, dtype=float
+        )
         self.mit_max_joint_step = float(
             self.get_parameter("mit_max_joint_step").value
         )
@@ -477,6 +526,14 @@ class ArmKeyboardController(Node):
             raise ValueError("MIT rate and maximum joint step must be > 0")
         if self.mit_handover_duration <= 0.0:
             raise ValueError("mit_handover_duration must be > 0")
+        if self.mit_gravity_ramp_duration <= 0.0:
+            raise ValueError("mit_gravity_ramp_duration must be > 0")
+        if not 0.0 <= self.mit_gravity_scale <= 1.0:
+            raise ValueError("mit_gravity_scale must be in [0, 1]")
+        if self.gravity_vector.shape != (3,) or not np.all(
+            np.isfinite(self.gravity_vector)
+        ):
+            raise ValueError("gravity_vector must contain three finite values")
         if any(not 0.0 <= value <= 500.0 for value in self.mit_kp):
             raise ValueError("mit_kp values must be in [0, 500]")
         if any(not 0.0 <= value <= 500.0 for value in self.mit_handover_kp):
@@ -497,8 +554,15 @@ class ArmKeyboardController(Node):
             for value in self.mit_damping_torque_limit
         ):
             raise ValueError("MIT damping torque limits must be in (0, 8] N·m")
-        if any(abs(value) > 8.0 for value in self.mit_feedforward):
-            raise ValueError("mit_feedforward values must be in [-8, 8] N·m")
+        if any(abs(value) > 10.0 for value in self.mit_feedforward):
+            raise ValueError("mit_feedforward values must be in [-10, 10] N·m")
+        if any(
+            not 0.0 < value <= 10.0
+            for value in self.mit_gravity_torque_limit
+        ):
+            raise ValueError(
+                "MIT gravity torque limits must be in (0, 10] N·m"
+            )
 
         firmwares = self.profile["firmwares"]
         self.firmware = firmwares.get(self.firmware_name)
@@ -517,6 +581,29 @@ class ArmKeyboardController(Node):
         urdf_path = resolve_urdf_path(
             str(self.get_parameter("urdf_path").value), self.robot_model
         )
+        self.gravity_model = None
+        if self.mit_gravity_compensation_enabled:
+            gravity_urdf_path = (
+                Path(self.gravity_urdf_path).expanduser().resolve()
+                if self.gravity_urdf_path
+                else urdf_path.parent / {
+                    "piper_l": "piper_l_with_gripper_description.xacro",
+                    "nero": "nero_with_left_revo2_description.xacro",
+                }[self.robot_model]
+            )
+            self.gravity_model = UrdfGravityModel(
+                gravity_urdf_path,
+                self.base_frame,
+                self.tip_link,
+                self.joint_count,
+                self.gravity_vector,
+            )
+            self.get_logger().info(
+                "URDF gravity compensation ready: "
+                f"{gravity_urdf_path}; "
+                f"modeled_mass={self.gravity_model.modeled_mass:.3f} kg; "
+                f"joints={self.gravity_model.movable_joint_names}"
+            )
         self.ik_solver = create_tracik_solver(
             urdf_path,
             self.base_frame,
@@ -939,6 +1026,39 @@ class ArmKeyboardController(Node):
                 self.mit_damping_transition_velocity,
                 self.mit_damping_torque_limit,
             )
+            feedforward = np.asarray(self.mit_feedforward, dtype=float)
+            gravity_model = getattr(self, "gravity_model", None)
+            if gravity_model is not None:
+                joints = None
+                try:
+                    joints = extract_joint_angles(
+                        self.arm.get_joint_angles(), self.joint_count
+                    )
+                except Exception:
+                    pass
+                if joints is None:
+                    self.get_logger().warning(
+                        "joint feedback unavailable; URDF gravity torque is zero",
+                        throttle_duration_sec=1.0,
+                    )
+                else:
+                    gravity_torque = gravity_model.compensation(joints)
+                    feedforward = bounded_gravity_feedforward(
+                        gravity_torque,
+                        self.mit_feedforward,
+                        handover_elapsed,
+                        self.mit_gravity_ramp_duration,
+                        self.mit_gravity_scale,
+                        self.mit_gravity_torque_limit,
+                    )
+                    self.get_logger().info(
+                        "URDF gravity t_ff raw=%s commanded=%s N·m"
+                        % (
+                            np.round(gravity_torque, 3).tolist(),
+                            np.round(feedforward, 3).tolist(),
+                        ),
+                        throttle_duration_sec=2.0,
+                    )
             for index, position in enumerate(self.jog.target_joints):
                 self.arm.move_mit(
                     joint_index=index + 1,
@@ -946,7 +1066,7 @@ class ArmKeyboardController(Node):
                     v_des=0.0,
                     kp=kp_values[index],
                     kd=float(adaptive_kd[index]),
-                    t_ff=float(self.mit_feedforward[index]),
+                    t_ff=float(feedforward[index]),
                 )
         except Exception as exc:
             self.get_logger().error(f"MIT command failed: {exc}")

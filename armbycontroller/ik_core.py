@@ -57,6 +57,18 @@ def resolve_urdf_path(parameter_value, robot_model):
 
     candidates = []
     try:
+        share = Path(get_package_share_directory("armbycontroller"))
+        candidates.append(
+            share / "agx_arm_urdf" / robot_model / "urdf"
+            / f"{robot_model}_description.urdf"
+        )
+    except PackageNotFoundError:
+        pass
+    candidates.append(
+        Path(__file__).resolve().parents[1] / "agx_arm_urdf"
+        / robot_model / "urdf" / f"{robot_model}_description.urdf"
+    )
+    try:
         share = Path(get_package_share_directory("agx_arm_description"))
         candidates.append(
             share / "agx_arm_urdf" / robot_model / "urdf"

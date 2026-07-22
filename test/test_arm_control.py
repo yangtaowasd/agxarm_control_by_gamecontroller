@@ -20,9 +20,11 @@ from armbycontroller.ik_core import rotation_matrix_to_quaternion
 from armbycontroller.ik_core import resolve_firmware_name
 from armbycontroller.ik_core import set_joint_acceleration_limits
 from armbycontroller.ik_core import solve_pointing_ik
+from armbycontroller.gravity_compensation import UrdfGravityModel
 from armbycontroller.keyboard_controller import ArmJointJogState
 from armbycontroller.keyboard_controller import ArmKeyboardController
 from armbycontroller.keyboard_controller import blend_handover_kp
+from armbycontroller.keyboard_controller import bounded_gravity_feedforward
 from armbycontroller.keyboard_controller import bounded_velocity_damping
 from armbycontroller.keyboard_controller import expand_joint_values
 from armbycontroller.keyboard_controller import default_mit_gains
@@ -35,6 +37,115 @@ from armbycontroller.keyboard_controller import KEY_INCREASE
 from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
 from armbycontroller.pose_controller import PoseController
+
+
+def _write_test_urdf(tmp_path, body):
+    path = tmp_path / "test.urdf"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_urdf_gravity_model_compensates_one_link_pendulum(tmp_path):
+    urdf = _write_test_urdf(
+        tmp_path,
+        """<robot name="pendulum">
+        <link name="base"/>
+        <link name="tip"><inertial><origin xyz="1 0 0"/>
+          <mass value="2"/><inertia ixx="1" ixy="0" ixz="0"
+          iyy="1" iyz="0" izz="1"/></inertial></link>
+        <joint name="joint1" type="revolute"><parent link="base"/>
+          <child link="tip"/><axis xyz="0 1 0"/>
+          <limit lower="-3.14" upper="3.14" effort="100" velocity="1"/>
+        </joint></robot>""",
+    )
+    model = UrdfGravityModel(urdf, "base", "tip", 1)
+
+    assert model.movable_joint_names == ["joint1"]
+    assert model.compensation([0.0]) == pytest.approx([-2.0 * 9.80665])
+    assert model.compensation([math.pi / 2.0]) == pytest.approx([0.0], abs=1e-9)
+
+
+def test_urdf_gravity_model_includes_all_downstream_masses(tmp_path):
+    urdf = _write_test_urdf(
+        tmp_path,
+        """<robot name="two_link">
+        <link name="base"/>
+        <link name="middle"><inertial><origin xyz="1 0 0"/>
+          <mass value="1"/><inertia ixx="1" ixy="0" ixz="0"
+          iyy="1" iyz="0" izz="1"/></inertial></link>
+        <link name="tip"><inertial><origin xyz="1 0 0"/>
+          <mass value="1"/><inertia ixx="1" ixy="0" ixz="0"
+          iyy="1" iyz="0" izz="1"/></inertial></link>
+        <joint name="joint1" type="revolute"><parent link="base"/>
+          <child link="middle"/><axis xyz="0 1 0"/></joint>
+        <joint name="joint2" type="revolute"><origin xyz="1 0 0"/>
+          <parent link="middle"/><child link="tip"/><axis xyz="0 1 0"/>
+        </joint></robot>""",
+    )
+    model = UrdfGravityModel(urdf, "base", "tip", 2)
+
+    expected = 9.80665
+    assert model.compensation([0.0, 0.0]) == pytest.approx(
+        [-3.0 * expected, -1.0 * expected]
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "joint_count", "tip_link"),
+    [("nero", 7, "link7"), ("piper_l", 6, "link6")],
+)
+def test_copied_arm_urdf_produces_finite_gravity_torque(
+    model_name, joint_count, tip_link
+):
+    urdf = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf" / model_name / "urdf"
+        / f"{model_name}_description.urdf"
+    )
+    model = UrdfGravityModel(urdf, "base_link", tip_link, joint_count)
+    torque = model.compensation(np.zeros(joint_count))
+
+    assert torque.shape == (joint_count,)
+    assert np.all(np.isfinite(torque))
+    # Both bases rotate around gravity, so joint 1 needs no gravity torque.
+    assert torque[0] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "joint_count", "tip_link", "accessory_file", "added_mass"),
+    [
+        (
+            "piper_l", 6, "link6",
+            "piper_l_with_gripper_description.xacro", 0.54,
+        ),
+        (
+            "nero", 7, "link7",
+            "nero_with_left_revo2_description.xacro", 0.43771096,
+        ),
+    ],
+)
+def test_accessory_xacro_adds_payload_mass_to_arm_gravity_model(
+    model_name, joint_count, tip_link, accessory_file, added_mass
+):
+    root = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf" / model_name / "urdf"
+    )
+    bare = UrdfGravityModel(
+        root / f"{model_name}_description.urdf",
+        "base_link", tip_link, joint_count,
+    )
+    equipped = UrdfGravityModel(
+        root / accessory_file, "base_link", tip_link, joint_count,
+    )
+    bare_torque = bare.compensation(np.zeros(joint_count))
+    equipped_torque = equipped.compensation(np.zeros(joint_count))
+
+    assert equipped.movable_joint_names == [
+        f"joint{index}" for index in range(1, joint_count + 1)
+    ]
+    assert equipped.modeled_mass - bare.modeled_mass == pytest.approx(added_mass)
+    assert not np.allclose(equipped_torque, bare_torque)
 
 
 def test_quaternion_conversion_normalizes_input():
@@ -327,9 +438,7 @@ def test_piper_mit_gains_are_independent_per_joint():
 
     assert kp == [0.3, 0.5, 0.5, 0.5, 1.0, 0.3]
     assert kd == [0.01] * 6
-    assert default_mit_feedforward("piper_l") == [
-        0.0, 3.0, -3.5, 0.0, -1.0, 0.0
-    ]
+    assert default_mit_feedforward("piper_l") == [0.0] * 6
     assert len(set(kp)) > 1
 
 
@@ -354,6 +463,22 @@ def test_mit_handover_starts_stiff_and_smoothly_reaches_soft_kp():
     assert blend_handover_kp([0.4], [10.0], 0.0, 0.5) == [10.0]
     assert blend_handover_kp([0.4], [10.0], 0.25, 0.5) == pytest.approx([5.2])
     assert blend_handover_kp([0.4], [10.0], 0.5, 0.5) == pytest.approx([0.4])
+
+
+def test_gravity_feedforward_ramps_and_limits_each_joint():
+    gravity = [4.0, -10.0]
+    residual = [0.2, -0.1]
+    limits = [5.0, 5.0]
+
+    assert bounded_gravity_feedforward(
+        gravity, residual, 0.0, 1.0, 1.0, limits
+    ) == pytest.approx(residual)
+    assert bounded_gravity_feedforward(
+        gravity, residual, 0.5, 1.0, 1.0, limits
+    ) == pytest.approx([2.2, -5.0])
+    assert bounded_gravity_feedforward(
+        gravity, residual, 1.0, 1.0, 1.0, limits
+    ) == pytest.approx([4.2, -5.0])
 
 
 def test_mit_tick_sends_one_impedance_command_per_joint():
@@ -393,6 +518,70 @@ def test_mit_tick_sends_one_impedance_command_per_joint():
     ]
     assert all(item["kp"] == 10.0 for item in controller.arm.commands)
     assert all(0.8 < item["kd"] < 1.0 for item in controller.arm.commands)
+
+
+def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.commands = []
+
+        def move_mit(self, **command):
+            self.commands.append(command)
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
+
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=[0.25, -0.5])
+
+    class FakeGravityModel:
+        def __init__(self):
+            self.received = None
+
+        def compensation(self, joints):
+            self.received = list(joints)
+            return np.array([2.0, -3.0])
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = True
+    controller.emergency_stopped = False
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.jog.sync_target([0.8, 0.8])
+    controller.mit_kp = [1.0] * 2
+    controller.mit_handover_kp = [1.0] * 2
+    controller.mit_handover_started = float("-inf")
+    controller.mit_handover_duration = 0.5
+    controller.mit_kd = [0.2] * 2
+    controller.mit_kd_max = [0.2] * 2
+    controller.mit_damping_transition_velocity = [0.3] * 2
+    controller.mit_damping_torque_limit = [1.0] * 2
+    controller.mit_feedforward = [0.0] * 2
+    controller.gravity_model = FakeGravityModel()
+    controller.mit_gravity_ramp_duration = 1.0
+    controller.mit_gravity_scale = 1.0
+    controller.mit_gravity_torque_limit = [6.0] * 2
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    controller.mit_tick()
+
+    assert controller.gravity_model.received == [0.25, -0.5]
+    assert [command["t_ff"] for command in controller.arm.commands] == [
+        2.0, -3.0
+    ]
 
 
 def test_ik_joint_target_is_consumed_only_by_mit_backend(monkeypatch):
