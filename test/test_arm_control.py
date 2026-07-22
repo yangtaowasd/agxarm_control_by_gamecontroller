@@ -26,6 +26,7 @@ from armbycontroller.keyboard_controller import blend_handover_kp
 from armbycontroller.keyboard_controller import bounded_velocity_damping
 from armbycontroller.keyboard_controller import expand_joint_values
 from armbycontroller.keyboard_controller import default_mit_gains
+from armbycontroller.keyboard_controller import default_mit_feedforward
 from armbycontroller.keyboard_controller import KEY_COUNT
 from armbycontroller.keyboard_controller import KEY_DECREASE
 from armbycontroller.keyboard_controller import KEY_ESTOP
@@ -324,11 +325,12 @@ def test_mit_gains_expand_from_scalar_and_validate_joint_count():
 def test_piper_mit_gains_are_independent_per_joint():
     kp, kd = default_mit_gains("piper_l")
 
-    assert kp == [0.2, 0.4, 0.3, 0.4, 0.2, 0.4]
-    assert kd == [0.12, 0.18, 0.15, 0.15, 0.12, 0.15]
-    assert [kp[index] for index in (1, 2, 4)] == [0.4, 0.3, 0.2]
+    assert kp == [0.3, 0.5, 0.5, 0.5, 1.0, 0.3]
+    assert kd == [0.01] * 6
+    assert default_mit_feedforward("piper_l") == [
+        0.0, 3.0, -3.5, 0.0, -1.0, 0.0
+    ]
     assert len(set(kp)) > 1
-    assert len(set(kd)) > 1
 
 
 def test_velocity_damping_is_soft_at_low_speed_and_bounded_at_high_speed():

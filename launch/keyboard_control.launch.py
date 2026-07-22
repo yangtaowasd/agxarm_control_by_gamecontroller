@@ -14,7 +14,6 @@ COMMON = {
     "impedance_enabled": "false",
     "mit_command_rate": "100.0",
     "mit_handover_duration": "0.5",
-    "mit_kd_max": "0.6",
     "mit_damping_transition_velocity": "0.3",
     "mit_damping_torque_limit": "1.0",
     "joint_acc_timeout": "2.0",
@@ -22,6 +21,7 @@ COMMON = {
     "reset_emergency_stop_on_start": "true",
     "emergency_reset_timeout": "5.0",
 }
+OPTIONAL = {"mit_kd_max": ""}
 STARTUP = {
     "move_home_on_start": "true",
     "startup_home_timeout": "30.0",
@@ -35,6 +35,13 @@ def _nodes(context):
     if model not in MODELS:
         raise ValueError("robot_model must be nero or piper_l")
     parameter_names = [*COMMON, *STARTUP]
+    controller_parameters = {
+        "robot_model": model,
+        **{name: LaunchConfiguration(name) for name in parameter_names},
+    }
+    for name in OPTIONAL:
+        if LaunchConfiguration(name).perform(context).strip():
+            controller_parameters[name] = LaunchConfiguration(name)
     return [
         Node(
             package="armbycontroller", executable="keyboard",
@@ -44,12 +51,7 @@ def _nodes(context):
         Node(
             package="armbycontroller", executable="keyboard_controller.py",
             name="arm_keyboard_controller", output="screen",
-            parameters=[{
-                "robot_model": model,
-                **{
-                    name: LaunchConfiguration(name) for name in parameter_names
-                },
-            }],
+            parameters=[controller_parameters],
         ),
     ]
 
@@ -58,6 +60,7 @@ def generate_launch_description():
     arguments = {"robot_model": "nero", "device": "/dev/input/event3"}
     arguments.update(COMMON)
     arguments.update(STARTUP)
+    arguments.update(OPTIONAL)
     return LaunchDescription([
         *[
             DeclareLaunchArgument(name, default_value=value)

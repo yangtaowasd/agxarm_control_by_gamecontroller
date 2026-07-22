@@ -9,6 +9,7 @@ from typing import Sequence
 
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -159,11 +160,14 @@ MIT_GAIN_PROFILES = {
     "nero": {
         "kp": [1.0] * 7,
         "kd": [0.2] * 7,
+        "t_ff": [0.0] * 7,
         "handover_kp": [10.0] * 7,
     },
     "piper_l": {
-        "kp": [0.2, 0.4, 0.3, 0.4, 0.2, 0.4],
-        "kd": [0.12, 0.18, 0.15, 0.15, 0.12, 0.15],
+        "kp": [0.3, 0.5, 0.5, 0.5, 1.0, 0.3],
+        "kd": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
+        "kd_max": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
+        "t_ff": [0.0, 3.0, -4.0, 0.0, -1.0, 0.0],
         "handover_kp": [6.0, 10.0, 10.0, 6.0, 10.0, 6.0],
     },
 }
@@ -178,6 +182,11 @@ def default_mit_gains(robot_model):
 def default_mit_handover_kp(robot_model):
     """Return per-joint stiffness used while entering MIT mode."""
     return list(MIT_GAIN_PROFILES[robot_model]["handover_kp"])
+
+
+def default_mit_feedforward(robot_model):
+    """Return per-joint MIT feedforward torque for a supported arm."""
+    return list(MIT_GAIN_PROFILES[robot_model]["t_ff"])
 
 
 def extract_joint_angles(result, joint_count):
@@ -251,8 +260,13 @@ class ArmKeyboardController(Node):
         ).lower()
         gain_model = declared_model if declared_model in MODEL_PROFILES else "nero"
         default_mit_kp, default_mit_kd = default_mit_gains(gain_model)
-        default_mit_kd_max = [3.0 * value for value in default_mit_kd]
+        default_mit_kd_max = list(
+            MIT_GAIN_PROFILES[gain_model].get(
+                "kd_max", [3.0 * value for value in default_mit_kd]
+            )
+        )
         default_handover_kp = default_mit_handover_kp(gain_model)
+        default_mit_feedforward_values = default_mit_feedforward(gain_model)
         self.declare_parameter("keyboard_topic", "/arm_keyboard_state")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
@@ -291,10 +305,19 @@ class ArmKeyboardController(Node):
         self.declare_parameter("mit_command_rate", 100.0)
         self.declare_parameter("mit_kp", default_mit_kp)
         self.declare_parameter("mit_kd", default_mit_kd)
-        self.declare_parameter("mit_kd_max", default_mit_kd_max)
-        self.declare_parameter("mit_damping_transition_velocity", [0.3])
-        self.declare_parameter("mit_damping_torque_limit", [1.0])
-        self.declare_parameter("mit_feedforward", [0.0])
+        scalar_or_array = ParameterDescriptor(dynamic_typing=True)
+        self.declare_parameter(
+            "mit_kd_max", default_mit_kd_max, scalar_or_array
+        )
+        self.declare_parameter(
+            "mit_damping_transition_velocity", [0.3], scalar_or_array
+        )
+        self.declare_parameter(
+            "mit_damping_torque_limit", [1.0], scalar_or_array
+        )
+        self.declare_parameter(
+            "mit_feedforward", default_mit_feedforward_values
+        )
         self.declare_parameter("mit_max_joint_step", 0.05)
         self.declare_parameter("mit_handover_duration", 0.5)
         self.declare_parameter("mit_handover_kp", default_handover_kp)
