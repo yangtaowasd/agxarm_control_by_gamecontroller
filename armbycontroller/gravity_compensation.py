@@ -8,6 +8,20 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 
+NERO_MOUNT_GRAVITY = {
+    "horizontal": (0.0, 0.0, -9.80665),
+    "side": (-9.80665, 0.0, 0.0),
+}
+
+
+def nero_mount_gravity(mount):
+    """Return base-frame gravity for one explicit Nero mounting choice."""
+    name = str(mount).lower()
+    if name not in NERO_MOUNT_GRAVITY:
+        raise ValueError("nero_mount must be horizontal or side")
+    return list(NERO_MOUNT_GRAVITY[name])
+
+
 def _vector(element, attribute, default):
     if element is None or attribute not in element.attrib:
         return np.asarray(default, dtype=float)

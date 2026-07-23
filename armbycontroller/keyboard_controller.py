@@ -164,16 +164,13 @@ MIT_GAIN_PROFILES = {
         "kp": [1.0] * 7,
         "kd": [0.2] * 7,
         "t_ff": [0.0] * 7,
-        "handover_kp": [10.0] * 7,
     },
     "piper_l": {
         "kp": [0.3, 0.5, 0.5, 0.5, 1.0, 0.3],
         "kd": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
-        "kd_max": [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
         # Dynamic URDF inverse dynamics supplies the nominal torque.
         # This remains a residual calibration bias and defaults to zero.
         "t_ff": [0.0] * 6,
-        "handover_kp": [6.0, 10.0, 10.0, 6.0, 10.0, 6.0],
     },
 }
 
@@ -182,11 +179,6 @@ def default_mit_gains(robot_model):
     """Return independent per-joint MIT gains for a supported arm."""
     profile = MIT_GAIN_PROFILES[robot_model]
     return list(profile["kp"]), list(profile["kd"])
-
-
-def default_mit_handover_kp(robot_model):
-    """Return per-joint stiffness used while entering MIT mode."""
-    return list(MIT_GAIN_PROFILES[robot_model]["handover_kp"])
 
 
 def default_mit_feedforward(robot_model):
@@ -222,30 +214,62 @@ def expand_joint_values(values, joint_count, name):
     return result
 
 
-def blend_handover_kp(configured, handover, elapsed, duration):
-    """Smoothly reduce takeover stiffness to the configured soft stiffness."""
-    configured = np.asarray(configured, dtype=float)
-    handover = np.asarray(handover, dtype=float)
-    blend = float(np.clip(float(elapsed) / float(duration), 0.0, 1.0))
-    blend = blend * blend * (3.0 - 2.0 * blend)
-    return (handover + blend * (configured - handover)).tolist()
-
-
-def bounded_gravity_feedforward(
-    gravity_torque, residual_torque, elapsed, duration, scale, torque_limit
+def bounded_model_feedforward(
+    model_torque, residual_torque, scale, torque_limit
 ):
-    """Ramp and bound URDF model torque plus a residual calibration bias."""
-    gravity_torque = np.asarray(gravity_torque, dtype=float)
+    """Scale and bound URDF model torque plus a residual calibration bias."""
+    model_torque = np.asarray(model_torque, dtype=float)
     residual_torque = np.asarray(residual_torque, dtype=float)
     torque_limit = np.asarray(torque_limit, dtype=float)
-    blend = float(np.clip(float(elapsed) / float(duration), 0.0, 1.0))
-    blend = blend * blend * (3.0 - 2.0 * blend)
-    gravity_torque = np.clip(
-        float(scale) * blend * gravity_torque, -torque_limit, torque_limit
+    model_torque = np.clip(
+        float(scale) * model_torque, -torque_limit, torque_limit
     )
     return np.clip(
-        residual_torque + gravity_torque, -torque_limit, torque_limit
+        residual_torque + model_torque, -torque_limit, torque_limit
     )
+
+
+def limit_mit_combined_torque(
+    feedforward, reference_position, reference_velocity,
+    measured_position, measured_velocity, kp, kd, torque_limit,
+):
+    """Adjust t_ff to keep the estimated MIT reference torque bounded."""
+    feedforward = np.asarray(feedforward, dtype=float)
+    reference_position = np.asarray(reference_position, dtype=float)
+    reference_velocity = np.asarray(reference_velocity, dtype=float)
+    measured_position = np.asarray(measured_position, dtype=float)
+    measured_velocity = np.asarray(measured_velocity, dtype=float)
+    kp = np.asarray(kp, dtype=float)
+    kd = np.asarray(kd, dtype=float)
+    torque_limit = np.asarray(torque_limit, dtype=float)
+    shapes = {
+        values.shape for values in (
+            feedforward, reference_position, reference_velocity,
+            measured_position, measured_velocity, kp, kd, torque_limit,
+        )
+    }
+    if len(shapes) != 1 or not all(
+        np.all(np.isfinite(values))
+        for values in (
+            feedforward, reference_position, reference_velocity,
+            measured_position, measured_velocity, kp, kd, torque_limit,
+        )
+    ) or np.any(torque_limit <= 0.0):
+        raise ValueError("MIT torque limiter inputs must be finite equal arrays")
+    feedback = (
+        kp * (reference_position - measured_position)
+        + kd * (reference_velocity - measured_velocity)
+    )
+    desired_total = feedback + feedforward
+    bounded_total = np.clip(desired_total, -torque_limit, torque_limit)
+    # Keep the feed-forward channel itself inside the same safe envelope. If
+    # the PD term alone exceeds twice the limit, exact cancellation is not
+    # possible without changing Kp/Kd; estimated_total exposes that condition.
+    bounded_feedforward = np.clip(
+        bounded_total - feedback, -torque_limit, torque_limit
+    )
+    estimated_total = feedback + bounded_feedforward
+    return bounded_feedforward, estimated_total
 
 
 class JointTrajectoryState:
@@ -331,30 +355,6 @@ class JointTrajectoryState:
         )
 
 
-def bounded_velocity_damping(
-    velocity, damping_min, damping_max, transition_velocity, torque_limit
-):
-    """Return an equivalent Kd for smooth speed damping with torque limits."""
-    velocity = np.asarray(velocity, dtype=float)
-    damping_min = np.asarray(damping_min, dtype=float)
-    damping_max = np.asarray(damping_max, dtype=float)
-    transition_velocity = np.asarray(transition_velocity, dtype=float)
-    torque_limit = np.asarray(torque_limit, dtype=float)
-    speed_squared = np.square(np.abs(velocity))
-    transition_squared = np.square(transition_velocity)
-    damping = damping_min + (damping_max - damping_min) * (
-        speed_squared / (transition_squared + speed_squared)
-    )
-    normalized_torque = damping * velocity / torque_limit
-    damping_torque = torque_limit * np.tanh(normalized_torque)
-    return np.divide(
-        damping_torque,
-        velocity,
-        out=damping_min.copy(),
-        where=np.abs(velocity) > 1e-9,
-    )
-
-
 class ArmKeyboardController(Node):
     def __init__(self):
         super().__init__("arm_keyboard_controller")
@@ -365,12 +365,6 @@ class ArmKeyboardController(Node):
         ).lower()
         gain_model = declared_model if declared_model in MODEL_PROFILES else "nero"
         default_mit_kp, default_mit_kd = default_mit_gains(gain_model)
-        default_mit_kd_max = list(
-            MIT_GAIN_PROFILES[gain_model].get(
-                "kd_max", [3.0 * value for value in default_mit_kd]
-            )
-        )
-        default_handover_kp = default_mit_handover_kp(gain_model)
         default_mit_feedforward_values = default_mit_feedforward(gain_model)
         self.declare_parameter("keyboard_topic", "/arm_keyboard_state")
         self.declare_parameter("can_interface", "can0")
@@ -412,21 +406,11 @@ class ArmKeyboardController(Node):
         self.declare_parameter("mit_kd", default_mit_kd)
         scalar_or_array = ParameterDescriptor(dynamic_typing=True)
         self.declare_parameter(
-            "mit_kd_max", default_mit_kd_max, scalar_or_array
-        )
-        self.declare_parameter(
-            "mit_damping_transition_velocity", [0.3], scalar_or_array
-        )
-        self.declare_parameter(
-            "mit_damping_torque_limit", [1.0], scalar_or_array
-        )
-        self.declare_parameter(
             "mit_feedforward", default_mit_feedforward_values
         )
         self.declare_parameter("mit_gravity_compensation_enabled", True)
         self.declare_parameter("gravity_urdf_path", "")
         self.declare_parameter("mit_gravity_scale", 1.0)
-        self.declare_parameter("mit_gravity_ramp_duration", 1.0)
         self.declare_parameter(
             "mit_gravity_torque_limit", [10.0], scalar_or_array
         )
@@ -441,8 +425,6 @@ class ArmKeyboardController(Node):
             "mit_trajectory_max_jerk", [5.0], scalar_or_array
         )
         self.declare_parameter("mit_max_joint_step", 0.05)
-        self.declare_parameter("mit_handover_duration", 0.5)
-        self.declare_parameter("mit_handover_kp", default_handover_kp)
 
         self.robot_model = str(
             self.get_parameter("robot_model").value
@@ -528,6 +510,8 @@ class ArmKeyboardController(Node):
         self.impedance_enabled = bool(
             self.get_parameter("impedance_enabled").value
         )
+        start_in_impedance = self.impedance_enabled
+        self.impedance_enabled = False
         self.mit_command_rate = float(
             self.get_parameter("mit_command_rate").value
         )
@@ -536,21 +520,6 @@ class ArmKeyboardController(Node):
         )
         self.mit_kd = expand_joint_values(
             self.get_parameter("mit_kd").value, self.joint_count, "mit_kd"
-        )
-        self.mit_kd_max = expand_joint_values(
-            self.get_parameter("mit_kd_max").value,
-            self.joint_count,
-            "mit_kd_max",
-        )
-        self.mit_damping_transition_velocity = expand_joint_values(
-            self.get_parameter("mit_damping_transition_velocity").value,
-            self.joint_count,
-            "mit_damping_transition_velocity",
-        )
-        self.mit_damping_torque_limit = expand_joint_values(
-            self.get_parameter("mit_damping_torque_limit").value,
-            self.joint_count,
-            "mit_damping_torque_limit",
         )
         self.mit_feedforward = expand_joint_values(
             self.get_parameter("mit_feedforward").value,
@@ -565,9 +534,6 @@ class ArmKeyboardController(Node):
         )
         self.mit_gravity_scale = float(
             self.get_parameter("mit_gravity_scale").value
-        )
-        self.mit_gravity_ramp_duration = float(
-            self.get_parameter("mit_gravity_ramp_duration").value
         )
         self.mit_gravity_torque_limit = expand_joint_values(
             self.get_parameter("mit_gravity_torque_limit").value,
@@ -594,14 +560,6 @@ class ArmKeyboardController(Node):
         )
         self.mit_max_joint_step = float(
             self.get_parameter("mit_max_joint_step").value
-        )
-        self.mit_handover_duration = float(
-            self.get_parameter("mit_handover_duration").value
-        )
-        self.mit_handover_kp = expand_joint_values(
-            self.get_parameter("mit_handover_kp").value,
-            self.joint_count,
-            "mit_handover_kp",
         )
 
         if self.control_rate <= 0.0:
@@ -632,10 +590,6 @@ class ArmKeyboardController(Node):
             raise ValueError("emergency_reset_timeout must be > 0")
         if self.mit_command_rate <= 0.0 or self.mit_max_joint_step <= 0.0:
             raise ValueError("MIT rate and maximum joint step must be > 0")
-        if self.mit_handover_duration <= 0.0:
-            raise ValueError("mit_handover_duration must be > 0")
-        if self.mit_gravity_ramp_duration <= 0.0:
-            raise ValueError("mit_gravity_ramp_duration must be > 0")
         if not 0.0 <= self.mit_gravity_scale <= 1.0:
             raise ValueError("mit_gravity_scale must be in [0, 1]")
         if self.gravity_vector.shape != (3,) or not np.all(
@@ -644,24 +598,8 @@ class ArmKeyboardController(Node):
             raise ValueError("gravity_vector must contain three finite values")
         if any(not 0.0 <= value <= 500.0 for value in self.mit_kp):
             raise ValueError("mit_kp values must be in [0, 500]")
-        if any(not 0.0 <= value <= 500.0 for value in self.mit_handover_kp):
-            raise ValueError("mit_handover_kp values must be in [0, 500]")
         if any(not 0.0 <= value <= 5.0 for value in self.mit_kd):
             raise ValueError("mit_kd values must be in [0, 5]")
-        if any(
-            minimum > maximum or not 0.0 <= maximum <= 5.0
-            for minimum, maximum in zip(self.mit_kd, self.mit_kd_max)
-        ):
-            raise ValueError("mit_kd_max must be in [mit_kd, 5]")
-        if any(
-            value <= 0.0 for value in self.mit_damping_transition_velocity
-        ):
-            raise ValueError("MIT damping transition velocities must be > 0")
-        if any(
-            not 0.0 < value <= 8.0
-            for value in self.mit_damping_torque_limit
-        ):
-            raise ValueError("MIT damping torque limits must be in (0, 8] N·m")
         if any(abs(value) > 10.0 for value in self.mit_feedforward):
             raise ValueError("mit_feedforward values must be in [-10, 10] N·m")
         if any(
@@ -735,6 +673,7 @@ class ArmKeyboardController(Node):
                 "URDF inverse dynamics ready: "
                 f"{gravity_urdf_path}; "
                 f"modeled_mass={self.gravity_model.modeled_mass:.3f} kg; "
+                f"gravity={self.gravity_vector.tolist()}; "
                 f"joints={self.gravity_model.movable_joint_names}"
             )
         self.ik_solver = create_tracik_solver(
@@ -766,9 +705,6 @@ class ArmKeyboardController(Node):
         self.arm_connected = False
         self.arm_ready = False
         self.emergency_stopped = False
-        self.mit_handover_started = (
-            time.monotonic() if self.impedance_enabled else float("-inf")
-        )
         self.last_mit_tick_time = None
 
         self.keyboard_sub = self.create_subscription(
@@ -779,6 +715,8 @@ class ArmKeyboardController(Node):
         )
         self.connect_arm()
         self.mit_trajectory.reset(self.jog.target_joints)
+        if start_in_impedance:
+            self.toggle_impedance()
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_tick)
         self.mit_timer = self.create_timer(
             1.0 / self.mit_command_rate, self.mit_tick
@@ -1097,11 +1035,57 @@ class ArmKeyboardController(Node):
 
     def toggle_impedance(self):
         """Switch safely between planned move_j and MIT joint impedance."""
-        joints = self.current_or_target_joints()
+        entering = not self.impedance_enabled
+        if entering and self.execute_motion:
+            if not self.arm_ready:
+                self.get_logger().error(
+                    "cannot enter MIT: arm is not ready"
+                )
+                return
+            joints = None
+            try:
+                joints = extract_joint_angles(
+                    self.arm.get_joint_angles(), self.joint_count
+                )
+            except Exception:
+                pass
+            velocities = self.read_joint_velocities()
+            if joints is None or velocities is None:
+                self.get_logger().error(
+                    "cannot enter MIT: complete q/dq feedback is required"
+                )
+                return
+            if self.gravity_model is None:
+                self.get_logger().error(
+                    "cannot enter MIT: URDF inverse dynamics is unavailable"
+                )
+                return
+            try:
+                support = np.asarray(
+                    self.gravity_model.inverse_dynamics(
+                        joints,
+                        np.zeros(self.joint_count),
+                        np.zeros(self.joint_count),
+                    ),
+                    dtype=float,
+                )
+            except Exception as exc:
+                self.get_logger().error(
+                    f"cannot enter MIT: inverse dynamics failed: {exc}"
+                )
+                return
+            if support.shape != (self.joint_count,) or not np.all(
+                np.isfinite(support)
+            ):
+                self.get_logger().error(
+                    "cannot enter MIT: inverse dynamics torque is invalid"
+                )
+                return
+        else:
+            joints = self.current_or_target_joints()
         self.jog.sync_target(joints)
         self.impedance_enabled = not self.impedance_enabled
         if self.impedance_enabled:
-            self.mit_handover_started = time.monotonic()
             self.last_mit_tick_time = None
             self.mit_trajectory.reset(joints)
             self.get_logger().warning(
@@ -1114,7 +1098,7 @@ class ArmKeyboardController(Node):
         self.send_target("MIT exit hold")
 
     def read_joint_velocities(self):
-        """Read cached motor velocity for speed-dependent MIT damping."""
+        """Read cached motor velocity for MIT dynamics and torque limiting."""
         if not hasattr(self.arm, "get_motor_states"):
             return None
         velocities = []
@@ -1143,7 +1127,6 @@ class ArmKeyboardController(Node):
             return
         try:
             now = time.monotonic()
-            handover_elapsed = now - self.mit_handover_started
             nominal_period = 1.0 / getattr(self, "mit_command_rate", 100.0)
             last_tick = getattr(self, "last_mit_tick_time", None)
             trajectory_period = (
@@ -1171,36 +1154,25 @@ class ArmKeyboardController(Node):
                 ) = trajectory.step(
                     self.jog.target_joints, trajectory_period
                 )
-            kp_values = blend_handover_kp(
-                self.mit_kp,
-                self.mit_handover_kp,
-                handover_elapsed,
-                self.mit_handover_duration,
-            )
+            kp_values = np.asarray(self.mit_kp, dtype=float)
+            kd_values = np.asarray(self.mit_kd, dtype=float)
             joint_velocity = self.read_joint_velocities()
             if joint_velocity is None:
                 joint_velocity = np.zeros(self.joint_count, dtype=float)
                 self.get_logger().warning(
-                    "motor velocity unavailable; using minimum MIT damping",
+                    "motor velocity unavailable; torque limit assumes zero velocity",
                     throttle_duration_sec=1.0,
                 )
-            adaptive_kd = bounded_velocity_damping(
-                joint_velocity,
-                self.mit_kd,
-                self.mit_kd_max,
-                self.mit_damping_transition_velocity,
-                self.mit_damping_torque_limit,
-            )
             feedforward = np.asarray(self.mit_feedforward, dtype=float)
+            joints = None
+            try:
+                joints = extract_joint_angles(
+                    self.arm.get_joint_angles(), self.joint_count
+                )
+            except Exception:
+                pass
             gravity_model = getattr(self, "gravity_model", None)
             if gravity_model is not None:
-                joints = None
-                try:
-                    joints = extract_joint_angles(
-                        self.arm.get_joint_angles(), self.joint_count
-                    )
-                except Exception:
-                    pass
                 if joints is None:
                     self.get_logger().warning(
                         "joint feedback unavailable; URDF model torque is zero",
@@ -1215,29 +1187,57 @@ class ArmKeyboardController(Node):
                         )
                     else:
                         model_torque = gravity_model.compensation(joints)
-                    feedforward = bounded_gravity_feedforward(
+                    feedforward = bounded_model_feedforward(
                         model_torque,
                         self.mit_feedforward,
-                        handover_elapsed,
-                        self.mit_gravity_ramp_duration,
                         self.mit_gravity_scale,
                         self.mit_gravity_torque_limit,
                     )
                     self.get_logger().info(
-                        "URDF inverse dynamics raw=%s commanded=%s N·m"
+                        "URDF inverse dynamics raw=%s bounded=%s N·m"
                         % (
                             np.round(model_torque, 3).tolist(),
                             np.round(feedforward, 3).tolist(),
                         ),
                         throttle_duration_sec=2.0,
                     )
+            if joints is None:
+                self.get_logger().warning(
+                    "joint feedback unavailable; combined torque limit is inactive",
+                    throttle_duration_sec=1.0,
+                )
+            else:
+                feedforward, estimated_total = limit_mit_combined_torque(
+                    feedforward,
+                    reference_position,
+                    reference_velocity,
+                    joints,
+                    joint_velocity,
+                    kp_values,
+                    kd_values,
+                    self.mit_gravity_torque_limit,
+                )
+                if np.any(
+                    np.abs(estimated_total)
+                    > np.asarray(self.mit_gravity_torque_limit) + 1e-9
+                ):
+                    self.get_logger().warning(
+                        "PD torque alone prevents the configured combined limit; "
+                        "t_ff is already maximally counteracting it",
+                        throttle_duration_sec=1.0,
+                    )
+                self.get_logger().info(
+                    "estimated combined MIT torque=%s N·m"
+                    % np.round(estimated_total, 3).tolist(),
+                    throttle_duration_sec=2.0,
+                )
             for index, position in enumerate(reference_position):
                 self.arm.move_mit(
                     joint_index=index + 1,
                     p_des=float(position),
                     v_des=float(reference_velocity[index]),
-                    kp=kp_values[index],
-                    kd=float(adaptive_kd[index]),
+                    kp=float(kp_values[index]),
+                    kd=float(kd_values[index]),
                     t_ff=float(feedforward[index]),
                 )
         except Exception as exc:

@@ -21,11 +21,10 @@ from armbycontroller.ik_core import resolve_firmware_name
 from armbycontroller.ik_core import set_joint_acceleration_limits
 from armbycontroller.ik_core import solve_pointing_ik
 from armbycontroller.gravity_compensation import UrdfGravityModel
+from armbycontroller.gravity_compensation import nero_mount_gravity
 from armbycontroller.keyboard_controller import ArmJointJogState
 from armbycontroller.keyboard_controller import ArmKeyboardController
-from armbycontroller.keyboard_controller import blend_handover_kp
-from armbycontroller.keyboard_controller import bounded_gravity_feedforward
-from armbycontroller.keyboard_controller import bounded_velocity_damping
+from armbycontroller.keyboard_controller import bounded_model_feedforward
 from armbycontroller.keyboard_controller import expand_joint_values
 from armbycontroller.keyboard_controller import default_mit_gains
 from armbycontroller.keyboard_controller import default_mit_feedforward
@@ -37,6 +36,7 @@ from armbycontroller.keyboard_controller import KEY_INCREASE
 from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
 from armbycontroller.keyboard_controller import JointTrajectoryState
+from armbycontroller.keyboard_controller import limit_mit_combined_torque
 from armbycontroller.pose_controller import PoseController
 
 
@@ -44,6 +44,13 @@ def _write_test_urdf(tmp_path, body):
     path = tmp_path / "test.urdf"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def test_nero_mount_selection_sets_base_frame_gravity():
+    assert nero_mount_gravity("horizontal") == [0.0, 0.0, -9.80665]
+    assert nero_mount_gravity("side") == [-9.80665, 0.0, 0.0]
+    with pytest.raises(ValueError, match="horizontal or side"):
+        nero_mount_gravity("select")
 
 
 def test_urdf_gravity_model_compensates_one_link_pendulum(tmp_path):
@@ -454,43 +461,30 @@ def test_piper_mit_gains_are_independent_per_joint():
     assert len(set(kp)) > 1
 
 
-def test_velocity_damping_is_soft_at_low_speed_and_bounded_at_high_speed():
-    velocities = np.array([1e-6, 0.3, 100.0])
-    effective_kd = bounded_velocity_damping(
-        velocities,
-        damping_min=[0.2] * 3,
-        damping_max=[0.6] * 3,
-        transition_velocity=[0.3] * 3,
-        torque_limit=[1.0] * 3,
-    )
-    damping_torque = effective_kd * velocities
-
-    assert effective_kd[0] == pytest.approx(0.2, rel=1e-6)
-    assert damping_torque[1] > damping_torque[0]
-    assert damping_torque[2] == pytest.approx(1.0)
-    assert np.all(damping_torque <= 1.0)
-
-
-def test_mit_handover_starts_stiff_and_smoothly_reaches_soft_kp():
-    assert blend_handover_kp([0.4], [10.0], 0.0, 0.5) == [10.0]
-    assert blend_handover_kp([0.4], [10.0], 0.25, 0.5) == pytest.approx([5.2])
-    assert blend_handover_kp([0.4], [10.0], 0.5, 0.5) == pytest.approx([0.4])
-
-
-def test_gravity_feedforward_ramps_and_limits_each_joint():
+def test_model_feedforward_is_immediate_and_limits_each_joint():
     gravity = [4.0, -10.0]
     residual = [0.2, -0.1]
     limits = [5.0, 5.0]
 
-    assert bounded_gravity_feedforward(
-        gravity, residual, 0.0, 1.0, 1.0, limits
-    ) == pytest.approx(residual)
-    assert bounded_gravity_feedforward(
-        gravity, residual, 0.5, 1.0, 1.0, limits
-    ) == pytest.approx([2.2, -5.0])
-    assert bounded_gravity_feedforward(
-        gravity, residual, 1.0, 1.0, 1.0, limits
+    assert bounded_model_feedforward(
+        gravity, residual, 1.0, limits
     ) == pytest.approx([4.2, -5.0])
+
+
+def test_combined_torque_limiter_uses_maximum_available_cancellation():
+    feedforward, total = limit_mit_combined_torque(
+        feedforward=[0.0],
+        reference_position=[3.0],
+        reference_velocity=[0.0],
+        measured_position=[0.0],
+        measured_velocity=[0.0],
+        kp=[10.0],
+        kd=[0.2],
+        torque_limit=[10.0],
+    )
+
+    assert feedforward == pytest.approx([-10.0])
+    assert total == pytest.approx([20.0])
 
 
 def test_joint_trajectory_generates_bounded_q_dq_ddq():
@@ -516,7 +510,7 @@ def test_joint_trajectory_generates_bounded_q_dq_ddq():
     assert maximum_jerk <= 5.0 + 1e-9
 
 
-def test_mit_tick_sends_one_impedance_command_per_joint():
+def test_mit_tick_sends_one_impedance_command_per_joint(monkeypatch):
     class FakeArm:
         def __init__(self):
             self.commands = []
@@ -528,6 +522,16 @@ def test_mit_tick_sends_one_impedance_command_per_joint():
             del joint_index
             return SimpleNamespace(msg=SimpleNamespace(velocity=0.3))
 
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=[0.0] * 6)
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
     controller = object.__new__(ArmKeyboardController)
     controller.impedance_enabled = True
     controller.emergency_stopped = False
@@ -537,14 +541,12 @@ def test_mit_tick_sends_one_impedance_command_per_joint():
     controller.joint_count = 6
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
     controller.mit_kp = [10.0] * 6
-    controller.mit_handover_kp = [10.0] * 6
-    controller.mit_handover_started = float("-inf")
-    controller.mit_handover_duration = 0.5
     controller.mit_kd = [0.8] * 6
-    controller.mit_kd_max = [1.0] * 6
-    controller.mit_damping_transition_velocity = [0.3] * 6
-    controller.mit_damping_torque_limit = [1.0] * 6
     controller.mit_feedforward = [0.0] * 6
+    controller.mit_gravity_torque_limit = [10.0] * 6
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
 
     controller.mit_tick()
 
@@ -552,7 +554,7 @@ def test_mit_tick_sends_one_impedance_command_per_joint():
         1, 2, 3, 4, 5, 6
     ]
     assert all(item["kp"] == 10.0 for item in controller.arm.commands)
-    assert all(0.8 < item["kd"] < 1.0 for item in controller.arm.commands)
+    assert all(item["kd"] == 0.8 for item in controller.arm.commands)
 
 
 def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
@@ -595,27 +597,60 @@ def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
     controller.jog.sync_target([0.8, 0.8])
     controller.mit_kp = [1.0] * 2
-    controller.mit_handover_kp = [1.0] * 2
-    controller.mit_handover_started = float("-inf")
-    controller.mit_handover_duration = 0.5
     controller.mit_kd = [0.2] * 2
-    controller.mit_kd_max = [0.2] * 2
-    controller.mit_damping_transition_velocity = [0.3] * 2
-    controller.mit_damping_torque_limit = [1.0] * 2
     controller.mit_feedforward = [0.0] * 2
     controller.gravity_model = FakeGravityModel()
-    controller.mit_gravity_ramp_duration = 1.0
     controller.mit_gravity_scale = 1.0
     controller.mit_gravity_torque_limit = [6.0] * 2
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
+    monkeypatch.setattr(
+        "armbycontroller.keyboard_controller.time.monotonic", lambda: 100.0
+    )
 
     controller.mit_tick()
 
     assert controller.gravity_model.received == [0.25, -0.5]
-    assert [command["t_ff"] for command in controller.arm.commands] == [
-        2.0, -3.0
+    assert [command["t_ff"] for command in controller.arm.commands] == (
+        pytest.approx([2.0, -3.0])
+    )
+
+
+def test_impedance_entry_refuses_incomplete_joint_feedback(monkeypatch):
+    class FakeArm:
+        def get_joint_angles(self):
+            return None
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
+
+    class FakeLogger:
+        def __init__(self):
+            self.errors = []
+
+        def error(self, message, **kwargs):
+            del kwargs
+            self.errors.append(message)
+
+    logger = FakeLogger()
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = False
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: logger
+    )
+
+    controller.toggle_impedance()
+
+    assert not controller.impedance_enabled
+    assert logger.errors == [
+        "cannot enter MIT: complete q/dq feedback is required"
     ]
 
 
@@ -664,16 +699,9 @@ def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(monkeypatch):
     controller.mit_command_rate = 100.0
     controller.last_mit_tick_time = None
     controller.mit_kp = [1.0] * 2
-    controller.mit_handover_kp = [1.0] * 2
-    controller.mit_handover_started = float("-inf")
-    controller.mit_handover_duration = 0.5
     controller.mit_kd = [0.2] * 2
-    controller.mit_kd_max = [0.2] * 2
-    controller.mit_damping_transition_velocity = [0.3] * 2
-    controller.mit_damping_torque_limit = [1.0] * 2
     controller.mit_feedforward = [0.0] * 2
     controller.gravity_model = FakeDynamicsModel()
-    controller.mit_gravity_ramp_duration = 1.0
     controller.mit_gravity_scale = 1.0
     controller.mit_gravity_torque_limit = [10.0] * 2
     monkeypatch.setattr(
@@ -695,6 +723,71 @@ def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(monkeypatch):
     assert [command["t_ff"] for command in controller.arm.commands] == [
         1.5, -2.5
     ]
+
+
+def test_mit_tick_keeps_gains_fixed_and_limits_combined_torque(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.commands = []
+
+        def move_mit(self, **command):
+            self.commands.append(command)
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
+
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=[0.0, 0.0])
+
+    class FakeDynamicsModel:
+        def inverse_dynamics(self, positions, velocities, accelerations):
+            del positions, velocities, accelerations
+            return np.array([5.0, -5.0])
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = True
+    controller.emergency_stopped = False
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.jog = ArmJointJogState([(-2.0, 2.0)] * 2, 0.1)
+    controller.jog.sync_target([1.0, -1.0])
+    controller.mit_trajectory = None
+    controller.mit_command_rate = 100.0
+    controller.last_mit_tick_time = None
+    controller.mit_kp = [8.0, 8.0]
+    controller.mit_kd = [0.2, 0.2]
+    controller.mit_feedforward = [0.0, 0.0]
+    controller.gravity_model = FakeDynamicsModel()
+    controller.mit_gravity_scale = 1.0
+    controller.mit_gravity_torque_limit = [10.0, 10.0]
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    controller.mit_tick()
+
+    assert [command["kp"] for command in controller.arm.commands] == [8.0, 8.0]
+    assert [command["kd"] for command in controller.arm.commands] == [0.2, 0.2]
+    assert [command["t_ff"] for command in controller.arm.commands] == [2.0, -2.0]
+    estimated_total = [
+        command["kp"] * (command["p_des"] - measured_position)
+        + command["kd"] * (command["v_des"] - 0.0)
+        + command["t_ff"]
+        for command, measured_position in zip(
+            controller.arm.commands, [0.0, 0.0]
+        )
+    ]
+    assert estimated_total == pytest.approx([10.0, -10.0])
 
 
 def test_ik_joint_target_is_consumed_only_by_mit_backend(monkeypatch):
@@ -733,13 +826,7 @@ def test_ik_joint_target_is_consumed_only_by_mit_backend(monkeypatch):
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
     controller.jog.sync_target([0.1, -0.2, 0.3, 0.0, 0.2, -0.1])
     controller.mit_kp = [1.0] * 6
-    controller.mit_handover_kp = [10.0] * 6
-    controller.mit_handover_started = float("-inf")
-    controller.mit_handover_duration = 0.5
     controller.mit_kd = [0.2] * 6
-    controller.mit_kd_max = [0.6] * 6
-    controller.mit_damping_transition_velocity = [0.3] * 6
-    controller.mit_damping_torque_limit = [1.0] * 6
     controller.mit_feedforward = [0.0] * 6
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()

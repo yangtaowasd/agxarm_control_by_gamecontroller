@@ -6,6 +6,8 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
+from armbycontroller.gravity_compensation import nero_mount_gravity
+
 
 COMMON = {
     "can_interface": "can0",
@@ -14,23 +16,18 @@ COMMON = {
     "impedance_enabled": "false",
     "control_rate": "100.0",
     "mit_command_rate": "100.0",
-    "mit_handover_duration": "0.5",
     "mit_gravity_compensation_enabled": "true",
     "mit_gravity_scale": "1.0",
-    "mit_gravity_ramp_duration": "1.0",
     "mit_gravity_torque_limit": "10.0",
     "mit_trajectory_max_velocity": "0.5",
     "mit_trajectory_max_acceleration": "1.0",
     "mit_trajectory_max_jerk": "5.0",
-    "mit_damping_transition_velocity": "0.3",
-    "mit_damping_torque_limit": "1.0",
     "joint_acc_timeout": "2.0",
     "position_mode_timeout": "2.0",
     "reset_emergency_stop_on_start": "true",
     "emergency_reset_timeout": "5.0",
 }
 OPTIONAL = {
-    "mit_kd_max": "",
     "urdf_path": "",
     "gravity_urdf_path": "",
 }
@@ -51,6 +48,9 @@ def _nodes(context):
         "robot_model": model,
         **{name: LaunchConfiguration(name) for name in parameter_names},
     }
+    if model == "nero":
+        mount = LaunchConfiguration("nero_mount").perform(context).lower()
+        controller_parameters["gravity_vector"] = nero_mount_gravity(mount)
     for name in OPTIONAL:
         if LaunchConfiguration(name).perform(context).strip():
             controller_parameters[name] = LaunchConfiguration(name)
@@ -69,7 +69,11 @@ def _nodes(context):
 
 
 def generate_launch_description():
-    arguments = {"robot_model": "nero", "device": "/dev/input/event3"}
+    arguments = {
+        "robot_model": "nero",
+        "device": "/dev/input/event3",
+        "nero_mount": "select",
+    }
     arguments.update(COMMON)
     arguments.update(STARTUP)
     arguments.update(OPTIONAL)
