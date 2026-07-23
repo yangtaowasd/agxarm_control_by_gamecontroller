@@ -36,6 +36,7 @@ from armbycontroller.keyboard_controller import KEY_HOME
 from armbycontroller.keyboard_controller import KEY_INCREASE
 from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
+from armbycontroller.keyboard_controller import JointTrajectoryState
 from armbycontroller.pose_controller import PoseController
 
 
@@ -64,6 +65,14 @@ def test_urdf_gravity_model_compensates_one_link_pendulum(tmp_path):
     assert model.compensation([0.0]) == pytest.approx([-2.0 * 9.80665])
     assert model.compensation([math.pi / 2.0]) == pytest.approx([0.0], abs=1e-9)
 
+    # Iyy + m*r^2 = 1 + 2*1^2 = 3 kg*m^2.
+    assert model.mass_matrix([0.3]) == pytest.approx(np.array([[3.0]]))
+    assert model.coriolis([0.3], [2.0]) == pytest.approx([0.0], abs=1e-9)
+    expected = 3.0 * 2.0 + model.compensation([0.0])[0]
+    assert model.inverse_dynamics([0.0], [0.0], [2.0]) == pytest.approx(
+        [expected]
+    )
+
 
 def test_urdf_gravity_model_includes_all_downstream_masses(tmp_path):
     urdf = _write_test_urdf(
@@ -88,6 +97,9 @@ def test_urdf_gravity_model_includes_all_downstream_masses(tmp_path):
     assert model.compensation([0.0, 0.0]) == pytest.approx(
         [-3.0 * expected, -1.0 * expected]
     )
+    mass_matrix = model.mass_matrix([0.2, -0.3])
+    assert mass_matrix == pytest.approx(mass_matrix.T)
+    assert np.all(np.linalg.eigvalsh(mass_matrix) > 0.0)
 
 
 @pytest.mark.parametrize(
@@ -481,6 +493,29 @@ def test_gravity_feedforward_ramps_and_limits_each_joint():
     ) == pytest.approx([4.2, -5.0])
 
 
+def test_joint_trajectory_generates_bounded_q_dq_ddq():
+    trajectory = JointTrajectoryState(
+        2, max_velocity=[0.5] * 2,
+        max_acceleration=[1.0] * 2, max_jerk=[5.0] * 2,
+    )
+    previous_acceleration = np.zeros(2)
+    maximum_jerk = 0.0
+    for _ in range(1000):
+        position, velocity, acceleration = trajectory.step(
+            [0.5, -0.5], 0.01
+        )
+        maximum_jerk = max(
+            maximum_jerk,
+            float(np.max(np.abs(acceleration - previous_acceleration)) / 0.01),
+        )
+        previous_acceleration = acceleration
+
+    assert position == pytest.approx([0.5, -0.5], abs=1e-6)
+    assert velocity == pytest.approx([0.0, 0.0], abs=1e-6)
+    assert np.max(np.abs(acceleration)) <= 1.0
+    assert maximum_jerk <= 5.0 + 1e-9
+
+
 def test_mit_tick_sends_one_impedance_command_per_joint():
     class FakeArm:
         def __init__(self):
@@ -581,6 +616,84 @@ def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
     assert controller.gravity_model.received == [0.25, -0.5]
     assert [command["t_ff"] for command in controller.arm.commands] == [
         2.0, -3.0
+    ]
+
+
+def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.commands = []
+
+        def move_mit(self, **command):
+            self.commands.append(command)
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
+
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=[0.2, -0.3])
+
+    class FakeDynamicsModel:
+        def inverse_dynamics(self, positions, velocities, accelerations):
+            self.received = (
+                np.asarray(positions), np.asarray(velocities),
+                np.asarray(accelerations),
+            )
+            return np.array([1.5, -2.5])
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = True
+    controller.emergency_stopped = False
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.jog.sync_target([0.5, -0.5])
+    controller.mit_trajectory = JointTrajectoryState(
+        2, [0.5] * 2, [1.0] * 2, [5.0] * 2
+    )
+    controller.mit_command_rate = 100.0
+    controller.last_mit_tick_time = None
+    controller.mit_kp = [1.0] * 2
+    controller.mit_handover_kp = [1.0] * 2
+    controller.mit_handover_started = float("-inf")
+    controller.mit_handover_duration = 0.5
+    controller.mit_kd = [0.2] * 2
+    controller.mit_kd_max = [0.2] * 2
+    controller.mit_damping_transition_velocity = [0.3] * 2
+    controller.mit_damping_torque_limit = [1.0] * 2
+    controller.mit_feedforward = [0.0] * 2
+    controller.gravity_model = FakeDynamicsModel()
+    controller.mit_gravity_ramp_duration = 1.0
+    controller.mit_gravity_scale = 1.0
+    controller.mit_gravity_torque_limit = [10.0] * 2
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    controller.mit_tick()
+
+    positions, velocities, accelerations = controller.gravity_model.received
+    assert positions == pytest.approx([0.2, -0.3])
+    assert np.any(np.abs(velocities) > 0.0)
+    assert np.any(np.abs(accelerations) > 0.0)
+    assert [command["p_des"] for command in controller.arm.commands] != [
+        0.5, -0.5
+    ]
+    assert [command["v_des"] for command in controller.arm.commands] == (
+        pytest.approx(velocities)
+    )
+    assert [command["t_ff"] for command in controller.arm.commands] == [
+        1.5, -2.5
     ]
 
 

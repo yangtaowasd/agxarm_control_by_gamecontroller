@@ -1,4 +1,4 @@
-"""Read-only URDF/Xacro gravity compensation for robot-arm trees."""
+"""Read-only URDF/Xacro rigid-body dynamics for robot-arm trees."""
 
 from dataclasses import dataclass
 import math
@@ -67,6 +67,13 @@ def _transform(xyz=None, rotation=None):
 class _LinkMass:
     mass: float
     center: np.ndarray
+    inertia: np.ndarray
+    inertia_rotation: np.ndarray
+
+
+_ZERO_LINK_MASS = _LinkMass(
+    0.0, np.zeros(3), np.zeros((3, 3)), np.eye(3)
+)
 
 
 @dataclass(frozen=True)
@@ -80,7 +87,7 @@ class _UrdfJoint:
 
 
 class UrdfGravityModel:
-    """Compute arm gravity torque including attached fixed/movable branches."""
+    """Compute arm inverse dynamics including attached model branches."""
 
     def __init__(
         self,
@@ -161,16 +168,41 @@ class UrdfGravityModel:
         for link in root.findall("link"):
             inertial = link.find("inertial")
             if inertial is None:
-                links[link.attrib["name"]] = _LinkMass(0.0, np.zeros(3))
+                links[link.attrib["name"]] = _ZERO_LINK_MASS
                 continue
             mass_element = inertial.find("mass")
             if mass_element is None:
                 raise ValueError(f"link {link.attrib['name']} has no mass")
             mass = float(mass_element.attrib["value"])
-            center = _vector(inertial.find("origin"), "xyz", (0.0, 0.0, 0.0))
+            inertial_origin = inertial.find("origin")
+            center = _vector(inertial_origin, "xyz", (0.0, 0.0, 0.0))
+            inertia_rotation = _rpy_rotation(
+                _vector(inertial_origin, "rpy", (0.0, 0.0, 0.0))
+            )
             if not math.isfinite(mass) or mass < 0.0:
                 raise ValueError(f"link {link.attrib['name']} has invalid mass")
-            links[link.attrib["name"]] = _LinkMass(mass, center)
+            inertia_element = inertial.find("inertia")
+            if inertia_element is None:
+                raise ValueError(f"link {link.attrib['name']} has no inertia")
+            inertia = np.array(
+                [
+                    [float(inertia_element.attrib["ixx"]),
+                     float(inertia_element.attrib["ixy"]),
+                     float(inertia_element.attrib["ixz"])],
+                    [float(inertia_element.attrib["ixy"]),
+                     float(inertia_element.attrib["iyy"]),
+                     float(inertia_element.attrib["iyz"])],
+                    [float(inertia_element.attrib["ixz"]),
+                     float(inertia_element.attrib["iyz"]),
+                     float(inertia_element.attrib["izz"])],
+                ],
+                dtype=float,
+            )
+            if not np.all(np.isfinite(inertia)):
+                raise ValueError(f"link {link.attrib['name']} has invalid inertia")
+            links[link.attrib["name"]] = _LinkMass(
+                mass, center, inertia, inertia_rotation
+            )
 
         joints = []
         child_names = set()
@@ -233,26 +265,37 @@ class UrdfGravityModel:
             )
         return reachable
 
-    def compensation(self, joint_positions):
-        """Return torques that oppose gravity at the measured configuration."""
+    def _positions(self, joint_positions, name):
         positions = np.asarray(joint_positions, dtype=float)
         if positions.shape != (self.joint_count,) or not np.all(
             np.isfinite(positions)
         ):
             raise ValueError(
-                f"joint_positions must contain {self.joint_count} finite values"
+                f"{name} must contain {self.joint_count} finite values"
             )
+        return positions
 
+    def _kinematic_state(self, joint_positions):
+        positions = self._positions(joint_positions, "joint_positions")
         joint_origins = [None] * self.joint_count
         joint_axes = [None] * self.joint_count
-        link_centers = []
+        link_states = []
 
         def visit(link_name, transform, active_joints):
-            link = self.links.get(link_name, _LinkMass(0.0, np.zeros(3)))
+            link = self.links.get(link_name, _ZERO_LINK_MASS)
             center_world = (
                 transform @ np.append(link.center, 1.0)
             )[:3]
-            link_centers.append((tuple(active_joints), link.mass, center_world))
+            inertia_world_rotation = (
+                transform[:3, :3] @ link.inertia_rotation
+            )
+            inertia_world = (
+                inertia_world_rotation @ link.inertia
+                @ inertia_world_rotation.T
+            )
+            link_states.append(
+                (tuple(active_joints), link.mass, center_world, inertia_world)
+            )
             for joint in self.children.get(link_name, ()):
                 joint_frame = transform @ joint.origin
                 child_transform = joint_frame
@@ -274,10 +317,17 @@ class UrdfGravityModel:
         visit(self.base_link, np.eye(4, dtype=float), [])
         if any(value is None for value in joint_origins + joint_axes):
             raise ValueError("not all controlled joints are reachable from base")
+        return joint_origins, joint_axes, link_states
+
+    def compensation(self, joint_positions):
+        """Return torques that oppose gravity at the measured configuration."""
+        joint_origins, joint_axes, link_states = self._kinematic_state(
+            joint_positions
+        )
 
         gravitational_torque = np.zeros(self.joint_count, dtype=float)
         for joint_index, (origin, axis) in enumerate(zip(joint_origins, joint_axes)):
-            for active_joints, mass, center in link_centers:
+            for active_joints, mass, center, _ in link_states:
                 if joint_index not in active_joints or mass == 0.0:
                     continue
                 force = mass * self.gravity
@@ -285,3 +335,152 @@ class UrdfGravityModel:
                     axis, np.cross(center - origin, force)
                 )
         return -gravitational_torque
+
+    def mass_matrix(self, joint_positions):
+        """Return the joint-space mass matrix at one arm configuration."""
+        joint_origins, joint_axes, link_states = self._kinematic_state(
+            joint_positions
+        )
+        matrix = np.zeros((self.joint_count, self.joint_count), dtype=float)
+        for active_joints, mass, center, inertia_world in link_states:
+            if not active_joints or mass == 0.0:
+                continue
+            linear_jacobian = np.zeros((3, self.joint_count), dtype=float)
+            angular_jacobian = np.zeros((3, self.joint_count), dtype=float)
+            for joint_index in active_joints:
+                axis = joint_axes[joint_index]
+                origin = joint_origins[joint_index]
+                linear_jacobian[:, joint_index] = np.cross(
+                    axis, center - origin
+                )
+                angular_jacobian[:, joint_index] = axis
+            matrix += mass * linear_jacobian.T @ linear_jacobian
+            matrix += angular_jacobian.T @ inertia_world @ angular_jacobian
+        return 0.5 * (matrix + matrix.T)
+
+    def _recursive_inverse_dynamics(
+        self, joint_positions, joint_velocities, joint_accelerations, gravity
+    ):
+        """Evaluate inverse dynamics by recursive Newton-Euler traversal."""
+        positions = self._positions(joint_positions, "joint_positions")
+        velocities = self._positions(joint_velocities, "joint_velocities")
+        accelerations = self._positions(
+            joint_accelerations, "joint_accelerations"
+        )
+        gravity = np.asarray(gravity, dtype=float)
+        if gravity.shape != (3,) or not np.all(np.isfinite(gravity)):
+            raise ValueError("gravity must contain three finite values")
+        states = {}
+        joint_frames = {}
+
+        def forward(link_name, transform, omega, alpha, origin_acceleration):
+            link = self.links.get(link_name, _ZERO_LINK_MASS)
+            rotation = transform[:3, :3]
+            center_offset = rotation @ link.center
+            center_acceleration = (
+                origin_acceleration
+                + np.cross(alpha, center_offset)
+                + np.cross(omega, np.cross(omega, center_offset))
+            )
+            inertia_rotation = rotation @ link.inertia_rotation
+            inertia_world = (
+                inertia_rotation @ link.inertia @ inertia_rotation.T
+            )
+            force = link.mass * center_acceleration
+            center_moment = (
+                inertia_world @ alpha
+                + np.cross(omega, inertia_world @ omega)
+            )
+            states[link_name] = {
+                "position": transform[:3, 3].copy(),
+                "force": force,
+                "moment": center_moment + np.cross(center_offset, force),
+            }
+            for joint in self.children.get(link_name, ()):
+                joint_frame = transform @ joint.origin
+                joint_position = joint_frame[:3, 3]
+                offset = joint_position - transform[:3, 3]
+                child_origin_acceleration = (
+                    origin_acceleration
+                    + np.cross(alpha, offset)
+                    + np.cross(omega, np.cross(omega, offset))
+                )
+                child_transform = joint_frame
+                child_omega = omega
+                child_alpha = alpha
+                controlled_index = self.controlled_indices.get(joint.name)
+                axis_world = joint_frame[:3, :3] @ joint.axis
+                if controlled_index is not None:
+                    joint_velocity = velocities[controlled_index]
+                    joint_acceleration = accelerations[controlled_index]
+                    child_omega = omega + axis_world * joint_velocity
+                    child_alpha = (
+                        alpha
+                        + axis_world * joint_acceleration
+                        + np.cross(omega, axis_world * joint_velocity)
+                    )
+                    child_transform = joint_frame @ _transform(
+                        rotation=_axis_rotation(
+                            joint.axis, positions[controlled_index]
+                        )
+                    )
+                joint_frames[joint.name] = (joint_position, axis_world)
+                forward(
+                    joint.child,
+                    child_transform,
+                    child_omega,
+                    child_alpha,
+                    child_origin_acceleration,
+                )
+
+        forward(
+            self.base_link,
+            np.eye(4, dtype=float),
+            np.zeros(3),
+            np.zeros(3),
+            -gravity,
+        )
+        torque = np.zeros(self.joint_count, dtype=float)
+
+        def backward(link_name):
+            state = states[link_name]
+            total_force = state["force"].copy()
+            total_moment = state["moment"].copy()
+            link_position = state["position"]
+            for joint in self.children.get(link_name, ()):
+                child_force, child_moment = backward(joint.child)
+                joint_position, axis_world = joint_frames[joint.name]
+                controlled_index = self.controlled_indices.get(joint.name)
+                if controlled_index is not None:
+                    torque[controlled_index] = np.dot(
+                        axis_world, child_moment
+                    )
+                total_force += child_force
+                total_moment += (
+                    child_moment
+                    + np.cross(joint_position - link_position, child_force)
+                )
+            return total_force, total_moment
+
+        backward(self.base_link)
+        return torque
+
+    def coriolis(self, joint_positions, joint_velocities):
+        """Return Coriolis and centrifugal torque at one arm state."""
+        return self._recursive_inverse_dynamics(
+            joint_positions,
+            joint_velocities,
+            np.zeros(self.joint_count),
+            np.zeros(3),
+        )
+
+    def inverse_dynamics(
+        self, joint_positions, joint_velocities, joint_accelerations
+    ):
+        """Return M(q)ddq + C(q,dq)dq + g(q) feed-forward torque."""
+        return self._recursive_inverse_dynamics(
+            joint_positions,
+            joint_velocities,
+            joint_accelerations,
+            self.gravity,
+        )
