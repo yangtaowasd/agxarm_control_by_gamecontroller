@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from armbycontroller.ik_core import AgxIkEngine
+from armbycontroller.ik_core import create_screw_solver
 from armbycontroller.ik_core import IkFailure
 from armbycontroller.ik_core import increment_tool_orientation
 from armbycontroller.ik_core import make_pointing_quaternion
@@ -18,6 +19,7 @@ from armbycontroller.ik_core import radial_workspace_check
 from armbycontroller.ik_core import rotation_error_angle
 from armbycontroller.ik_core import rotation_matrix_to_quaternion
 from armbycontroller.ik_core import resolve_firmware_name
+from armbycontroller.ik_core import resolve_urdf_path
 from armbycontroller.ik_core import set_joint_acceleration_limits
 from armbycontroller.ik_core import solve_pointing_ik
 from armbycontroller.gravity_compensation import UrdfGravityModel
@@ -37,7 +39,11 @@ from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
 from armbycontroller.keyboard_controller import JointTrajectoryState
 from armbycontroller.keyboard_controller import limit_mit_combined_torque
+from armbycontroller.motion_link_bridge import phone_rotation
+from armbycontroller.motion_link_bridge import relative_target_rotation
+from armbycontroller.motion_link_bridge import websocket_url
 from armbycontroller.pose_controller import PoseController
+from armbycontroller.screw_model import UrdfScrewModel
 
 
 def _write_test_urdf(tmp_path, body):
@@ -51,6 +57,96 @@ def test_nero_mount_selection_sets_base_frame_gravity():
     assert nero_mount_gravity("side") == [-9.80665, 0.0, 0.0]
     with pytest.raises(ValueError, match="horizontal or side"):
         nero_mount_gravity("select")
+
+
+def test_motion_link_websocket_url_uses_robot_role():
+    assert websocket_url(
+        "http://127.0.0.1:8080", "a token/+"
+    ) == (
+        "ws://127.0.0.1:8080/ws?"
+        "session=a%20token%2F%2B&role=robot"
+    )
+
+
+def test_phone_relative_rotation_is_bounded():
+    reference = np.eye(3)
+    phone_zero = phone_rotation(
+        {"alpha": 0.0, "beta": 0.0, "gamma": 0.0}
+    )
+    phone_moved = phone_rotation(
+        {"alpha": 90.0, "beta": 0.0, "gamma": 0.0}
+    )
+
+    target = relative_target_rotation(
+        reference, phone_zero, phone_moved, 0.5
+    )
+    angle = np.linalg.norm(
+        __import__("modern_robotics").so3ToVec(
+            __import__("modern_robotics").MatrixLog3(target)
+        )
+    )
+
+    assert angle == pytest.approx(0.5)
+    assert target.T @ target == pytest.approx(np.eye(3), abs=1e-10)
+
+
+def test_nero_urdf_resolves_from_validated_screw_package():
+    path = resolve_urdf_path("", "nero")
+
+    assert path.name == "nero_description.urdf"
+    assert "nero_screw_dynamics" in str(path)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "joint_count", "tip_link", "target"),
+    [
+        (
+            "nero",
+            7,
+            "link7",
+            [0.1, 0.2, -0.15, 0.25, 0.1, -0.1, 0.1],
+        ),
+        (
+            "piper_l",
+            6,
+            "link6",
+            [0.1, 0.2, -0.15, 0.25, 0.1, -0.1],
+        ),
+    ],
+)
+def test_screw_fk_and_ik_support_nero_and_piper(
+    model_name, joint_count, tip_link, target
+):
+    urdf = (
+        __import__("pathlib").Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf" / model_name / "urdf"
+        / f"{model_name}_description.urdf"
+    )
+    model = UrdfScrewModel(
+        urdf,
+        base_link="base_link",
+        tip_link=tip_link,
+        joint_count=joint_count,
+    )
+    target_pose = model.forward_kinematics(target)
+
+    assert model.urdf_forward_kinematics(target) == pytest.approx(
+        target_pose, abs=1e-10
+    )
+
+    solver = create_screw_solver(
+        urdf, "base_link", tip_link, joint_count, 0.02, 1e-5
+    )
+    solution = solver.ik(
+        target_pose[:3, 3],
+        target_pose[:3, :3],
+        np.zeros(joint_count),
+    )
+
+    assert solution is not None
+    assert solver.model.forward_kinematics(solution) == pytest.approx(
+        target_pose, abs=1e-4
+    )
 
 
 def test_urdf_gravity_model_compensates_one_link_pendulum(tmp_path):

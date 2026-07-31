@@ -7,17 +7,16 @@ the same controller, keyboard topic, key indices, IK core, and launch files.
 
 ```bash
 cd /home/yang/demo_ws
-colcon build --packages-select armbycontroller
+python3 -m pip install "modern_robotics>=1.1.1"
+colcon build --packages-up-to armbycontroller
 source install/setup.bash
 ```
 
-Install `pytracik` if needed:
-
-```bash
-sudo apt install libboost-all-dev libeigen3-dev liborocos-kdl-dev \
-  libnlopt-dev libnlopt-cxx-dev
-python3 -m pip install pytracik
-```
+The controller uses the PoE, analytic Jacobian, and RNEA implementation
+validated in `nero_screw_dynamics`. Nero URDF/Xacro files are resolved from
+that package first. Piper-L remains supported through the model bundled in
+`armbycontroller`. Both models use the same screw-theory IK/FK and
+inverse-dynamics module; `pytracik` is no longer required.
 
 ## Unified keyboard control
 
@@ -52,13 +51,13 @@ Pressing `I` first requires complete position/velocity feedback and a valid
 inverse-dynamics result. It captures the current joints and applies full gravity
 support on the first MIT frame while leaving Kp/Kd unchanged.
 
-MIT mode reads the bundled, unmodified Nero or Piper-L model and computes full
+MIT mode reads the selected unmodified Nero or Piper-L model and computes full
 rigid-body inverse dynamics at every tick:
 `tau_ff = M(q) ddq_des + C(q,dq_des) dq_des + g(q) + tau_bias`.
 It uses measured arm positions for `q` and the continuous trajectory references
-for velocity and acceleration. The calculation uses recursive Newton-Euler
-dynamics and includes the URDF link inertias; it does not estimate joint
-friction or unmodelled cable forces.
+for velocity and acceleration. The calculation uses the validated Modern
+Robotics PoE/RNEA path and includes the URDF link inertias; it does not estimate
+joint friction or unmodelled cable forces.
 Piper-L uses its gripper model and Nero uses its Revo2 left-hand model. The
 accessory joints are evaluated at their URDF zero positions and only the arm's
 6/7 joints receive MIT commands. Model torque is active from the first MIT
@@ -170,6 +169,51 @@ ros2 run armbycontroller pose_controller.py --ros-args \
 The safe workspace keeps 5 cm inside the minimum reach and 10 cm inside the
 maximum reach. The pose controller verifies every IK result using FK before
 sending `move_j()`.
+
+## Phone control seam
+
+`phoneremotation` should publish `geometry_msgs/msg/PoseStamped` to the same
+stable target interface used by terminal control:
+
+- Nero: `/nero/target_pose`
+- Piper-L: `/piper_l/target_pose`
+
+Use `base_link` as `header.frame_id`. Feedback is available on
+`/<model>/current_pose` and `/<model>/ik_status`. This keeps phone transport
+outside the robot model and hardware adapters.
+
+The Motion Link project at
+`/media/yang/Windows/Users/yang.tao/Desktop/demo/phone remotation` already
+provides the required phone and robot WebSocket roles. Configure the real
+hardware in the backend environment, then start the web service:
+
+```bash
+cd "/media/yang/Windows/Users/yang.tao/Desktop/demo/phone remotation"
+export AGILEX_ROBOT_MODEL=nero
+export AGILEX_END_EFFECTOR=revo2
+export AGILEX_CAN_INTERFACE=can0
+./motion-link-control.sh
+```
+
+NERO/PIPER-L and none/Gripper/Revo2 selectors affect only the independent
+simulation preview. The desktop's separate real-hardware button uses the
+immutable backend configuration above; the browser cannot submit a model,
+tool, or CAN interface. Starting real hardware locks preview configuration,
+and stopping it unlocks preview switching.
+
+The bridge reports live arm joints back to Motion Link. `simulate` lets
+phone-relative orientation command the simulated arm while holding the current
+tool position. Real hardware requires explicit confirmation:
+
+```bash
+./motion-link-control.sh hardware --confirm-move
+```
+
+The first valid phone sample captures both the current phone orientation and
+the current tool pose as zero. Commands stop when samples are older than
+250 ms, orientation is limited to 0.6 rad from the captured pose, and phone
+acceleration is deliberately not integrated into position because its drift
+would create unsafe Cartesian motion.
 
 ## Revo2 hand
 

@@ -35,6 +35,7 @@ install(PROGRAMS
   armbycontroller/pose_controller.py
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
+  armbycontroller/motion_link_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

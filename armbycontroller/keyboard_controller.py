@@ -23,7 +23,7 @@ from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
 from armbycontroller.gravity_compensation import UrdfGravityModel
 from armbycontroller.ik_core import AgxIkEngine
-from armbycontroller.ik_core import create_tracik_solver
+from armbycontroller.ik_core import create_screw_solver
 from armbycontroller.ik_core import IkFailure
 from armbycontroller.ik_core import increment_tool_orientation
 from armbycontroller.ik_core import prepare_planned_joint_mode
@@ -676,7 +676,7 @@ class ArmKeyboardController(Node):
                 f"gravity={self.gravity_vector.tolist()}; "
                 f"joints={self.gravity_model.movable_joint_names}"
             )
-        self.ik_solver = create_tracik_solver(
+        self.ik_solver = create_screw_solver(
             urdf_path,
             self.base_frame,
             self.tip_link,

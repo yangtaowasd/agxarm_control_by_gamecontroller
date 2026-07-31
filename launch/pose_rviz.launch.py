@@ -1,5 +1,9 @@
 """Launch Nero or Piper-L pose control simulation in RViz."""
 
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import PackageNotFoundError
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import OpaqueFunction
@@ -32,6 +36,28 @@ PROFILES = {
 }
 
 
+def _rviz_config():
+    """Resolve the display config independently of the selected URDF owner."""
+    candidates = []
+    try:
+        candidates.append(
+            Path(get_package_share_directory("agx_arm_description"))
+            / "rviz" / "display.rviz"
+        )
+    except PackageNotFoundError:
+        pass
+    candidates.append(
+        Path.home() / "agx_arm_ws" / "src" / "agx_arm_ros" / "src"
+        / "agx_arm_description" / "rviz" / "display.rviz"
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise RuntimeError(
+        "AGX RViz config was not found; source agx_arm_description"
+    )
+
+
 def _nodes(context):
     """Create model-specific nodes after resolving the launch argument."""
     model = LaunchConfiguration("robot_model").perform(context).lower()
@@ -39,9 +65,7 @@ def _nodes(context):
         raise ValueError(f"robot_model must be one of {sorted(PROFILES)}")
     profile = PROFILES[model]
     urdf_path = resolve_urdf_path("", model)
-    rviz_path = urdf_path.parents[3] / "rviz" / "display.rviz"
-    if not rviz_path.is_file():
-        raise RuntimeError(f"AGX RViz config was not found: {rviz_path}")
+    rviz_path = _rviz_config()
 
     description = urdf_path.read_text(encoding="utf-8").replace(
         "package://agx_arm_description/agx_arm_urdf",

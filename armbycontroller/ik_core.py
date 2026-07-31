@@ -1,4 +1,4 @@
-"""Shared pytracik helpers for AGX arm controllers."""
+"""Shared screw-theory helpers for AGX arm controllers."""
 
 from dataclasses import dataclass
 import math
@@ -56,6 +56,20 @@ def resolve_urdf_path(parameter_value, robot_model):
         return Path(parameter_value).expanduser().resolve()
 
     candidates = []
+    if robot_model == "nero":
+        try:
+            share = Path(get_package_share_directory("nero_screw_dynamics"))
+            candidates.append(
+                share / "agx_arm_urdf" / "nero" / "urdf"
+                / "nero_description.urdf"
+            )
+        except PackageNotFoundError:
+            pass
+        candidates.append(
+            Path(__file__).resolve().parents[2]
+            / "nero_screw_dynamics" / "agx_arm_urdf" / "nero" / "urdf"
+            / "nero_description.urdf"
+        )
     try:
         share = Path(get_package_share_directory("armbycontroller"))
         candidates.append(
@@ -91,29 +105,38 @@ def resolve_urdf_path(parameter_value, robot_model):
     )
 
 
+def create_screw_solver(
+    urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
+):
+    """Create the shared PoE solver and verify the requested chain DOF."""
+    from armbycontroller.screw_ik import ScrewIkSolver
+    from armbycontroller.screw_model import UrdfScrewModel
+
+    model = UrdfScrewModel(
+        urdf_path,
+        gravity=(0.0, 0.0, 0.0),
+        base_link=base_frame,
+        tip_link=tip_link,
+        joint_count=joint_count,
+    )
+    # Keep the public timeout parameter meaningful without making results
+    # depend on host speed: it scales a deterministic iteration budget.
+    iterations = max(20, min(500, int(math.ceil(float(timeout) * 12000.0))))
+    return ScrewIkSolver(
+        model,
+        max_iterations=iterations,
+        position_tolerance=max(tolerance, 1e-4),
+        orientation_tolerance=max(tolerance, 1e-4),
+    )
+
+
 def create_tracik_solver(
     urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
 ):
-    """Create pytracik and verify the requested chain DOF."""
-    try:
-        from trac_ik import TracIK
-    except ImportError as error:
-        raise RuntimeError(
-            "pytracik is missing; install it with: pip install pytracik"
-        ) from error
-    solver = TracIK(
-        base_link_name=base_frame,
-        tip_link_name=tip_link,
-        urdf_path=str(urdf_path),
-        timeout=timeout,
-        epsilon=tolerance,
-        solver_type="Distance",
+    """Compatibility alias for callers using the old helper name."""
+    return create_screw_solver(
+        urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
     )
-    if solver.dof != joint_count:
-        raise RuntimeError(
-            f"URDF chain must have {joint_count} joints, got {solver.dof}"
-        )
-    return solver
 
 
 def quaternion_to_rotation_matrix(x, y, z, w):
@@ -309,10 +332,10 @@ class AgxIkEngine:
                 position, rotation, seed_jnt_values=seed
             )
         if joints is None:
-            raise IkFailure("pytracik found no solution")
+            raise IkFailure("screw IK found no solution")
         joints = np.asarray(joints, dtype=float)
         if joints.shape != (self.joint_count,) or not np.all(np.isfinite(joints)):
-            raise IkFailure("pytracik returned an invalid joint vector")
+            raise IkFailure("IK returned an invalid joint vector")
 
         fk_position, fk_rotation = self.solver.fk(joints)
         position_error = float(np.linalg.norm(fk_position - position))

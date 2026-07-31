@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Solve AGX arm poses with pytracik and send limited joint goals."""
+"""Solve AGX arm poses with PoE screw IK and send limited joint goals."""
 
 from collections import deque
 import json
@@ -15,7 +15,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from armbycontroller.ik_core import AgxIkEngine
-from armbycontroller.ik_core import create_tracik_solver
+from armbycontroller.ik_core import create_screw_solver
 from armbycontroller.ik_core import IkFailure
 from armbycontroller.ik_core import prepare_planned_joint_mode
 from armbycontroller.ik_core import quaternion_to_rotation_matrix
@@ -26,13 +26,14 @@ from armbycontroller.ik_core import set_joint_acceleration_limits
 
 
 class PoseController(Node):
-    """Use pytracik IK/FK for Nero or Piper-L joint-space control."""
+    """Use screw-theory IK/FK for Nero or Piper-L joint-space control."""
 
     def __init__(self):
         super().__init__("pose_controller")
 
         self.declare_parameter("robot_model", "nero")
         self.declare_parameter("topic_prefix", "/nero")
+        self.declare_parameter("target_pose_topic", "")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
         self.declare_parameter("base_frame", "base_link")
@@ -75,6 +76,14 @@ class PoseController(Node):
         self.joint_count = 7 if self.robot_model == "nero" else 6
         prefix = str(self.get_parameter("topic_prefix").value).strip("/")
         self.topic_prefix = f"/{prefix}" if prefix else ""
+        configured_target_topic = str(
+            self.get_parameter("target_pose_topic").value
+        ).strip()
+        self.target_pose_topic = (
+            configured_target_topic
+            if configured_target_topic
+            else f"{self.topic_prefix}/target_pose"
+        )
         self.can_interface = str(self.get_parameter("can_interface").value)
         self.firmware = resolve_firmware_name(
             self.robot_model, self.get_parameter("firmware").value
@@ -175,7 +184,7 @@ class PoseController(Node):
 
         self.create_subscription(
             PoseStamped,
-            f"{self.topic_prefix}/target_pose",
+            self.target_pose_topic,
             self.target_pose_callback,
             10,
         )
@@ -195,12 +204,15 @@ class PoseController(Node):
             )
         elif self.execute_motion:
             self.get_logger().info(
-                "pytracik IK/FK ready; joint acceleration limits verified"
+                "screw IK/FK ready; joint acceleration limits verified"
             )
         else:
             self.get_logger().warning(
                 "execute_motion=false: IK/FK runs, but move_j is not sent"
             )
+        self.get_logger().info(
+            f"pose command topic: {self.target_pose_topic}"
+        )
         if self.workspace_limit_enabled:
             self.get_logger().info(
                 "safe radial workspace: %.4f to %.4f m from base_link"
@@ -258,7 +270,7 @@ class PoseController(Node):
             raise ValueError("workspace reach values and margins are invalid")
 
     def _create_solver(self):
-        self.ik_solver = create_tracik_solver(
+        self.ik_solver = create_screw_solver(
             self.urdf_path,
             self.base_frame,
             self.tip_link,
@@ -597,7 +609,10 @@ def main(args=None):
         pass
     finally:
         if node is not None:
-            node.destroy_node()
+            try:
+                node.destroy_node()
+            except KeyboardInterrupt:
+                pass
         if rclpy.ok():
             rclpy.shutdown()
 
