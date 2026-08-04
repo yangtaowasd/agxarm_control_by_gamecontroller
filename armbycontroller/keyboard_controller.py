@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unified ROS 2 keyboard controller for Nero and Piper-L arms."""
 
+import json
 import math
 import time
 from collections import deque
@@ -11,40 +12,96 @@ from typing import Sequence
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import PoseStamped
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32MultiArray
+from std_msgs.msg import String
 
 from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
 from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
+from armbycontroller.control_protocol import KEY_ARROW_DOWN
+from armbycontroller.control_protocol import KEY_ARROW_LEFT
+from armbycontroller.control_protocol import KEY_ARROW_RIGHT
+from armbycontroller.control_protocol import KEY_ARROW_UP
+from armbycontroller.control_protocol import KEY_BACKWARD
+from armbycontroller.control_protocol import KEY_COUNT
+from armbycontroller.control_protocol import KEY_DECREASE
+from armbycontroller.control_protocol import KEY_ESTOP
+from armbycontroller.control_protocol import KEY_FORWARD
+from armbycontroller.control_protocol import KEY_HOME
+from armbycontroller.control_protocol import KEY_IMPEDANCE_TOGGLE
+from armbycontroller.control_protocol import KEY_INCREASE
+from armbycontroller.control_protocol import KEY_JOINT_1
+from armbycontroller.control_protocol import KEY_MODE_TOGGLE
+from armbycontroller.control_protocol import KEY_ROLL_LEFT
+from armbycontroller.control_protocol import KEY_ROLL_RIGHT
+from armbycontroller.control_protocol import KEY_Z_DOWN
+from armbycontroller.control_protocol import KEY_Z_UP
 from armbycontroller.gravity_compensation import UrdfGravityModel
 from armbycontroller.ik_core import AgxIkEngine
 from armbycontroller.ik_core import create_screw_solver
 from armbycontroller.ik_core import IkFailure
 from armbycontroller.ik_core import increment_tool_orientation
 from armbycontroller.ik_core import prepare_planned_joint_mode
+from armbycontroller.ik_core import quaternion_to_rotation_matrix
 from armbycontroller.ik_core import resolve_urdf_path
 from armbycontroller.ik_core import resolve_firmware_name
+from armbycontroller.ik_core import rotation_matrix_to_quaternion
 from armbycontroller.ik_core import set_joint_acceleration_limits
-
-
-KEY_JOINT_1, KEY_JOINT_7 = 0, 6
-KEY_DECREASE, KEY_INCREASE = 7, 8
-KEY_HOME, KEY_ESTOP, KEY_MODE_TOGGLE = 9, 10, 11
-KEY_FORWARD, KEY_BACKWARD, KEY_Z_UP, KEY_Z_DOWN = 12, 13, 14, 15
-KEY_IMPEDANCE_TOGGLE = 16
-KEY_ARROW_UP, KEY_ARROW_DOWN = 17, 18
-KEY_ARROW_LEFT, KEY_ARROW_RIGHT = 19, 20
-KEY_ROLL_LEFT, KEY_ROLL_RIGHT = 21, 22
-KEY_COUNT = 23
+from armbycontroller.model_profiles import get_arm_profile
 
 
 def clamp(value, low, high):
     return min(max(value, low), high)
+
+
+def advance_simulated_joint_state(
+    position,
+    velocity,
+    target,
+    max_velocity,
+    max_acceleration,
+    period,
+):
+    """Advance one bounded acceleration-limited simulation sample."""
+    position = np.asarray(position, dtype=float).copy()
+    velocity = np.asarray(velocity, dtype=float).copy()
+    target = np.asarray(target, dtype=float)
+    if position.shape != velocity.shape or position.shape != target.shape:
+        raise ValueError("simulation position, velocity and target must match")
+    if (
+        max_velocity <= 0.0
+        or max_acceleration <= 0.0
+        or period <= 0.0
+    ):
+        raise ValueError("simulation limits and period must be positive")
+    error = target - position
+    braking_velocity = np.sqrt(
+        2.0 * float(max_acceleration) * np.abs(error)
+    )
+    desired_velocity = np.sign(error) * np.minimum(
+        float(max_velocity), braking_velocity
+    )
+    max_change = float(max_acceleration) * float(period)
+    velocity += np.clip(
+        desired_velocity - velocity, -max_change, max_change
+    )
+    step = velocity * float(period)
+    arrived = (
+        np.abs(error) < 1e-9
+    ) | (
+        (error * step > 0.0) & (np.abs(step) >= np.abs(error))
+    )
+    position += step
+    position[arrived] = target[arrived]
+    velocity[arrived] = 0.0
+    return position, velocity
 
 
 @dataclass(frozen=True)
@@ -134,13 +191,15 @@ class ArmJointJogState:
         )
 
 
+_NERO_PROFILE = get_arm_profile("nero")
+_PIPER_PROFILE = get_arm_profile("piper_l")
 MODEL_PROFILES = {
     "nero": {
         "arm_model": ArmModel.NERO,
-        "joint_count": 7,
-        "tip_link": "link7",
-        "min_reach": 0.1447354,
-        "max_reach": 0.7374482,
+        "joint_count": _NERO_PROFILE.joint_count,
+        "tip_link": _NERO_PROFILE.tip_link,
+        "min_reach": _NERO_PROFILE.min_reach,
+        "max_reach": _NERO_PROFILE.max_reach,
         "firmwares": {
             "default": NeroFW.DEFAULT, "v111": NeroFW.V111,
             "v112": NeroFW.V112, "v120": NeroFW.V120,
@@ -148,10 +207,10 @@ MODEL_PROFILES = {
     },
     "piper_l": {
         "arm_model": ArmModel.PIPER_L,
-        "joint_count": 6,
-        "tip_link": "link6",
-        "min_reach": 0.0,
-        "max_reach": 0.8738043,
+        "joint_count": _PIPER_PROFILE.joint_count,
+        "tip_link": _PIPER_PROFILE.tip_link,
+        "min_reach": _PIPER_PROFILE.min_reach,
+        "max_reach": _PIPER_PROFILE.max_reach,
         "firmwares": {
             "default": PiperFW.DEFAULT, "v183": PiperFW.V183,
             "v188": PiperFW.V188, "v189": PiperFW.V189,
@@ -364,6 +423,7 @@ class ArmKeyboardController(Node):
             self.get_parameter("robot_model").value
         ).lower()
         gain_model = declared_model if declared_model in MODEL_PROFILES else "nero"
+        default_model_profile = get_arm_profile(gain_model)
         default_mit_kp, default_mit_kd = default_mit_gains(gain_model)
         default_mit_feedforward_values = default_mit_feedforward(gain_model)
         self.declare_parameter("keyboard_topic", "/arm_keyboard_state")
@@ -385,6 +445,14 @@ class ArmKeyboardController(Node):
         self.declare_parameter("reset_emergency_stop_on_start", True)
         self.declare_parameter("emergency_reset_timeout", 5.0)
         self.declare_parameter("execute_motion", True)
+        self.declare_parameter("simulation_mode", False)
+        self.declare_parameter(
+            "initial_joint_positions",
+            list(default_model_profile.initial_joint_positions),
+        )
+        self.declare_parameter("state_period", 1.0 / 30.0)
+        self.declare_parameter("simulation_max_velocity", 1.0)
+        self.declare_parameter("target_pose_topic", "")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("tip_link", "")
@@ -472,6 +540,30 @@ class ArmKeyboardController(Node):
             self.get_parameter("emergency_reset_timeout").value
         )
         self.execute_motion = bool(self.get_parameter("execute_motion").value)
+        self.simulation_mode = bool(
+            self.get_parameter("simulation_mode").value
+        )
+        self.simulated_joints = np.asarray(
+            self.get_parameter("initial_joint_positions").value,
+            dtype=float,
+        )
+        self.simulated_velocities = np.zeros(
+            self.joint_count, dtype=float
+        )
+        self.state_period = float(
+            self.get_parameter("state_period").value
+        )
+        self.simulation_max_velocity = float(
+            self.get_parameter("simulation_max_velocity").value
+        )
+        configured_target_topic = str(
+            self.get_parameter("target_pose_topic").value
+        ).strip()
+        self.topic_prefix = f"/{self.robot_model}"
+        self.target_pose_topic = (
+            configured_target_topic
+            or f"{self.topic_prefix}/target_pose"
+        )
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tip_link = (
             str(self.get_parameter("tip_link").value)
@@ -564,6 +656,17 @@ class ArmKeyboardController(Node):
 
         if self.control_rate <= 0.0:
             raise ValueError("control_rate must be > 0")
+        if (
+            self.simulated_joints.shape != (self.joint_count,)
+            or not np.all(np.isfinite(self.simulated_joints))
+        ):
+            raise ValueError(
+                "initial_joint_positions must match the robot joint count"
+            )
+        if self.state_period <= 0.0 or self.simulation_max_velocity <= 0.0:
+            raise ValueError(
+                "simulation state period and velocity must be positive"
+            )
         if not 1 <= self.speed_percent <= 100:
             raise ValueError("speed_percent must be in [1, 100]")
         if self.joint_max_acceleration <= 0.0:
@@ -706,12 +809,28 @@ class ArmKeyboardController(Node):
         self.arm_ready = False
         self.emergency_stopped = False
         self.last_mit_tick_time = None
+        self.simulated_target_joints = self.simulated_joints.copy()
 
         self.keyboard_sub = self.create_subscription(
             Int32MultiArray,
             self.keyboard_topic,
             self.keyboard_callback,
             qos_profile_sensor_data,
+        )
+        self.target_pose_sub = self.create_subscription(
+            PoseStamped,
+            self.target_pose_topic,
+            self.target_pose_callback,
+            10,
+        )
+        self.joint_state_pub = self.create_publisher(
+            JointState, "/joint_states", 10
+        )
+        self.current_pose_pub = self.create_publisher(
+            PoseStamped, f"{self.topic_prefix}/current_pose", 10
+        )
+        self.ik_status_pub = self.create_publisher(
+            String, f"{self.topic_prefix}/ik_status", 10
         )
         self.connect_arm()
         self.mit_trajectory.reset(self.jog.target_joints)
@@ -720,6 +839,9 @@ class ArmKeyboardController(Node):
         self.timer = self.create_timer(1.0 / self.control_rate, self.control_tick)
         self.mit_timer = self.create_timer(
             1.0 / self.mit_command_rate, self.mit_tick
+        )
+        self.state_timer = self.create_timer(
+            self.state_period, self.publish_state
         )
 
         self.get_logger().info(
@@ -739,7 +861,133 @@ class ArmKeyboardController(Node):
         self.key_state = [1 if value else 0 for value in data[:KEY_COUNT]]
         self.last_keyboard_time = time.monotonic()
 
+    def current_joint_feedback(self):
+        """Return live hardware feedback or the current simulated state."""
+        if getattr(self, "simulation_mode", False):
+            return self.simulated_joints.copy()
+        if not self.arm_connected:
+            return None
+        try:
+            joints = extract_joint_angles(
+                self.arm.get_joint_angles(), self.joint_count
+            )
+        except Exception as exc:
+            self.get_logger().warning(
+                f"joint feedback unavailable: {exc}",
+                throttle_duration_sec=1.0,
+            )
+            return None
+        if joints is None:
+            return None
+        values = np.asarray(joints, dtype=float)
+        return values if np.all(np.isfinite(values)) else None
+
+    def publish_state(self):
+        """Publish identical RViz/web feedback in simulation and hardware."""
+        if self.simulation_mode and not self.emergency_stopped:
+            (
+                self.simulated_joints,
+                self.simulated_velocities,
+            ) = advance_simulated_joint_state(
+                self.simulated_joints,
+                self.simulated_velocities,
+                self.simulated_target_joints,
+                self.simulation_max_velocity,
+                self.joint_max_acceleration,
+                self.state_period,
+            )
+        joints = self.current_joint_feedback()
+        if joints is None:
+            return
+        stamp = self.get_clock().now().to_msg()
+        joint_state = JointState()
+        joint_state.header.stamp = stamp
+        joint_state.name = [
+            f"joint{index}" for index in range(1, self.joint_count + 1)
+        ]
+        joint_state.position = joints.tolist()
+        self.joint_state_pub.publish(joint_state)
+
+        position, rotation = self.ik_solver.fk(joints)
+        quaternion = rotation_matrix_to_quaternion(rotation)
+        pose = PoseStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = self.base_frame
+        pose.pose.position.x = float(position[0])
+        pose.pose.position.y = float(position[1])
+        pose.pose.position.z = float(position[2])
+        pose.pose.orientation.x = float(quaternion[0])
+        pose.pose.orientation.y = float(quaternion[1])
+        pose.pose.orientation.z = float(quaternion[2])
+        pose.pose.orientation.w = float(quaternion[3])
+        self.current_pose_pub.publish(pose)
+
+    def publish_ik_status(self, state, message):
+        status = String()
+        status.data = json.dumps(
+            {"state": state, "message": message},
+            ensure_ascii=False,
+        )
+        self.ik_status_pub.publish(status)
+
+    def target_pose_callback(self, message):
+        """Accept the phone pose through the same screw-IK target state."""
+        if (
+            message.header.frame_id
+            and message.header.frame_id != self.base_frame
+        ):
+            self.publish_ik_status(
+                "recovering",
+                f"target frame must be {self.base_frame}",
+            )
+            return
+        target_position = np.asarray(
+            [
+                message.pose.position.x,
+                message.pose.position.y,
+                message.pose.position.z,
+            ],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(target_position)):
+            self.publish_ik_status(
+                "recovering", "target position is not finite"
+            )
+            return
+        try:
+            target_rotation = quaternion_to_rotation_matrix(
+                message.pose.orientation.x,
+                message.pose.orientation.y,
+                message.pose.orientation.z,
+                message.pose.orientation.w,
+            )
+            result = self.ik_engine.solve(
+                target_position,
+                target_rotation,
+                np.asarray(self.jog.target_joints, dtype=float),
+            )
+        except (IkFailure, ValueError) as error:
+            self.recover_ik(str(error))
+            self.publish_ik_status("recovering", str(error))
+            return
+        self.ik_target_position = target_position
+        self.ik_target_rotation = target_rotation
+        self.jog.sync_target(result.joints)
+        self.remember_ik_valid(
+            target_position, target_rotation, result.joints
+        )
+        self.send_target("phone pose")
+        self.publish_ik_status("ok", "phone pose accepted")
+
     def connect_arm(self):
+        if getattr(self, "simulation_mode", False):
+            self.jog.sync_target(self.simulated_joints)
+            self.simulated_target_joints = self.simulated_joints.copy()
+            self.arm_ready = True
+            self.get_logger().info(
+                "simulation mode: CAN disabled; publishing live joint states"
+            )
+            return
         config = create_agx_arm_config(
             robot=self.profile["arm_model"],
             firmeware_version=self.firmware,
@@ -1245,6 +1493,8 @@ class ArmKeyboardController(Node):
             self.trigger_emergency_stop()
 
     def current_or_target_joints(self):
+        if getattr(self, "simulation_mode", False):
+            return self.simulated_joints.copy()
         if self.execute_motion and self.arm_ready:
             try:
                 joints = extract_joint_angles(
@@ -1278,6 +1528,8 @@ class ArmKeyboardController(Node):
             f"IK stuck: {reason}; retained last valid target and paused "
             f"{self.ik_recovery_pause:.1f} s"
         )
+        if hasattr(self, "ik_status_pub"):
+            self.publish_ik_status("recovering", str(reason))
 
     def apply_cartesian_step(self, keys):
         remaining = self.ik_recovery_until - time.monotonic()
@@ -1338,6 +1590,11 @@ class ArmKeyboardController(Node):
             f"{reason}: {[round(value, 4) for value in target]}",
             throttle_duration_sec=0.25,
         )
+        if getattr(self, "simulation_mode", False):
+            self.simulated_target_joints = np.asarray(
+                target, dtype=float
+            )
+            return
         if not self.execute_motion:
             return
         if self.impedance_enabled:
@@ -1356,6 +1613,10 @@ class ArmKeyboardController(Node):
         self.emergency_stopped = True
         self.arm_ready = False
         self.get_logger().error("ELECTRONIC EMERGENCY STOP requested")
+        if getattr(self, "simulation_mode", False):
+            self.simulated_target_joints = self.simulated_joints.copy()
+            self.simulated_velocities.fill(0.0)
+            return
         if self.execute_motion and self.arm_connected:
             try:
                 self.arm.electronic_emergency_stop()

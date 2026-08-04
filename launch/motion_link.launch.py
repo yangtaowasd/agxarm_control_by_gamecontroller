@@ -1,4 +1,4 @@
-"""Launch pose control with the Motion Link phone bridge."""
+"""Launch unified web/phone keyboard control with live state feedback."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -6,25 +6,7 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-
-PROFILES = {
-    "nero": {
-        "topic_prefix": "/nero",
-        "tip_link": "link7",
-        "initial_joint_positions": [0.0, 1.2, 0.0, 0.8, 0.0, 0.0, 0.0],
-        "robot_min_reach": 0.1447354,
-        "robot_max_reach": 0.7374482,
-    },
-    "piper_l": {
-        "topic_prefix": "/piper_l",
-        "tip_link": "link6",
-        "initial_joint_positions": [
-            0.0, 1.3939753, -1.0158306, 0.0, 1.2799181, 0.0
-        ],
-        "robot_min_reach": 0.0,
-        "robot_max_reach": 0.8738043,
-    },
-}
+from armbycontroller.model_profiles import get_arm_profile
 
 
 def _parse_bool(value):
@@ -40,8 +22,7 @@ def _parse_bool(value):
 def _nodes(context):
     """Create model-specific controller and bridge nodes."""
     model = LaunchConfiguration("robot_model").perform(context).lower()
-    if model not in PROFILES:
-        raise ValueError(f"robot_model must be one of {sorted(PROFILES)}")
+    profile = get_arm_profile(model)
     simulation_mode = _parse_bool(
         LaunchConfiguration("simulation_mode").perform(context)
     )
@@ -51,56 +32,93 @@ def _nodes(context):
     enable_commands = _parse_bool(
         LaunchConfiguration("enable_commands").perform(context)
     )
+    backend_api_enabled = _parse_bool(
+        LaunchConfiguration("backend_api_enabled").perform(context)
+    )
+    backend_transport = LaunchConfiguration(
+        "backend_transport"
+    ).perform(context).strip().lower()
+    if backend_transport not in ("motion_link", "http", "both"):
+        raise ValueError(
+            "backend_transport must be motion_link, http or both"
+        )
+    if backend_transport in ("http", "both") and not backend_api_enabled:
+        raise ValueError(
+            "HTTP command transport requires backend_api_enabled=true"
+        )
     if execute_motion and not enable_commands:
         raise ValueError(
             "execute_motion=true requires enable_commands=true"
         )
-    profile = PROFILES[model]
     common = {
         "robot_model": model,
-        "topic_prefix": profile["topic_prefix"],
+        "topic_prefix": profile.topic_prefix,
     }
     controller_parameters = {
-        **common,
-        **profile,
+        "robot_model": model,
         "simulation_mode": simulation_mode,
         "execute_motion": execute_motion,
         "can_interface": LaunchConfiguration("can_interface"),
-        # The publisher remains 30 Hz. A 30 ms acceptance gate leaves
-        # scheduler jitter below the nominal 33.3 ms sample interval.
-        "command_period": 0.03,
+        "initial_joint_positions": list(profile.initial_joint_positions),
         "state_period": 1.0 / 30.0,
-        "pointing_axis_only": False,
-        "workspace_limit_enabled": True,
+        "robot_min_reach": profile.min_reach,
+        "robot_max_reach": profile.max_reach,
         "workspace_inner_margin": 0.05,
         "workspace_outer_margin": 0.10,
+        "move_home_on_start": False,
+        "reset_emergency_stop_on_start": False,
     }
     bridge_parameters = {
         **common,
         "server_url": LaunchConfiguration("server_url"),
-        "enable_commands": enable_commands,
+        "enable_commands": (
+            enable_commands
+            and backend_transport in ("motion_link", "both")
+        ),
+        "simulation_mode": simulation_mode,
         "publish_rate_hz": 30.0,
         "maximum_rotation_rad": LaunchConfiguration(
             "maximum_rotation_rad"
         ),
         "end_effector": LaunchConfiguration("end_effector"),
     }
-    return [
+    nodes = [
         Node(
             package="armbycontroller",
-            executable="pose_controller.py",
-            name=f"{model}_pose_controller",
+            executable="keyboard_controller.py",
+            name=f"{model}_keyboard_controller",
             output="screen",
             parameters=[controller_parameters],
         ),
-        Node(
+    ]
+    if backend_transport in ("motion_link", "both"):
+        nodes.append(Node(
             package="armbycontroller",
             executable="motion_link_bridge.py",
             name=f"{model}_motion_link_bridge",
             output="screen",
             parameters=[bridge_parameters],
-        ),
-    ]
+        ))
+    if backend_api_enabled:
+        nodes.append(
+            Node(
+                package="armbycontroller",
+                executable="backend_api.py",
+                name=f"{model}_backend_api",
+                output="screen",
+                parameters=[{
+                    "robot_model": model,
+                    "api_host": LaunchConfiguration("backend_api_host"),
+                    "api_port": LaunchConfiguration("backend_api_port"),
+                    "api_token": LaunchConfiguration("backend_api_token"),
+                    "enable_commands": (
+                        enable_commands
+                        and backend_transport in ("http", "both")
+                    ),
+                }],
+            )
+        )
+    return nodes
 
 
 def generate_launch_description():
@@ -114,6 +132,15 @@ def generate_launch_description():
         DeclareLaunchArgument("simulation_mode", default_value="true"),
         DeclareLaunchArgument("execute_motion", default_value="false"),
         DeclareLaunchArgument("enable_commands", default_value="false"),
+        DeclareLaunchArgument("backend_api_enabled", default_value="true"),
+        DeclareLaunchArgument(
+            "backend_transport", default_value="motion_link"
+        ),
+        DeclareLaunchArgument(
+            "backend_api_host", default_value="127.0.0.1"
+        ),
+        DeclareLaunchArgument("backend_api_port", default_value="8765"),
+        DeclareLaunchArgument("backend_api_token", default_value=""),
         DeclareLaunchArgument(
             "maximum_rotation_rad", default_value="0.6"
         ),

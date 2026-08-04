@@ -36,6 +36,8 @@ install(PROGRAMS
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
+  armbycontroller/backend_api.py
+  armbycontroller/hardware_probe.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -43,6 +45,11 @@ install(DIRECTORY
   launch
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
+)
+
+install(DIRECTORY
+  docs
+  DESTINATION share/${PROJECT_NAME}
 )
 
 install(DIRECTORY
