@@ -36,56 +36,49 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `1` ... `7`: select joint; Piper-L ignores `7` because it has six joints
 - Joint mode: `A/D` decreases/increases the selected joint
 - `P`: switch between joint mode and Cartesian IK mode
-- `I`: switch between planned position control and MIT joint impedance
+- `I`: switch between planned position control and Cartesian impedance
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
 - `SPACE`: all joints return to zero
 - `E`: electronic emergency stop
 
-For keyboard IK through MIT, wait for startup zeroing, press `I` to enter MIT,
-then press `P` to enter IK. `W/S/A/D/Z/X`, arrows, and PageUp/PageDown update
-the IK joint target. Both IK target generation and the MIT command loop run at
-100 Hz. A jerk-limited joint trajectory supplies continuous `q_des`, `dq_des`,
-and `ddq_des`; `P` and `I` are independent, so either order works.
+For keyboard Cartesian impedance, wait for startup zeroing, press `I`, then
+press `P` to enter IK. `W/S/A/D/Z/X`, arrows, and PageUp/PageDown update the
+desired tool pose. The target is still checked by IK for workspace and joint
+limits, but IK joint positions are used only as the redundant-arm posture
+reference. In joint input mode, the selected joint goal is converted to a tool
+pose by FK. All FK, IK, and Jacobian calculations use the same PoE screw model;
+there is no classical-IK fallback. `P` and `I` are independent, so either order
+works.
 
-MIT impedance uses the SDK equation
-`τ_ref = Kp(q_des-q) + Kd(dq_des-dq) + τ_ff`. It therefore changes the joint
-control backend, while `P` only changes how the desired joint target is
-generated. Piper-L uses independent per-joint gains:
-`Kp=[0.3, 0.5, 0.5, 0.5, 1.0, 0.3]` and `Kd=0.01`. Nero retains
-`Kp=1.0, Kd=0.2`.
-The configured `mit_kp` and `mit_kd` values are sent unchanged on every MIT
-command. There is no takeover stiffness, gain ramp, or speed-adaptive damping.
-The residual feed-forward bias defaults to zero and the refresh rate is 100 Hz.
-Pressing `I` first requires complete position/velocity feedback and a valid
-inverse-dynamics result. It captures the current joints and applies full gravity
-support on the first MIT frame while leaving Kp/Kd unchanged.
+The 100 Hz controller evaluates
+`tau = Jg.T @ (Kx * pose_error - Dx * tool_twist) + C(q,dq)dq + g(q)`.
+Pose error, twist, stiffness, and damping use
+`[rx, ry, rz, x, y, z]` base-frame order. The defaults are
+`cartesian_stiffness=[4,4,4,80,80,80]` and
+`cartesian_damping=[1.5,1.5,1.5,12,12,12]`; rotational entries have
+N·m/rad and N·m·s/rad units, while translational entries have N/m and N·s/m
+units. Nero's redundant seventh axis also receives an exact-nullspace posture
+term configured by `cartesian_nullspace_stiffness` and
+`cartesian_nullspace_damping`. Piper-L has no nominal kinematic null space.
 
-MIT mode reads the selected unmodified Nero or Piper-L model and computes full
-rigid-body inverse dynamics at every tick:
-`tau_ff = M(q) ddq_des + C(q,dq_des) dq_des + g(q) + tau_bias`.
-It uses measured arm positions for `q` and the continuous trajectory references
-for velocity and acceleration. The calculation uses the validated Modern
-Robotics PoE/RNEA path and includes the URDF link inertias; it does not estimate
-joint friction or unmodelled cable forces.
-Piper-L uses its gripper model and Nero uses its Revo2 left-hand model. The
-accessory joints are evaluated at their URDF zero positions and only the arm's
-6/7 joints receive MIT commands. Model torque is active from the first MIT
-frame. After adding it, the controller estimates the native MIT PD term from
-measured `q/dq` and adjusts `t_ff` so the combined reference is as close as
-possible to the per-joint ±10 N·m limit. The `t_ff` channel is itself kept
-inside ±10 N·m. If the PD term alone is too large to counteract within that
-range, the controller warns and applies the maximum available cancellation.
-This is a command-level estimate, not measured contact torque feedback.
-`mit_feedforward` is an additional residual calibration bias and defaults to
-zero. Set `mit_gravity_scale` within `[0, 1]` to reduce its contribution or tune
-`mit_gravity_torque_limit`. Disabling the model also disables entry into MIT on
-real hardware. The default gravity
-vector is `[0, 0, -9.80665]` in `base_link`, assuming an upright base.
-The `mit_gravity_*` parameter names are retained for launch-file compatibility:
-scale applies to model torque, while the limit applies to both `t_ff` and the
-estimated combined MIT reference.
+The SDK MIT interface is used only as a joint-torque transport. Every command
+sets native MIT `kp=0`, `kd=0`, holds `p_des` at measured `q`, and sends the
+computed torque through `t_ff`, so no joint-space impedance is superimposed.
+Legacy `mit_kp` and `mit_kd` parameters are accepted but intentionally ignored.
+Pressing `I` requires complete position/velocity feedback and a valid dynamics
+result, then captures the current tool pose for a zero-error takeover.
+
+The dynamics term uses measured `q/dq`, zero joint acceleration, and the
+selected unmodified Nero or Piper-L URDF. Piper-L uses its gripper model and
+Nero uses its Revo2 left-hand model; accessory joints remain at their URDF zero
+positions. `mit_feedforward` remains an optional residual calibration bias.
+`mit_gravity_scale` scales model compensation, and
+`mit_gravity_torque_limit` is retained as the compatibility name for the hard
+limit on the final Cartesian-impedance joint torque (default ±10 N·m). This is
+a commanded torque limit, not measured contact-force feedback. The default
+gravity vector is `[0, 0, -9.80665]` in `base_link`.
 
 Run Nero:
 
@@ -108,7 +101,7 @@ ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=piper_l device:=/dev/input/event3 \
   can_interface:=can0 firmware:=auto
 
-# Start directly in MIT impedance mode by adding impedance_enabled:=true.
+# Start directly in Cartesian impedance mode with impedance_enabled:=true.
 ```
 
 Dry run:
@@ -120,11 +113,8 @@ ros2 launch armbycontroller keyboard_control.launch.py \
 
 The controller defaults to 100 Hz IK/control scheduling. Per-tick keyboard
 increments are scaled so the original Cartesian, orientation, and joint jog
-speeds are preserved at the higher rate. The MIT reference generator defaults
-to 0.5 rad/s velocity, 1 rad/s² acceleration, and 5 rad/s³ jerk limits, exposed
-as `mit_trajectory_max_velocity`, `mit_trajectory_max_acceleration`, and
-`mit_trajectory_max_jerk`. Planned mode retains 20 percent speed and 1 rad/s²
-maximum joint acceleration. IK keeps the tool
+speeds are preserved at the higher rate. Planned mode retains 20 percent speed
+and 1 rad/s² maximum joint acceleration. IK keeps the tool
 local `+Z` axis pointing toward `base_link -Z`; rotation around that axis is
 free. It retains ten verified states and pauses for two seconds after recovery.
 Acceleration limits are written and verified one joint at a time because the

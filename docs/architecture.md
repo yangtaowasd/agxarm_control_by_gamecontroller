@@ -33,7 +33,8 @@ Only one backend adapter should own commands in normal operation. The
 | --- | --- |
 | `model_profiles.py` | Canonical static Nero/Piper-L facts |
 | `control_protocol.py` | Canonical 23-key indices and semantic action mapping |
-| `keyboard_controller.py` | Unified joint, Cartesian IK, planned, MIT, simulation, and hardware control |
+| `keyboard_controller.py` | Unified joint/IK targets, planned motion, Cartesian impedance, simulation, and hardware control |
+| `cartesian_impedance.py` | Task-space spring/damper, geometric Jacobian transpose, and redundant-arm nullspace torque |
 | `pose_controller.py` | Standalone absolute-pose IK controller used by RViz workflows |
 | `backend_protocol.py` | Transport-independent command and feedback validation |
 | `backend_api.py` | Local versioned HTTP command API and SSE feedback adapter |
