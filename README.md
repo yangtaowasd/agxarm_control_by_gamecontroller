@@ -3,6 +3,48 @@
 ROS 2 control for AGX Nero, Piper-L, and a Revo2 hand. Nero and Piper-L share
 the same controller, keyboard topic, key indices, IK core, and launch files.
 
+## Cartesian impedance development branch
+
+`feature/cartesian-impedance-step-by-step` starts from the validated joint MIT
+impedance baseline and adds Cartesian impedance in independently tested stages.
+The formula core is now connected to the existing keyboard state machine and
+the AGX MIT/CAN adapter. `impedance_backend:=cartesian` is the default;
+`impedance_backend:=joint` retains the previous joint MIT controller for
+comparison.
+
+Task vectors use `[angular; linear] = [rx, ry, rz, x, y, z]`. Because the PoE
+model returns a Modern Robotics space Jacobian, it is first converted to the
+tool-origin geometric Jacobian:
+
+```text
+Jg = [Jw; Jv - [p]x Jw]
+e  = [Log(Rd R^T)^vee; pd - p]
+xd = Jg qdot
+Fc = Kx e + Dx (xd_des - xd)
+tau_task = Jg^T Fc
+tau_model = C(q,qdot)qdot + g(q)
+tau_cmd = tau_task + tau_model
+```
+
+The rotational stiffness about base-frame Z is independently configurable as
+`cartesian_impedance_base_z_rotation_stiffness` (default `4.0 N.m/rad`). The
+shared `cartesian_impedance_rotation_stiffness` value (default `0.4 N.m/rad`)
+continues to set base-frame X/Y rotation. This strengthens the principal J1
+return direction without raising all wrist rotation axes together.
+
+`tau_cmd` is the immediate, stateless equation result. The MIT adapter applies
+only a per-joint absolute limit (±8 N·m by default, including model support).
+It does not apply a previous-cycle torque-rate limiter (`delta_tau` or
+`delta_tau_max`).
+
+The local joint-space equivalence is the full matrix relation
+`Kq=Jg.T Kx Jg`, `Dq=Jg.T Dx Jg`. Off-diagonal coupling is retained; this
+stage does not replace it with diagonal MIT gains. For a nonsingular six-axis
+pose only, the unique reverse relation is
+`Kx=Jg^-T Kq Jg^-1`, `Dx=Jg^-T Dq Jg^-1`; redundant or singular cases are
+explicitly rejected instead of silently using a pseudoinverse. See
+`PROJECT_STUDY_GUIDE_ZH_EN.md` for the bilingual derivation and staged plan.
+
 ## Build
 
 ```bash
@@ -25,7 +67,8 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `1` ... `7`: select joint; Piper-L ignores `7` because it has six joints
 - Joint mode: `A/D` decreases/increases the selected joint
 - `P`: switch between joint mode and Cartesian IK mode
-- `I`: switch between planned position control and MIT joint impedance
+- `I`: switch between planned position control and the selected MIT impedance
+  backend (Cartesian by default)
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
@@ -38,43 +81,24 @@ the IK joint target. Both IK target generation and the MIT command loop run at
 100 Hz. A jerk-limited joint trajectory supplies continuous `q_des`, `dq_des`,
 and `ddq_des`; `P` and `I` are independent, so either order works.
 
-MIT impedance uses the SDK equation
-`τ_ref = Kp(q_des-q) + Kd(dq_des-dq) + τ_ff`. It therefore changes the joint
-control backend, while `P` only changes how the desired joint target is
-generated. Piper-L uses independent per-joint gains:
-`Kp=[0.3, 0.5, 0.5, 0.5, 1.0, 0.3]` and `Kd=0.01`. Nero retains
-`Kp=1.0, Kd=0.2`.
-The configured `mit_kp` and `mit_kd` values are sent unchanged on every MIT
-command. There is no takeover stiffness, gain ramp, or speed-adaptive damping.
-The residual feed-forward bias defaults to zero and the refresh rate is 100 Hz.
-Pressing `I` first requires complete position/velocity feedback and a valid
-inverse-dynamics result. It captures the current joints and applies full gravity
-support on the first MIT frame while leaving Kp/Kd unchanged.
+The Cartesian backend uses the SDK equation
+`τ_ref=Kp(q_des-q)+Kd(dq_des-dq)+τ_ff` with `Kp=0`, `Kd=0`,
+`p_des=q_measured`, `v_des=0`, and
+`τ_ff=clip(Jg.T Fc+C(q,dq)dq+g(q), ±τ_limit)`. Thus the firmware does not add a
+second joint spring or damper. A continuous joint reference supplies the target
+pose and target twist through FK/Jacobian; this reference continuity is not a
+torque-rate limiter.
 
-MIT mode reads the selected unmodified Nero or Piper-L model and computes full
-rigid-body inverse dynamics at every tick:
-`tau_ff = M(q) ddq_des + C(q,dq_des) dq_des + g(q) + tau_bias`.
-It uses measured arm positions for `q` and the continuous trajectory references
-for velocity and acceleration. The calculation uses the validated Modern
-Robotics PoE/RNEA path and includes the URDF link inertias; it does not estimate
-joint friction or unmodelled cable forces.
-Piper-L uses its gripper model and Nero uses its Revo2 left-hand model. The
-accessory joints are evaluated at their URDF zero positions and only the arm's
-6/7 joints receive MIT commands. Model torque is active from the first MIT
-frame. After adding it, the controller estimates the native MIT PD term from
-measured `q/dq` and adjusts `t_ff` so the combined reference is as close as
-possible to the per-joint ±10 N·m limit. The `t_ff` channel is itself kept
-inside ±10 N·m. If the PD term alone is too large to counteract within that
-range, the controller warns and applies the maximum available cancellation.
-This is a command-level estimate, not measured contact torque feedback.
-`mit_feedforward` is an additional residual calibration bias and defaults to
-zero. Set `mit_gravity_scale` within `[0, 1]` to reduce its contribution or tune
-`mit_gravity_torque_limit`. Disabling the model also disables entry into MIT on
-real hardware. The default gravity
-vector is `[0, 0, -9.80665]` in `base_link`, assuming an upright base.
-The `mit_gravity_*` parameter names are retained for launch-file compatibility:
-scale applies to model torque, while the limit applies to both `t_ff` and the
-estimated combined MIT reference.
+Piper-L kinematics and inverse dynamics both use
+`piper_l_with_gripper_description.xacro`. Accessory joints are fixed at their
+URDF zero positions, their mass/inertia contributes to `C*dq+g`, and only the
+six arm joints receive MIT commands. The controlled task point remains
+`link6`; it is not the fingertip contact point. Complete measured `q/dq` and a
+valid URDF model are required before entry.
+
+For comparison, `impedance_backend:=joint` retains the previous native MIT
+joint impedance and its `mit_kp`, `mit_kd`, `mit_feedforward`, and
+`mit_gravity_*` parameters.
 
 Run Nero:
 
@@ -95,7 +119,9 @@ Run Piper-L with the same keys:
 ```bash
 ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=piper_l device:=/dev/input/event3 \
-  can_interface:=can0 firmware:=auto
+  can_interface:=can0 firmware:=auto \
+  impedance_backend:=cartesian \
+  cartesian_impedance_base_z_rotation_stiffness:=4.0
 
 # Start directly in MIT impedance mode by adding impedance_enabled:=true.
 ```
