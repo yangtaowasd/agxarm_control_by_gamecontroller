@@ -11,6 +11,7 @@ from armbycontroller.lie import adjoint
 from armbycontroller.lie import force_cross
 from armbycontroller.lie import joint_transform
 from armbycontroller.lie import motion_cross
+from armbycontroller.lie import rotation_exp
 from armbycontroller.lie import spatial_inertia
 from armbycontroller.lie import transform
 from armbycontroller.lie import transform_inverse
@@ -41,14 +42,11 @@ def _vector(element, attribute, default):
 
 def _rpy_rotation(rpy):
     roll, pitch, yaw = rpy
-    cr, sr = math.cos(roll), math.sin(roll)
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    return np.asarray([
-        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-        [-sp, cp * sr, cp * cr],
-    ])
+    return (
+        rotation_exp(np.asarray([0.0, 0.0, 1.0]), yaw)
+        @ rotation_exp(np.asarray([0.0, 1.0, 0.0]), pitch)
+        @ rotation_exp(np.asarray([1.0, 0.0, 0.0]), roll)
+    )
 
 
 @dataclass(frozen=True)

@@ -9,6 +9,8 @@ import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
 
+from armbycontroller.lie import rotation_exp
+from armbycontroller.lie import rotation_vector
 
 VERIFIED_FIRMWARE = {"nero": "v112", "piper_l": "v188"}
 
@@ -130,15 +132,6 @@ def create_screw_solver(
     )
 
 
-def create_tracik_solver(
-    urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
-):
-    """Compatibility alias for callers using the old helper name."""
-    return create_screw_solver(
-        urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
-    )
-
-
 def quaternion_to_rotation_matrix(x, y, z, w):
     """Convert a finite, non-zero quaternion to a 3x3 rotation matrix."""
     quaternion = np.asarray([x, y, z, w], dtype=float)
@@ -227,25 +220,15 @@ def make_pointing_quaternion(direction, roll_reference):
 
 def increment_tool_orientation(rotation, pitch, yaw, roll):
     """Apply base-frame pitch/yaw and tool-frame roll increments."""
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    cr, sr = math.cos(roll), math.sin(roll)
-    pitch_matrix = np.array(
-        [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]]
-    )
-    yaw_matrix = np.array(
-        [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]]
-    )
-    roll_matrix = np.array(
-        [[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]]
-    )
+    pitch_matrix = rotation_exp(np.asarray([0.0, 1.0, 0.0]), pitch)
+    yaw_matrix = rotation_exp(np.asarray([0.0, 0.0, 1.0]), yaw)
+    roll_matrix = rotation_exp(np.asarray([0.0, 0.0, 1.0]), roll)
     return yaw_matrix @ pitch_matrix @ rotation @ roll_matrix
 
 
 def rotation_error_angle(actual, target):
     """Return the shortest rotation angle between rotation matrices."""
-    cosine = (float(np.trace(actual.T @ target)) - 1.0) / 2.0
-    return math.acos(float(np.clip(cosine, -1.0, 1.0)))
+    return float(np.linalg.norm(rotation_vector(target @ actual.T)))
 
 
 def pointing_error_angle(actual, target):
@@ -265,9 +248,8 @@ def solve_pointing_ik(solver, position, target_rotation, seed, roll_samples):
     best_solution = None
     best_distance = math.inf
     for angle in np.linspace(0.0, 2.0 * math.pi, roll_samples, endpoint=False):
-        cosine, sine = math.cos(float(angle)), math.sin(float(angle))
-        local_roll = np.array(
-            [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]]
+        local_roll = rotation_exp(
+            np.asarray([0.0, 0.0, 1.0]), float(angle)
         )
         solution = solver.ik(
             position, target_rotation @ local_roll, seed_jnt_values=seed

@@ -63,8 +63,9 @@ tau_x^T qdot = F_c^T xdot
   `[Mx, My, Mz, Fx, Fy, Fz]`.
 - `q` 使用 rad，`qdot` 使用 rad/s，关节力矩使用 N·m。 / `q` uses rad,
   `qdot` uses rad/s, and joint torque uses N·m.
-- 旋转误差使用 base-frame rotation vector。 / Orientation error is a
-  base-frame rotation vector.
+- 旋转误差使用 base-frame rotation vector，不使用 RPY/Euler 角直接相减。 /
+  Orientation error is a base-frame rotation vector, not a direct RPY/Euler
+  angle subtraction.
 
 ## 4. 从 PoE 雅可比到几何雅可比 / PoE-to-geometric Jacobian
 
@@ -108,6 +109,42 @@ e_x = [e_R; e_p]
 
 `R_d R^T` expresses orientation error in the base frame, matching the angular
 rows of `Jg`.
+
+这里的 `Log(.)^vee` 是 SO(3) 对数映射：结果是轴角形式的三维旋转向量。笛卡尔
+阻抗的平移误差仍直接使用工具原点位移 `p_d-p`，使平移刚度保持 N/m，并与工具
+原点几何雅可比、物理 wrench 一致。这不是完整 `MatrixLog6` 误差，是有意保留的
+阻抗语义。
+
+Here `Log(.)^vee` is the SO(3) logarithm and returns a three-dimensional
+axis-angle rotation vector. Cartesian impedance still uses the direct tool-
+origin displacement `p_d-p`, preserving translational stiffness in N/m and
+its pairing with the tool-origin geometric Jacobian and physical wrench. It
+is intentionally not a full `MatrixLog6` error.
+
+### 5.1.1 旋量 IK 的完整 SE(3) 误差 / Full SE(3) error for screw IK
+
+```text
+V_error^s = Log(T_d T^-1)^vee
+delta_q   = J_s(q)^# V_error^s
+```
+
+旋量 IK 使用完整的基坐标系空间误差 twist，并直接配对 PoE 空间雅可比 `J_s`。
+旋转和平移在 SE(3) 对数中耦合；这里不再使用“旋转向量 + 普通位置差”的混合
+迭代误差。`#` 表示带奇异值自适应阻尼的广义逆。
+
+Screw IK uses a full base-frame space-error twist paired directly with the
+PoE space Jacobian `J_s`. Rotation and translation are coupled by the SE(3)
+logarithm; the iterative error is no longer a mixture of a rotation vector
+and ordinary position difference. `#` denotes the singularity-adaptive
+damped inverse.
+
+RPY 只作为 URDF 和手机传感器的输入格式。键盘小角度增量、URDF RPY 转换和手机
+姿态映射都通过 SO(3) 指数映射构造旋转矩阵；ROS 消息 seam 仍必须使用四元数。
+RPY 不参与 IK 或笛卡尔阻抗的姿态误差计算。 / RPY remains only an input
+format for URDF and phone sensor data. Keyboard increments, URDF RPY
+conversion, and phone orientation mapping construct rotations through SO(3)
+exponentials; ROS message seams still require quaternions. RPY is not used to
+compute IK or Cartesian-impedance orientation error.
 
 ### 5.2 速度误差与 wrench / Velocity error and wrench
 
@@ -288,11 +325,23 @@ comparison on the same arm.
 | 模块 / Module | 责任 / Responsibility |
 | --- | --- |
 | `armbycontroller/cartesian_impedance.py` | 纯数学公式、坐标验证、完整双向阻抗等价关系（仅在逆关系唯一时允许） / Pure formula, frame validation, and full bidirectional impedance equivalence only when the inverse is unique |
+| `armbycontroller/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学 / URDF PoE FK, space Jacobian, RNEA inverse dynamics |
-| `armbycontroller/screw_ik.py` | 基于旋量模型的数值 IK / Numerical IK using the screw model |
+| `armbycontroller/screw_ik.py` | 使用完整 SE(3) 空间误差和 PoE 空间雅可比的数值 IK / Numerical IK using a full SE(3) space error and PoE space Jacobian |
+| `armbycontroller/ik_core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
 | `armbycontroller/keyboard_controller.py` | JOINT/IK 参考、笛卡尔公式调用、绝对力矩上限和 MIT/CAN 发送；也保留旧关节 MIT 对照路径 / JOINT/IK reference, Cartesian formula invocation, absolute torque limit, and MIT/CAN transmission; also retains the old joint MIT comparison path |
 | `test/test_cartesian_impedance.py` | 坐标、符号、耦合、功率与模型支撑契约 / Frame, sign, coupling, power, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
+
+模型调用方直接依赖 `UrdfScrewModel` 和 `project_gravity_vector`；项目不再提供
+`UrdfGravityModel`、`nero_mount_gravity` 或 `create_tracik_solver` 浅兼容名称。
+已删除的本包 `ScrewVelocityIk` 没有运行时调用方；当前位置目标 IK 只由
+`ScrewIkSolver` 实现。 / Model callers depend directly on `UrdfScrewModel`
+and `project_gravity_vector`; the project no longer exposes the shallow
+`UrdfGravityModel`, `nero_mount_gravity`, or `create_tracik_solver`
+compatibility names. The removed package-local `ScrewVelocityIk` had no
+runtime callers; `ScrewIkSolver` is the current position-target IK
+implementation.
 
 ## 9. 参数、单位和默认值 / Parameters, units, and defaults
 
@@ -352,8 +401,8 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 
 ## 11. 已知风险 / Known risks
 
-- `Log(R_d R^T)` 在接近 180° 时数值条件变差。 / `Log(R_d R^T)` becomes
-  ill-conditioned near 180 degrees.
+- SO(3)/SE(3) 对数映射在接近 180° 旋转时数值条件变差。 / SO(3)/SE(3)
+  logarithms become ill-conditioned near 180-degree rotation.
 - `J^T` 不需要求逆，但奇异位形仍会失去某些可控 wrench 方向。 / `J^T`
   avoids inversion, but singular configurations still lose controllable
   wrench directions.
@@ -490,13 +539,15 @@ The formula layer should be diagnosed in this order:
    match an FK finite difference?
 4. `e_R/e_p` 的正负方向是否使 wrench 指向目标。 / Do `e_R/e_p` signs make
    the wrench point toward the target?
-5. 是否满足 `tau^T qdot = F^T xdot`。 / Does
+5. IK 是否使用 `Log(T_d T^-1)^vee` 与同一基坐标系的 `J_s`。 / Does IK pair
+   `Log(T_d T^-1)^vee` with `J_s` in the same base frame?
+6. 是否满足 `tau^T qdot = F^T xdot`。 / Does
    `tau^T qdot = F^T xdot` hold?
-6. `ID(q,qdot,0)` 是否只产生科氏/离心和重力支撑。 / Does
+7. `ID(q,qdot,0)` 是否只产生科氏/离心和重力支撑。 / Does
    `ID(q,qdot,0)` contain only Coriolis/centrifugal and gravity support?
-7. Nero 是否满足 `J_g M^-1 tau_null≈0`。 / Does Nero satisfy
+8. Nero 是否满足 `J_g M^-1 tau_null≈0`。 / Does Nero satisfy
    `J_g M^-1 tau_null≈0`?
-8. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
+9. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
    Do logged `task`, `null`, and `model` sum to the pre-clip `total`?
 
 ## 14. 分阶段学习与实现路线 / Staged learning and implementation path
@@ -556,6 +607,8 @@ The formula layer should be diagnosed in this order:
 | 动力学一致投影 | Dynamically consistent projection | Torque projection satisfying `J M^-1 tau_null=0` |
 | 半正定 | Positive semidefinite | Matrix with nonnegative quadratic energy |
 | 旋量 IK | Screw IK | IK based on PoE screws and SE(3) logarithms |
+| 旋转向量 | Rotation vector | `Log(R_d R^T)^vee` 轴角姿态误差，不是 RPY 差值 / Axis-angle orientation error, not an RPY difference |
+| 空间误差旋量 | Space-error twist | `Log(T_d T^-1)^vee`，表达在基坐标系并与 `J_s` 配对 / Base-frame SE(3) error paired with `J_s` |
 | MIT 命令 | MIT command | Native motor command with `p_des/v_des/kp/kd/t_ff` |
 
 ## 17. 主要资料 / Primary sources

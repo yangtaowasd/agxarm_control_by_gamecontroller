@@ -29,6 +29,25 @@ tau_model = C(q,qdot)qdot + g(q)
 tau_cmd = tau_task + tau_null + tau_model
 ```
 
+The Cartesian-impedance orientation error is an SO(3) logarithmic rotation
+vector expressed in the base frame, not an RPY/Euler-angle subtraction.
+Translation uses the direct tool-origin difference `pd-p`; this preserves the
+physical N/m spring and geometric-Jacobian wrench interpretation.
+
+The numerical screw IK uses the full base-frame SE(3) error and the PoE space
+Jacobian instead:
+
+```text
+V_error = Log(Td T^-1)^vee
+delta_q = Js(q)^# V_error
+```
+
+SO(3)/SE(3) logarithms, exponentials, and pose-error construction are
+concentrated in `armbycontroller/lie.py`. Keyboard orientation increments,
+Motion Link orientation limiting, URDF RPY conversion, Cartesian orientation
+error, and FK verification reuse that module. Quaternion conversion remains
+at ROS message seams, while URDF and phone RPY values remain input formats.
+
 The rotational stiffness about base-frame Z is independently configurable as
 `cartesian_impedance_base_z_rotation_stiffness` (default `4.0 N.m/rad`). The
 shared `cartesian_impedance_rotation_stiffness` value (default `0.4 N.m/rad`)
@@ -69,6 +88,9 @@ validated in `nero_screw_dynamics`. Nero URDF/Xacro files are resolved from
 that package first. Piper-L remains supported through the model bundled in
 `armbycontroller`. Both models use the same screw-theory IK/FK and
 inverse-dynamics module; `pytracik` is no longer required.
+Internal callers use `create_screw_solver`, `UrdfScrewModel`, and
+`project_gravity_vector` directly; the old TRAC-IK and gravity-model
+compatibility aliases have been removed.
 
 ## Unified keyboard control
 

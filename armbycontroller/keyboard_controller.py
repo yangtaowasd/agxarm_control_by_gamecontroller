@@ -24,7 +24,7 @@ from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 from armbycontroller.cartesian_impedance import cartesian_impedance_command
 from armbycontroller.cartesian_impedance import cartesian_impedance_diagonals
 from armbycontroller.cartesian_impedance import geometric_jacobian
-from armbycontroller.gravity_compensation import UrdfGravityModel
+from armbycontroller.screw_model import UrdfScrewModel
 from armbycontroller.ik_core import AgxIkEngine
 from armbycontroller.ik_core import create_screw_solver
 from armbycontroller.ik_core import IkFailure
@@ -785,7 +785,7 @@ class ArmKeyboardController(Node):
         )
         self.gravity_model = None
         if self.mit_gravity_compensation_enabled:
-            self.gravity_model = UrdfGravityModel(
+            self.gravity_model = UrdfScrewModel(
                 equipped_urdf_path,
                 self.base_frame,
                 self.tip_link,

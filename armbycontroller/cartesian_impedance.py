@@ -2,9 +2,9 @@
 
 from dataclasses import dataclass
 
-import modern_robotics as mr
 import numpy as np
 
+from armbycontroller.lie import rotation_vector
 from armbycontroller.lie import skew
 
 
@@ -129,11 +129,11 @@ def geometric_jacobian(model, joint_positions):
 
 
 def cartesian_pose_error(current_pose, desired_pose):
-    """Return base-frame pose error ``[rotation_vector; position]``."""
+    """Return tool-origin error ``[SO(3) rotation vector; position]``."""
     current = _transform(current_pose, "current_pose")
     desired = _transform(desired_pose, "desired_pose")
-    rotation_error = mr.so3ToVec(
-        mr.MatrixLog3(desired[:3, :3] @ current[:3, :3].T)
+    rotation_error = rotation_vector(
+        desired[:3, :3] @ current[:3, :3].T
     )
     error = np.concatenate((
         np.asarray(rotation_error, dtype=float),

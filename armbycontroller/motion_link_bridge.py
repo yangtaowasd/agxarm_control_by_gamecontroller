@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from geometry_msgs.msg import PoseStamped
-import modern_robotics as mr
 import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -21,29 +20,9 @@ import websocket
 
 from armbycontroller.ik_core import quaternion_to_rotation_matrix
 from armbycontroller.ik_core import rotation_matrix_to_quaternion
-
-
-def _axis_rotation(axis, angle):
-    """Return one right-handed elementary rotation matrix."""
-    cosine = math.cos(angle)
-    sine = math.sin(angle)
-    if axis == "x":
-        return np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, cosine, -sine],
-            [0.0, sine, cosine],
-        ])
-    if axis == "y":
-        return np.array([
-            [cosine, 0.0, sine],
-            [0.0, 1.0, 0.0],
-            [-sine, 0.0, cosine],
-        ])
-    return np.array([
-        [cosine, -sine, 0.0],
-        [sine, cosine, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
+from armbycontroller.lie import rotation_exp
+from armbycontroller.lie import rotation_from_vector
+from armbycontroller.lie import rotation_vector
 
 
 def phone_rotation(orientation):
@@ -57,9 +36,9 @@ def phone_rotation(orientation):
     if not all(math.isfinite(value) for value in (alpha, beta, gamma)):
         raise ValueError("phone orientation must be finite")
     return (
-        _axis_rotation("z", alpha)
-        @ _axis_rotation("x", beta)
-        @ _axis_rotation("y", gamma)
+        rotation_exp(np.asarray([0.0, 0.0, 1.0]), alpha)
+        @ rotation_exp(np.asarray([1.0, 0.0, 0.0]), beta)
+        @ rotation_exp(np.asarray([0.0, 1.0, 0.0]), gamma)
     )
 
 
@@ -71,11 +50,11 @@ def relative_target_rotation(
     if not math.isfinite(maximum_angle) or maximum_angle <= 0.0:
         raise ValueError("maximum_angle must be positive and finite")
     phone_delta = phone_reference.T @ phone_current
-    rotation_vector = mr.so3ToVec(mr.MatrixLog3(phone_delta))
-    angle = float(np.linalg.norm(rotation_vector))
+    delta_vector = rotation_vector(phone_delta)
+    angle = float(np.linalg.norm(delta_vector))
     if angle > maximum_angle:
-        rotation_vector *= maximum_angle / angle
-    return robot_reference @ mr.MatrixExp3(mr.VecToso3(rotation_vector))
+        delta_vector *= maximum_angle / angle
+    return robot_reference @ rotation_from_vector(delta_vector)
 
 
 def websocket_url(server_url, session):

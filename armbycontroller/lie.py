@@ -26,6 +26,36 @@ def rotation_exp(axis, angle, xp=np):
     )
 
 
+def rotation_vector(rotation):
+    """Return the SO(3) logarithm as one finite axis-angle vector."""
+    import modern_robotics as mr
+
+    matrix = np.asarray(rotation, dtype=float)
+    if (
+        matrix.shape != (3, 3)
+        or not np.all(np.isfinite(matrix))
+        or not np.allclose(matrix.T @ matrix, np.eye(3), atol=1e-7)
+        or not np.isclose(np.linalg.det(matrix), 1.0, atol=1e-7)
+    ):
+        raise ValueError("rotation must be a finite SO(3) matrix")
+    result = np.asarray(
+        mr.so3ToVec(mr.MatrixLog3(matrix)), dtype=float
+    )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("rotation logarithm is not finite")
+    return result
+
+
+def rotation_from_vector(vector):
+    """Exponentiate one finite axis-angle vector into SO(3)."""
+    import modern_robotics as mr
+
+    value = np.asarray(vector, dtype=float)
+    if value.shape != (3,) or not np.all(np.isfinite(value)):
+        raise ValueError("rotation vector must contain three finite values")
+    return np.asarray(mr.MatrixExp3(mr.VecToso3(value)), dtype=float)
+
+
 def transform(rotation=None, translation=None, xp=np):
     """Build a homogeneous transform without in-place array updates."""
     rotation = xp.eye(3) if rotation is None else xp.asarray(rotation)
@@ -42,6 +72,38 @@ def transform_inverse(matrix, xp=np):
     rotation = matrix[:3, :3]
     translation = matrix[:3, 3]
     return transform(rotation.T, -(rotation.T @ translation), xp)
+
+
+def space_pose_error(current, desired):
+    """Return ``Log(T_desired T_current^-1)`` as a base-frame twist."""
+    import modern_robotics as mr
+
+    current = np.asarray(current, dtype=float)
+    desired = np.asarray(desired, dtype=float)
+    for matrix, name in ((current, "current"), (desired, "desired")):
+        if (
+            matrix.shape != (4, 4)
+            or not np.all(np.isfinite(matrix))
+            or not np.allclose(
+                matrix[3], [0.0, 0.0, 0.0, 1.0], atol=1e-9
+            )
+            or not np.allclose(
+                matrix[:3, :3].T @ matrix[:3, :3],
+                np.eye(3),
+                atol=1e-7,
+            )
+            or not np.isclose(
+                np.linalg.det(matrix[:3, :3]), 1.0, atol=1e-7
+            )
+        ):
+            raise ValueError(f"{name} must be a finite SE(3) transform")
+    relative = desired @ transform_inverse(current)
+    result = np.asarray(
+        mr.se3ToVec(mr.MatrixLog6(relative)), dtype=float
+    )
+    if not np.all(np.isfinite(result)):
+        raise ValueError("SE(3) logarithm is not finite")
+    return result
 
 
 def adjoint(matrix, xp=np):

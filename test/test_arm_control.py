@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import modern_robotics as mr
 import numpy as np
 import pytest
 
@@ -24,8 +25,6 @@ from armbycontroller.ik_core import resolve_firmware_name
 from armbycontroller.ik_core import resolve_urdf_path
 from armbycontroller.ik_core import set_joint_acceleration_limits
 from armbycontroller.ik_core import solve_pointing_ik
-from armbycontroller.gravity_compensation import UrdfGravityModel
-from armbycontroller.gravity_compensation import nero_mount_gravity
 from armbycontroller.keyboard_controller import ArmJointJogState
 from armbycontroller.keyboard_controller import ArmKeyboardController
 from armbycontroller.keyboard_controller import bounded_model_feedforward
@@ -41,11 +40,16 @@ from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
 from armbycontroller.keyboard_controller import JointTrajectoryState
 from armbycontroller.keyboard_controller import limit_mit_combined_torque
+from armbycontroller.lie import rotation_from_vector
+from armbycontroller.lie import rotation_vector
+from armbycontroller.lie import space_pose_error
+from armbycontroller.lie import transform as screw_transform
 from armbycontroller.motion_link_bridge import phone_rotation
 from armbycontroller.motion_link_bridge import relative_target_rotation
 from armbycontroller.motion_link_bridge import websocket_url
 from armbycontroller.pose_controller import PoseController
 from armbycontroller.screw_model import UrdfScrewModel
+from armbycontroller.screw_model import project_gravity_vector
 
 
 def test_keyboard_launch_exposes_cartesian_and_nero_nullspace_gains():
@@ -77,10 +81,10 @@ def _write_test_urdf(tmp_path, body):
 
 
 def test_nero_mount_selection_sets_base_frame_gravity():
-    assert nero_mount_gravity("horizontal") == [0.0, 0.0, -9.80665]
-    assert nero_mount_gravity("side") == [-9.80665, 0.0, 0.0]
+    assert project_gravity_vector("horizontal") == (0.0, 0.0, -9.80665)
+    assert project_gravity_vector("side") == (-9.80665, 0.0, 0.0)
     with pytest.raises(ValueError, match="horizontal or side"):
-        nero_mount_gravity("select")
+        project_gravity_vector("select")
 
 
 def test_motion_link_websocket_url_uses_robot_role():
@@ -104,14 +108,34 @@ def test_phone_relative_rotation_is_bounded():
     target = relative_target_rotation(
         reference, phone_zero, phone_moved, 0.5
     )
-    angle = np.linalg.norm(
-        __import__("modern_robotics").so3ToVec(
-            __import__("modern_robotics").MatrixLog3(target)
-        )
-    )
+    angle = np.linalg.norm(rotation_vector(target))
 
     assert angle == pytest.approx(0.5)
     assert target.T @ target == pytest.approx(np.eye(3), abs=1e-10)
+
+
+def test_rotation_vector_exponential_and_logarithm_are_inverse():
+    vector = np.asarray([0.2, -0.1, 0.3])
+
+    assert rotation_vector(rotation_from_vector(vector)) == pytest.approx(
+        vector
+    )
+
+
+def test_space_pose_error_is_full_base_frame_se3_logarithm():
+    expected = np.asarray([0.2, -0.1, 0.3, 0.04, -0.03, 0.02])
+    current = screw_transform(
+        rotation_from_vector([0.1, 0.2, -0.1]), [0.3, -0.2, 0.4]
+    )
+    displacement = mr.MatrixExp6(mr.VecTose3(expected))
+    desired = displacement @ current
+
+    error = space_pose_error(current, desired)
+
+    assert error == pytest.approx(expected)
+    assert error[3:] != pytest.approx(
+        desired[:3, 3] - current[:3, 3]
+    )
 
 
 def test_nero_urdf_resolves_from_validated_screw_package():
@@ -186,7 +210,7 @@ def test_urdf_gravity_model_compensates_one_link_pendulum(tmp_path):
           <limit lower="-3.14" upper="3.14" effort="100" velocity="1"/>
         </joint></robot>""",
     )
-    model = UrdfGravityModel(urdf, "base", "tip", 1)
+    model = UrdfScrewModel(urdf, "base", "tip", 1)
 
     assert model.movable_joint_names == ["joint1"]
     assert model.compensation([0.0]) == pytest.approx([-2.0 * 9.80665])
@@ -218,7 +242,7 @@ def test_urdf_gravity_model_includes_all_downstream_masses(tmp_path):
           <parent link="middle"/><child link="tip"/><axis xyz="0 1 0"/>
         </joint></robot>""",
     )
-    model = UrdfGravityModel(urdf, "base", "tip", 2)
+    model = UrdfScrewModel(urdf, "base", "tip", 2)
 
     expected = 9.80665
     assert model.compensation([0.0, 0.0]) == pytest.approx(
@@ -241,7 +265,7 @@ def test_copied_arm_urdf_produces_finite_gravity_torque(
         / "agx_arm_urdf" / model_name / "urdf"
         / f"{model_name}_description.urdf"
     )
-    model = UrdfGravityModel(urdf, "base_link", tip_link, joint_count)
+    model = UrdfScrewModel(urdf, "base_link", tip_link, joint_count)
     torque = model.compensation(np.zeros(joint_count))
 
     assert torque.shape == (joint_count,)
@@ -270,11 +294,11 @@ def test_accessory_xacro_adds_payload_mass_to_arm_gravity_model(
         __import__("pathlib").Path(__file__).resolve().parents[1]
         / "agx_arm_urdf" / model_name / "urdf"
     )
-    bare = UrdfGravityModel(
+    bare = UrdfScrewModel(
         root / f"{model_name}_description.urdf",
         "base_link", tip_link, joint_count,
     )
-    equipped = UrdfGravityModel(
+    equipped = UrdfScrewModel(
         root / accessory_file, "base_link", tip_link, joint_count,
     )
     bare_torque = bare.compensation(np.zeros(joint_count))

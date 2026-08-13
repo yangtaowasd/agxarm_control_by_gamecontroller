@@ -6,7 +6,7 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from armbycontroller.gravity_compensation import nero_mount_gravity
+from armbycontroller.screw_model import project_gravity_vector
 
 
 COMMON = {
@@ -59,7 +59,11 @@ def _nodes(context):
     }
     if model == "nero":
         mount = LaunchConfiguration("nero_mount").perform(context).lower()
-        controller_parameters["gravity_vector"] = nero_mount_gravity(mount)
+        try:
+            gravity = project_gravity_vector(mount)
+        except ValueError as error:
+            raise ValueError("nero_mount must be horizontal or side") from error
+        controller_parameters["gravity_vector"] = list(gravity)
     for name in OPTIONAL:
         if LaunchConfiguration(name).perform(context).strip():
             controller_parameters[name] = LaunchConfiguration(name)
