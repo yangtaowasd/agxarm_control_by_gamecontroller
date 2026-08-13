@@ -146,7 +146,7 @@ The formula core evaluates inverse dynamics with zero desired acceleration:
 tau_model = ID(q, qdot, 0)
           = C(q, qdot) qdot + g(q)
 
-tau_cmd = tau_task + tau_model
+tau_cmd = tau_task + tau_null + tau_model
 ```
 
 它使用实测 `q/qdot`，不把 IK 参考速度或轨迹加速度混入模型支撑。
@@ -164,7 +164,37 @@ controller does not read the previous torque command and does not implement a
 per-joint absolute limit, ±8 N·m by default, to the total that already includes
 model support.
 
-### 5.5 与关节阻抗的局部等价 / Local joint-impedance equivalence
+### 5.5 Nero 动力学一致零空间阻抗 / Nero dynamically consistent nullspace impedance
+
+Nero 有 7 个关节而任务为 6 维，因此在满任务秩姿态仍有一个冗余自由度。仅有
+`J_g^T F_c` 时，这个内部自由度没有回位弹簧。Nero 使用关节参考姿态构造一个
+低增益关节弹簧/阻尼，并通过质量矩阵一致的力矩投影器只保留零空间分量：
+
+Nero has seven joints for a six-dimensional task, leaving one redundant degree
+of freedom at a full-task-rank pose. `J_g^T F_c` alone supplies no restoring
+spring for that internal motion. Nero forms a low-gain joint spring/damper
+around the joint reference and retains only its dynamically consistent
+nullspace component:
+
+```text
+tau_0 = K_0 (q_0 - q) + D_0 (qdot_0 - qdot)
+
+N_tau = I - J_g^T (J_g M^-1 J_g^T)^+ J_g M^-1
+tau_null = N_tau tau_0
+```
+
+该投影满足 `J_g M^-1 tau_null = 0`（数值容差内），因此零空间恢复力矩局部不
+产生任务空间加速度。上标 `+` 是 Moore–Penrose 伪逆，仅用于任务惯量投影，不是
+用伪逆把 wrench 映射成任务力矩；任务项仍严格为 `J_g^T F_c`。Piper-L 为 6 轴，
+此项关闭。
+
+The projector satisfies `J_g M^-1 tau_null = 0` up to numerical tolerance, so
+the restoring torque locally produces no task acceleration. Superscript `+`
+is the Moore–Penrose pseudoinverse used only in the operational-inertia
+projector; it does not replace the strict task mapping `J_g^T F_c`. The term is
+disabled for six-axis Piper-L.
+
+### 5.6 与关节阻抗的局部等价 / Local joint-impedance equivalence
 
 在一个姿态附近，若 `delta_x ≈ Jg delta_q`：
 
@@ -216,7 +246,9 @@ Keyboard / Pose target
                                  |
                     tau_task = J_g^T wrench
                                  |
-              URDF ID(q, qdot, 0) + tau_task
+             Nero: M(q) nullspace torque tau_null
+                                 |
+       URDF ID(q, qdot, 0) + tau_task + tau_null
                                  |
                   absolute torque clip (no delta-tau)
                                  |
@@ -240,12 +272,15 @@ comparison on the same arm.
    `xdot`.
 5. 计算完整矩阵 wrench。 / Evaluate the full-matrix wrench.
 6. 使用 `J_g^T` 得到 `tau_task`。 / Map through `J_g^T` to `tau_task`.
-7. 使用 URDF 逆动力学得到 `tau_model`。 / Evaluate `tau_model` from URDF
+7. Nero 使用 `M(q)` 投影低增益关节参考，得到 `tau_null`；Piper 为零。 /
+   Nero projects its low-gain joint reference using `M(q)` to obtain
+   `tau_null`; Piper uses zero.
+8. 使用 URDF 逆动力学得到 `tau_model`。 / Evaluate `tau_model` from URDF
    inverse dynamics.
-8. 合成为 `tau_cmd`。 / Compose `tau_cmd`.
-9. 对总力矩实施逐关节绝对上限。 / Apply the per-joint absolute limit to the
+9. 合成为 `tau_cmd`。 / Compose `tau_cmd`.
+10. 对总力矩实施逐关节绝对上限。 / Apply the per-joint absolute limit to the
    total torque.
-10. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
+11. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
     `move_mit(kp=0,kd=0,t_ff=tau_cmd)`.
 
 ## 8. 模块地图 / Module map
@@ -269,6 +304,8 @@ comparison on the same arm.
 | `cartesian_impedance_translation_stiffness` | scalar | N/m | `10.0` |
 | `cartesian_impedance_rotation_damping` | scalar | N·m·s/rad | `0.08` |
 | `cartesian_impedance_translation_damping` | scalar | N·s/m | `0.8` |
+| `cartesian_impedance_nullspace_stiffness` | 1 or n | N·m/rad | `0.4`，仅 Nero / Nero only |
+| `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_torque_limit` | 1 or n | N·m | `8.0` per joint |
 | `mit_command_rate` | scalar | Hz | `100.0` |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
@@ -303,6 +340,9 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 - `Kx/Dx` 必须对称半正定，以避免明显的主动负刚度/负阻尼配置。 / `Kx/Dx`
   must be symmetric positive semidefinite, rejecting obvious active negative
   stiffness/damping.
+- Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
+  Nero nullspace gains must be nonnegative, and nullspace torque shares the
+  same ±8 N·m total-torque envelope.
 - `move_mit()` 对各轴依次调用，CAN 层不提供整批原子提交或逐帧 ACK。 /
   `move_mit()` is called sequentially per axis; CAN provides neither atomic
   batch commit nor per-frame acknowledgement here.
@@ -317,6 +357,11 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 - `J^T` 不需要求逆，但奇异位形仍会失去某些可控 wrench 方向。 / `J^T`
   avoids inversion, but singular configurations still lose controllable
   wrench directions.
+- 零空间投影依赖 URDF 质量矩阵；错误的质量/惯量会降低动态解耦精度。在任务秩
+  下降时零空间维数会增加，低增益和绝对力矩上限仍然必要。 / The nullspace
+  projector depends on the URDF mass matrix; incorrect mass/inertia reduces
+  dynamic decoupling accuracy. Task-rank loss increases nullspace dimension,
+  so low gains and the absolute torque bound remain necessary.
 - URDF 不包含摩擦、线缆力、齿隙、未知负载和驱动延迟。 / URDF omits
   friction, cable forces, backlash, unknown payload, and drive delay.
 - 100 Hz Python/ROS 循环不是硬实时。 / A 100 Hz Python/ROS loop is not
@@ -331,6 +376,11 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   `link6`，不能把它当作指尖接触点。 / Piper-L IK and dynamics both read
   `piper_l_with_gripper_description.xacro`, so gripper mass enters dynamics;
   the task point remains `link6`, not the fingertip contact point.
+- Nero 的 IK、质量矩阵和逆动力学默认读取
+  `nero_with_left_revo2_description.xacro`，固定 Revo2 质量进入模型；任务点为
+  `link7`。 / Nero IK, mass matrix, and inverse dynamics load
+  `nero_with_left_revo2_description.xacro` by default, including the fixed
+  Revo2 mass; the task point is `link7`.
 - 任务空间阻抗和 IK 目标生成必须解耦，慢 IK 不能阻塞力矩刷新。 / Task
   impedance and IK target generation must be decoupled so slow IK cannot block
   torque refresh.
@@ -363,6 +413,48 @@ source /opt/ros/humble/setup.bash
 colcon test --packages-select armbycontroller
 colcon test-result --verbose
 ```
+
+### Nero 公式/模型仿真 / Nero formula/model simulation
+
+下面的测试加载真实 `nero_with_left_revo2_description.xacro`，验证 7 轴质量
+矩阵投影产生非零零空间力矩，并检查 `J_g M^-1 tau_null≈0`。它是确定性模型
+测试，不是含摩擦、时延和 CAN 的独立物理仿真。
+
+The following test loads the real `nero_with_left_revo2_description.xacro`,
+checks that the seven-axis mass-matrix projector produces nonzero nullspace
+torque, and verifies `J_g M^-1 tau_null≈0`. It is a deterministic model test,
+not an independent physical simulation with friction, delay, and CAN:
+
+```bash
+cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_cartesian_impedance.py \
+  -k nero_revo2_nullspace
+```
+
+### Nero 实机接线 / Nero hardware wiring
+
+```bash
+cd /home/yang/demo_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+ros2 launch armbycontroller keyboard_control.launch.py \
+  robot_model:=nero device:=/dev/input/event3 \
+  can_interface:=can0 firmware:=auto nero_mount:=horizontal \
+  execute_motion:=true impedance_backend:=cartesian \
+  impedance_enabled:=false \
+  cartesian_impedance_nullspace_stiffness:=0.4 \
+  cartesian_impedance_nullspace_damping:=0.1 \
+  cartesian_impedance_torque_limit:=8.0 \
+  move_home_on_start:=false reset_emergency_stop_on_start:=true
+```
+
+`nero_mount` 必须与实际安装一致：平置用 `horizontal`，项目定义的 -90° 侧装
+用 `side`。启动后保持机械臂被支撑，按 `I` 同时捕获当前末端位姿和 7 轴零空间
+姿态，再进入 Cartesian MIT。 / `nero_mount` must match the installation:
+use `horizontal` for a horizontal base and `side` for the project's -90° side
+mount. With the arm physically supported, press `I` to capture both the tool
+pose and seven-axis nullspace posture before entering Cartesian MIT.
 
 ### Piper-L 实机接线 / Piper-L hardware wiring
 
@@ -402,6 +494,10 @@ The formula layer should be diagnosed in this order:
    `tau^T qdot = F^T xdot` hold?
 6. `ID(q,qdot,0)` 是否只产生科氏/离心和重力支撑。 / Does
    `ID(q,qdot,0)` contain only Coriolis/centrifugal and gravity support?
+7. Nero 是否满足 `J_g M^-1 tau_null≈0`。 / Does Nero satisfy
+   `J_g M^-1 tau_null≈0`?
+8. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
+   Do logged `task`, `null`, and `model` sum to the pre-clip `total`?
 
 ## 14. 分阶段学习与实现路线 / Staged learning and implementation path
 
@@ -410,14 +506,18 @@ The formula layer should be diagnosed in this order:
 2. **MIT/CAN adapter**：已完成软件接线；`kp=kd=0`，总力矩进入 `t_ff`，仅绝对
    上限。 / Software wiring done; `kp=kd=0`, total torque through `t_ff`,
    absolute limit only.
-3. **仿真 adapter / Simulation adapter**：仍待完成；用独立 plant 验证符号、能量和收敛，
+3. **Nero 7 轴零空间 / Nero seven-axis nullspace**：已完成质量矩阵一致的力矩
+   投影、真实 Revo2 模型测试和 7 轴 MIT 周期测试。 / Dynamically consistent
+   torque projection, real-Revo2 model test, and complete seven-axis MIT-cycle
+   test are done.
+4. **仿真 adapter / Simulation adapter**：仍待完成；用独立 plant 验证符号、能量和收敛，
    不允许 controller 与 plant 使用完全相同模型掩盖误差。 / Validate signs,
    energy, and convergence with an independent plant; avoid a perfect-model
    inverse crime.
-4. **目标状态机 / Reference state machine**：进入时捕获零误差 pose；连续关节
+5. **目标状态机 / Reference state machine**：进入时捕获零误差 pose；连续关节
    参考生成 pose/twist。 / Capture zero-error pose on entry; generate pose and
    twist from a continuous joint reference.
-5. **低增益实机 / Low-gain hardware**：先静止保持，再毫米级 IK，保存完整日志。
+6. **低增益实机 / Low-gain hardware**：先静止保持，再毫米级 IK，保存完整日志。
    / First stationary hold, then millimetre IK steps with complete logs.
 
 ## 15. 练习 / Exercises
@@ -435,6 +535,10 @@ The formula layer should be diagnosed in this order:
    `ID(q,0,0)` with `ID(q,qdot,0)` to separate gravity from full model support.
 6. 用 FK 有限差分验证 Piper-L 某姿态下 `J_g qdot`。 / Validate `J_g qdot`
    at a Piper-L pose using an FK finite difference.
+7. 对 Nero 的 `6×7` Jacobian 做 SVD，取最后一个右奇异向量作为姿态偏差，验证
+   零空间恢复力矩非零且 `J_g M^-1 tau_null≈0`。 / Use the final right singular
+   vector of Nero's `6×7` Jacobian as a posture error and verify nonzero
+   restoring torque with `J_g M^-1 tau_null≈0`.
 
 ## 16. 术语表 / Glossary
 
@@ -447,6 +551,9 @@ The formula layer should be diagnosed in this order:
 | wrench | Wrench | Moment-force vector `[M; F]` |
 | 虚功 | Virtual work | Power-dual relation `tau=J^T F` |
 | 模型支撑 | Model support | `C(q,qdot)qdot+g(q)` from URDF inverse dynamics |
+| 冗余自由度 | Redundant degree of freedom | Joint motion not required by the six-dimensional task |
+| 零空间阻抗 | Nullspace impedance | Projected joint spring/damper for redundant posture |
+| 动力学一致投影 | Dynamically consistent projection | Torque projection satisfying `J M^-1 tau_null=0` |
 | 半正定 | Positive semidefinite | Matrix with nonnegative quadratic energy |
 | 旋量 IK | Screw IK | IK based on PoE screws and SE(3) logarithms |
 | MIT 命令 | MIT command | Native motor command with `p_des/v_des/kp/kd/t_ff` |

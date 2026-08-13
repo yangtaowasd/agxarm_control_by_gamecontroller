@@ -22,8 +22,11 @@ e  = [Log(Rd R^T)^vee; pd - p]
 xd = Jg qdot
 Fc = Kx e + Dx (xd_des - xd)
 tau_task = Jg^T Fc
+tau_0 = K0 (q0-q) + D0 (dq0-dq)
+N_tau = I - Jg^T (Jg M^-1 Jg^T)^+ Jg M^-1
+tau_null = N_tau tau_0                 # Nero 7-axis only
 tau_model = C(q,qdot)qdot + g(q)
-tau_cmd = tau_task + tau_model
+tau_cmd = tau_task + tau_null + tau_model
 ```
 
 The rotational stiffness about base-frame Z is independently configurable as
@@ -31,6 +34,13 @@ The rotational stiffness about base-frame Z is independently configurable as
 shared `cartesian_impedance_rotation_stiffness` value (default `0.4 N.m/rad`)
 continues to set base-frame X/Y rotation. This strengthens the principal J1
 return direction without raising all wrist rotation axes together.
+
+Nero's seventh joint is controlled by a dynamically consistent nullspace
+impedance. Its defaults are `0.4 N.m/rad` stiffness and `0.1 N.m.s/rad`
+damping. The torque projector uses the URDF mass matrix and keeps
+`Jg M^-1 tau_null = 0` to numerical tolerance, so redundant-joint restoration
+does not intentionally move the Cartesian task. This term is disabled for the
+six-axis Piper-L.
 
 `tau_cmd` is the immediate, stateless equation result. The MIT adapter applies
 only a per-joint absolute limit (±8 N·m by default, including model support).
@@ -84,9 +94,10 @@ and `ddq_des`; `P` and `I` are independent, so either order works.
 The Cartesian backend uses the SDK equation
 `τ_ref=Kp(q_des-q)+Kd(dq_des-dq)+τ_ff` with `Kp=0`, `Kd=0`,
 `p_des=q_measured`, `v_des=0`, and
-`τ_ff=clip(Jg.T Fc+C(q,dq)dq+g(q), ±τ_limit)`. Thus the firmware does not add a
-second joint spring or damper. A continuous joint reference supplies the target
-pose and target twist through FK/Jacobian; this reference continuity is not a
+`τ_ff=clip(Jg.T Fc+tau_null+C(q,dq)dq+g(q), ±τ_limit)`. Thus the firmware does
+not add a second joint spring or damper. `tau_null` is nonzero only for Nero.
+A continuous joint reference supplies the target pose, target twist, and Nero
+nullspace posture through FK/Jacobian; this reference continuity is not a
 torque-rate limiter.
 
 Piper-L kinematics and inverse dynamics both use
@@ -105,7 +116,11 @@ Run Nero:
 ```bash
 ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
-  can_interface:=can0 firmware:=auto nero_mount:=horizontal
+  can_interface:=can0 firmware:=auto nero_mount:=horizontal \
+  impedance_backend:=cartesian impedance_enabled:=false \
+  cartesian_impedance_nullspace_stiffness:=0.4 \
+  cartesian_impedance_nullspace_damping:=0.1 \
+  move_home_on_start:=false reset_emergency_stop_on_start:=true
 ```
 
 Nero requires an explicit mounting choice. Use `nero_mount:=horizontal` when
@@ -113,6 +128,10 @@ the base is normally mounted on a horizontal surface (`gravity_vector=[0,0,-g]`)
 or `nero_mount:=side` for the project's `pitch=-90°` side-mount convention
 (`gravity_vector=[-g,0,0]`). Left/right side-mount yaw does not change gravity
 in `base_link`. Omitting the choice intentionally stops launch.
+Nero kinematics and dynamics use `nero_with_left_revo2_description.xacro` by
+default. The fixed Revo2 mass/inertia is included while MIT commands are sent
+only to joints 1 through 7. Press `I` to capture the current tool pose and
+nullspace posture before enabling Cartesian MIT.
 
 Run Piper-L with the same keys:
 

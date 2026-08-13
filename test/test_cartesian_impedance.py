@@ -1,5 +1,7 @@
 """Formula-level tests for Cartesian impedance in one base-frame convention."""
 
+from pathlib import Path
+
 import modern_robotics as mr
 import numpy as np
 import pytest
@@ -10,6 +12,7 @@ from armbycontroller.cartesian_impedance import cartesian_pose_error
 from armbycontroller.cartesian_impedance import equivalent_cartesian_impedance
 from armbycontroller.cartesian_impedance import equivalent_joint_impedance
 from armbycontroller.cartesian_impedance import geometric_jacobian
+from armbycontroller.screw_model import UrdfScrewModel
 
 
 class FixedModel:
@@ -30,6 +33,9 @@ class FixedModel:
     def space_jacobian(self, joint_positions):
         del joint_positions
         return self.jacobian.copy()
+
+    def mass_matrix(self, joint_positions):
+        return np.eye(np.asarray(joint_positions).size)
 
 
 class FixedDynamics:
@@ -149,6 +155,89 @@ def test_cartesian_impedance_is_full_jacobian_transpose_wrench_mapping():
     assert result.commanded_wrench == pytest.approx(expected_wrench)
     assert result.task_torque == pytest.approx(jacobian.T @ expected_wrench)
     assert result.command_torque == pytest.approx(result.task_torque)
+
+
+def test_seven_axis_nullspace_impedance_restores_only_redundant_motion():
+    jacobian = np.hstack((np.eye(6), np.zeros((6, 1))))
+    measured = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3])
+    velocity = np.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
+
+    result = cartesian_impedance_command(
+        FixedModel(space_jacobian=jacobian),
+        None,
+        measured,
+        velocity,
+        np.eye(4),
+        np.zeros(6),
+        np.zeros(6),
+        np.zeros(6),
+        nullspace_reference=np.zeros(7),
+        nullspace_reference_velocity=np.zeros(7),
+        nullspace_stiffness=0.4,
+        nullspace_damping=0.1,
+    )
+
+    assert result.task_torque == pytest.approx(np.zeros(7))
+    assert result.nullspace_torque == pytest.approx(
+        [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -0.14]
+    )
+    assert jacobian @ result.nullspace_torque == pytest.approx(np.zeros(6))
+    assert result.command_torque == pytest.approx(result.nullspace_torque)
+
+
+def test_nero_revo2_nullspace_torque_has_no_dynamic_task_leakage():
+    urdf = (
+        Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf/nero/urdf/nero_with_left_revo2_description.xacro"
+    )
+    model = UrdfScrewModel(
+        urdf, "base_link", "link7", 7, [0.0, 0.0, -9.80665]
+    )
+    measured = np.asarray([0.1, 0.35, -0.2, 0.45, 0.15, -0.25, 0.2])
+    jacobian, pose = geometric_jacobian(model, measured)
+    _, _, right_vectors = np.linalg.svd(jacobian)
+    redundant_direction = right_vectors[-1]
+    reference = measured + 0.2 * redundant_direction
+
+    result = cartesian_impedance_command(
+        model,
+        None,
+        measured,
+        np.zeros(7),
+        pose,
+        np.zeros(6),
+        np.zeros(6),
+        np.zeros(6),
+        nullspace_reference=reference,
+        nullspace_reference_velocity=np.zeros(7),
+        nullspace_stiffness=0.4,
+        nullspace_damping=0.1,
+    )
+
+    dynamic_task_effect = jacobian @ np.linalg.solve(
+        model.mass_matrix(measured), result.nullspace_torque
+    )
+    assert np.linalg.norm(result.nullspace_torque) > 0.1
+    assert dynamic_task_effect == pytest.approx(np.zeros(6), abs=1e-9)
+
+
+def test_nullspace_impedance_rejects_nonpositive_mass_matrix():
+    class NonPhysicalMassModel(FixedModel):
+        def mass_matrix(self, joint_positions):
+            return -np.eye(np.asarray(joint_positions).size)
+
+    with pytest.raises(ValueError, match="positive definite"):
+        cartesian_impedance_command(
+            NonPhysicalMassModel(),
+            None,
+            np.zeros(6),
+            np.zeros(6),
+            np.eye(4),
+            np.zeros(6),
+            np.zeros(6),
+            np.zeros(6),
+            nullspace_reference=np.zeros(6),
+        )
 
 
 def test_jacobian_transpose_preserves_instantaneous_power():

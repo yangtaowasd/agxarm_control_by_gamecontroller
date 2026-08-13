@@ -434,6 +434,16 @@ class ArmKeyboardController(Node):
             "cartesian_impedance_translation_damping", 0.8
         )
         self.declare_parameter(
+            "cartesian_impedance_nullspace_stiffness",
+            [0.4],
+            scalar_or_array,
+        )
+        self.declare_parameter(
+            "cartesian_impedance_nullspace_damping",
+            [0.1],
+            scalar_or_array,
+        )
+        self.declare_parameter(
             "cartesian_impedance_torque_limit", [8.0], scalar_or_array
         )
         self.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
@@ -600,6 +610,26 @@ class ArmKeyboardController(Node):
             rotation_damping,
             translation_damping,
         )
+        self.cartesian_nullspace_stiffness = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_nullspace_stiffness"
+                ).value,
+                self.joint_count,
+                "cartesian_impedance_nullspace_stiffness",
+            ),
+            dtype=float,
+        )
+        self.cartesian_nullspace_damping = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_nullspace_damping"
+                ).value,
+                self.joint_count,
+                "cartesian_impedance_nullspace_damping",
+            ),
+            dtype=float,
+        )
         self.cartesian_torque_limit = np.asarray(
             expand_joint_values(
                 self.get_parameter(
@@ -688,9 +718,11 @@ class ArmKeyboardController(Node):
             or not np.all(np.isfinite(self.cartesian_damping))
             or np.any(self.cartesian_stiffness < 0.0)
             or np.any(self.cartesian_damping < 0.0)
+            or np.any(self.cartesian_nullspace_stiffness < 0.0)
+            or np.any(self.cartesian_nullspace_damping < 0.0)
         ):
             raise ValueError(
-                "Cartesian stiffness and damping must be nonnegative"
+                "Cartesian and nullspace gains must be nonnegative"
             )
         if (
             not np.all(np.isfinite(self.cartesian_torque_limit))
@@ -1191,6 +1223,10 @@ class ArmKeyboardController(Node):
                     current_pose = self.gravity_model.forward_kinematics(
                         joints
                     )
+                    nullspace_options = self._cartesian_nullspace_options(
+                        np.asarray(joints, dtype=float),
+                        np.zeros(self.joint_count),
+                    )
                     cartesian_impedance_command(
                         self.gravity_model,
                         self.gravity_model,
@@ -1200,6 +1236,7 @@ class ArmKeyboardController(Node):
                         np.zeros(6),
                         self.cartesian_stiffness,
                         self.cartesian_damping,
+                        **nullspace_options,
                     )
                 except Exception as exc:
                     self.get_logger().error(
@@ -1258,6 +1295,19 @@ class ArmKeyboardController(Node):
                 return None
             velocities.append(velocity)
         return np.asarray(velocities, dtype=float)
+
+    def _cartesian_nullspace_options(
+        self, reference_position, reference_velocity
+    ):
+        """Return Nero-only redundant-joint impedance arguments."""
+        if getattr(self, "robot_model", "piper_l") != "nero":
+            return {}
+        return {
+            "nullspace_reference": reference_position,
+            "nullspace_reference_velocity": reference_velocity,
+            "nullspace_stiffness": self.cartesian_nullspace_stiffness,
+            "nullspace_damping": self.cartesian_nullspace_damping,
+        }
 
     def mit_tick(self):
         """Continuously refresh the selected complete-arm MIT command."""
@@ -1442,6 +1492,9 @@ class ArmKeyboardController(Node):
             model, reference_position
         )
         desired_twist = reference_jacobian @ reference_velocity
+        nullspace_options = self._cartesian_nullspace_options(
+            reference_position, reference_velocity
+        )
         result = cartesian_impedance_command(
             model,
             model,
@@ -1451,6 +1504,7 @@ class ArmKeyboardController(Node):
             desired_twist,
             self.cartesian_stiffness,
             self.cartesian_damping,
+            **nullspace_options,
         )
         torque_limit = np.asarray(
             self.cartesian_torque_limit, dtype=float
@@ -1470,12 +1524,13 @@ class ArmKeyboardController(Node):
                 throttle_duration_sec=1.0,
             )
         self.get_logger().info(
-            "Cartesian MIT error=%s wrench=%s task=%s model=%s total=%s "
-            "sent=%s N·m"
+            "Cartesian MIT error=%s wrench=%s task=%s null=%s model=%s "
+            "total=%s sent=%s N·m"
             % (
                 np.round(result.pose_error, 4).tolist(),
                 np.round(result.commanded_wrench, 3).tolist(),
                 np.round(result.task_torque, 3).tolist(),
+                np.round(result.nullspace_torque, 3).tolist(),
                 np.round(result.model_torque, 3).tolist(),
                 np.round(result.command_torque, 3).tolist(),
                 np.round(command_torque, 3).tolist(),

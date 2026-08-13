@@ -48,7 +48,7 @@ from armbycontroller.pose_controller import PoseController
 from armbycontroller.screw_model import UrdfScrewModel
 
 
-def test_keyboard_launch_exposes_base_z_rotation_stiffness():
+def test_keyboard_launch_exposes_cartesian_and_nero_nullspace_gains():
     launch_path = (
         Path(__file__).resolve().parents[1]
         / "launch" / "keyboard_control.launch.py"
@@ -62,6 +62,12 @@ def test_keyboard_launch_exposes_base_z_rotation_stiffness():
     assert module.COMMON[
         "cartesian_impedance_base_z_rotation_stiffness"
     ] == "4.0"
+    assert module.COMMON[
+        "cartesian_impedance_nullspace_stiffness"
+    ] == "0.4"
+    assert module.COMMON[
+        "cartesian_impedance_nullspace_damping"
+    ] == "0.1"
 
 
 def _write_test_urdf(tmp_path, body):
@@ -745,6 +751,87 @@ def test_cartesian_mit_tick_sends_strict_torque_through_zero_gain_tff(
     assert [command["v_des"] for command in controller.arm.commands] == [0.0] * 6
     assert [command["t_ff"] for command in controller.arm.commands] == (
         pytest.approx([0.1, -0.2, 0.3, 2.4, 0.5, 0.6])
+    )
+
+
+def test_nero_cartesian_mit_sends_complete_cycle_with_nullspace_torque(
+    monkeypatch,
+):
+    class FakeArm:
+        def __init__(self):
+            self.commands = []
+
+        def move_mit(self, **command):
+            self.commands.append(command)
+
+        def get_motor_states(self, joint_index):
+            velocity = 0.2 if joint_index == 7 else 0.0
+            return SimpleNamespace(msg=SimpleNamespace(velocity=velocity))
+
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=[0.0] * 6 + [0.3])
+
+    class FakeNeroModel:
+        def forward_kinematics(self, joints):
+            del joints
+            return np.eye(4)
+
+        def space_jacobian(self, joints):
+            del joints
+            return np.hstack((np.eye(6), np.zeros((6, 1))))
+
+        def mass_matrix(self, joints):
+            del joints
+            return np.eye(7)
+
+        def inverse_dynamics(self, positions, velocities, accelerations):
+            del positions, velocities, accelerations
+            return np.zeros(7)
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.robot_model = "nero"
+    controller.impedance_enabled = True
+    controller.impedance_backend = "cartesian"
+    controller.emergency_stopped = False
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm_connected = True
+    controller.arm = FakeArm()
+    controller.joint_count = 7
+    controller.jog = ArmJointJogState([(-3.0, 3.0)] * 7, 0.1)
+    controller.jog.sync_target([0.0] * 7)
+    controller.mit_trajectory = None
+    controller.mit_command_rate = 100.0
+    controller.last_mit_tick_time = None
+    controller.gravity_model = FakeNeroModel()
+    controller.cartesian_stiffness = [0.0] * 6
+    controller.cartesian_damping = [0.0] * 6
+    controller.cartesian_nullspace_stiffness = [0.4] * 7
+    controller.cartesian_nullspace_damping = [0.1] * 7
+    controller.cartesian_torque_limit = [8.0] * 7
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    controller.mit_tick()
+
+    assert [command["joint_index"] for command in controller.arm.commands] == (
+        [1, 2, 3, 4, 5, 6, 7]
+    )
+    assert [command["kp"] for command in controller.arm.commands] == [0.0] * 7
+    assert [command["kd"] for command in controller.arm.commands] == [0.0] * 7
+    assert [command["t_ff"] for command in controller.arm.commands] == (
+        pytest.approx([0.0] * 6 + [-0.14])
     )
 
 

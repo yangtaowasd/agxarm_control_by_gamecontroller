@@ -18,6 +18,7 @@ class CartesianImpedanceCommand:
     commanded_wrench: np.ndarray
     geometric_jacobian: np.ndarray
     task_torque: np.ndarray
+    nullspace_torque: np.ndarray
     model_torque: np.ndarray
     command_torque: np.ndarray
 
@@ -48,6 +49,21 @@ def _finite_vector(values, size, name):
     result = np.asarray(values, dtype=float)
     if result.shape != (size,) or not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must contain {size} finite values")
+    return result
+
+
+def _nonnegative_joint_gain(values, size, name):
+    result = np.asarray(values, dtype=float)
+    if result.ndim == 0:
+        result = np.full(size, float(result))
+    if (
+        result.shape != (size,)
+        or not np.all(np.isfinite(result))
+        or np.any(result < 0.0)
+    ):
+        raise ValueError(
+            f"{name} must be one nonnegative value or {size} values"
+        )
     return result
 
 
@@ -183,6 +199,11 @@ def cartesian_impedance_command(
     desired_twist,
     cartesian_stiffness,
     cartesian_damping,
+    *,
+    nullspace_reference=None,
+    nullspace_reference_velocity=None,
+    nullspace_stiffness=0.0,
+    nullspace_damping=0.0,
 ):
     """
     Evaluate strict Cartesian impedance and map it to joint torque.
@@ -194,15 +215,20 @@ def cartesian_impedance_command(
         x_dot   = J_g(q) q_dot
         wrench  = K_x e_x + D_x (x_dot_d - x_dot)
         tau_x   = J_g(q).T wrench
+        tau_0   = K_0 (q_0 - q) + D_0 (qdot_0 - qdot)
+        N_tau   = I - J.T (J M^-1 J.T)^+ J M^-1
+        tau_n   = N_tau tau_0
         tau_m   = C(q, q_dot) q_dot + g(q)
-        tau_cmd = tau_x + tau_m
+        tau_cmd = tau_x + tau_n + tau_m
 
     ``tau_m`` is obtained from URDF inverse dynamics with zero acceleration.
-    No diagonal approximation, Jacobian inverse, nullspace term, saturation,
-    torque-rate limit, or hardware-specific MIT gain is hidden in this
-    formula-level function.  The function is deliberately stateless: each
-    returned torque is the immediate result of the displayed equations and
-    never depends on a previous command.
+    The optional dynamically consistent nullspace term is intended for a
+    redundant arm such as seven-axis Nero.  It uses the URDF mass matrix and
+    satisfies ``J M^-1 tau_n = 0`` up to numerical tolerance.  No diagonal
+    approximation, saturation, torque-rate limit, or hardware-specific MIT
+    gain is hidden in this formula-level function.  The function is
+    deliberately stateless: each returned torque is the immediate result of
+    the displayed equations and never depends on a previous command.
     """
     positions = np.asarray(joint_positions, dtype=float)
     if positions.ndim != 1 or positions.size < 1:
@@ -228,6 +254,69 @@ def cartesian_impedance_command(
     )
     task_torque = jacobian.T @ wrench
 
+    nullspace_torque = np.zeros(positions.size, dtype=float)
+    if nullspace_reference is not None:
+        reference = _finite_vector(
+            nullspace_reference, positions.size, "nullspace_reference"
+        )
+        reference_velocity = _finite_vector(
+            np.zeros(positions.size)
+            if nullspace_reference_velocity is None
+            else nullspace_reference_velocity,
+            positions.size,
+            "nullspace_reference_velocity",
+        )
+        joint_stiffness = _nonnegative_joint_gain(
+            nullspace_stiffness,
+            positions.size,
+            "nullspace_stiffness",
+        )
+        joint_damping = _nonnegative_joint_gain(
+            nullspace_damping,
+            positions.size,
+            "nullspace_damping",
+        )
+        mass_model = (
+            dynamics_model
+            if dynamics_model is not None
+            else kinematic_model
+        )
+        if not hasattr(mass_model, "mass_matrix"):
+            raise ValueError(
+                "nullspace impedance requires a dynamics mass_matrix"
+            )
+        mass = np.asarray(mass_model.mass_matrix(positions), dtype=float)
+        if (
+            mass.shape != (positions.size, positions.size)
+            or not np.all(np.isfinite(mass))
+            or not np.allclose(mass, mass.T, atol=1e-9)
+            or float(np.min(np.linalg.eigvalsh(mass))) <= 0.0
+        ):
+            raise ValueError(
+                "dynamics mass_matrix must be finite, symmetric, and "
+                "positive definite"
+            )
+        try:
+            mass_inverse_jacobian_transpose = np.linalg.solve(
+                mass, jacobian.T
+            )
+        except np.linalg.LinAlgError as error:
+            raise ValueError("dynamics mass_matrix must be nonsingular") from error
+        jacobian_mass_inverse = mass_inverse_jacobian_transpose.T
+        operational_inverse_inertia = (
+            jacobian @ mass_inverse_jacobian_transpose
+        )
+        torque_projector = np.eye(positions.size) - (
+            jacobian.T
+            @ np.linalg.pinv(operational_inverse_inertia, rcond=1e-8)
+            @ jacobian_mass_inverse
+        )
+        unprojected = (
+            joint_stiffness * (reference - positions)
+            + joint_damping * (reference_velocity - velocities)
+        )
+        nullspace_torque = torque_projector @ unprojected
+
     if dynamics_model is None:
         model_torque = np.zeros(positions.size, dtype=float)
     else:
@@ -246,11 +335,12 @@ def cartesian_impedance_command(
             raise ValueError(
                 "dynamics model must return one finite torque per joint"
             )
-    command_torque = task_torque + model_torque
+    command_torque = task_torque + nullspace_torque + model_torque
     if not all(
         np.all(np.isfinite(values))
         for values in (
-            measured_twist, wrench, task_torque, command_torque
+            measured_twist, wrench, task_torque, nullspace_torque,
+            command_torque,
         )
     ):
         raise ValueError("Cartesian impedance evaluation is not finite")
@@ -262,6 +352,7 @@ def cartesian_impedance_command(
         commanded_wrench=wrench.copy(),
         geometric_jacobian=jacobian.copy(),
         task_torque=task_torque.copy(),
+        nullspace_torque=nullspace_torque.copy(),
         model_torque=model_torque.copy(),
         command_torque=command_torque.copy(),
     )
