@@ -10,7 +10,7 @@ from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from armbycontroller.ik_core import resolve_urdf_path
+from armbycontroller.ik.core import resolve_urdf_path
 
 
 PROFILES = {

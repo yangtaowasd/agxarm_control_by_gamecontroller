@@ -68,7 +68,7 @@ def resolve_urdf_path(parameter_value, robot_model):
         except PackageNotFoundError:
             pass
         candidates.append(
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / "nero_screw_dynamics" / "agx_arm_urdf" / "nero" / "urdf"
             / "nero_description.urdf"
         )
@@ -81,7 +81,7 @@ def resolve_urdf_path(parameter_value, robot_model):
     except PackageNotFoundError:
         pass
     candidates.append(
-        Path(__file__).resolve().parents[1] / "agx_arm_urdf"
+        Path(__file__).resolve().parents[2] / "agx_arm_urdf"
         / robot_model / "urdf" / f"{robot_model}_description.urdf"
     )
     try:
@@ -111,7 +111,7 @@ def create_screw_solver(
     urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
 ):
     """Create the shared PoE solver and verify the requested chain DOF."""
-    from armbycontroller.screw_ik import ScrewIkSolver
+    from armbycontroller.ik.screw import ScrewIkSolver
     from armbycontroller.screw_model import UrdfScrewModel
 
     model = UrdfScrewModel(
@@ -316,7 +316,10 @@ class AgxIkEngine:
         if joints is None:
             raise IkFailure("screw IK found no solution")
         joints = np.asarray(joints, dtype=float)
-        if joints.shape != (self.joint_count,) or not np.all(np.isfinite(joints)):
+        if (
+            joints.shape != (self.joint_count,)
+            or not np.all(np.isfinite(joints))
+        ):
             raise IkFailure("IK returned an invalid joint vector")
 
         fk_position, fk_rotation = self.solver.fk(joints)

@@ -66,6 +66,44 @@ only a per-joint absolute limit (±8 N·m by default, including model support).
 It does not apply a previous-cycle torque-rate limiter (`delta_tau` or
 `delta_tau_max`).
 
+## Passive momentum observer and Piper-L admittance
+
+The launch file also starts a passive generalized-momentum observer. The
+controller reads one cached SDK `q`, `qdot`, and motor-torque sample per
+100 Hz cycle and publishes it on `/arm_dynamics_state` in every backend. A
+separate process subscribes to that stream and publishes estimated external
+joint torque in the `effort` field of `/arm_external_joint_torque`:
+
+```text
+p    = M(q) qdot
+beta = g(q) - dT/dq
+r    = K [p - p(0) - integral(tau_motor - beta + r) dt]
+```
+
+Here `beta` is the known URDF dynamics term, not an empirical calibration
+bias. Fixed calibration/feedforward bias is zero for both robot profiles.
+When URDF compensation is active, the controller now ignores
+`mit_feedforward` in that compensation path and sends only the scaled,
+absolute-bounded inverse-dynamics result.
+
+The observer never connects to CAN or calls the arm SDK. It updates once for
+every timestamped 100 Hz dynamics-state message, using the previous cycle's
+measured motor torque for the interval that just elapsed. The default gain is
+`momentum_observer_gain:=10.0 1/s`. It is monitor-only: `r` does not alter
+impedance torque and cannot trigger an emergency stop. Disable the process
+with `momentum_observer_enabled:=false`.
+
+On Piper-L, `O` toggles Cartesian admittance. The observed external joint
+torque is mapped to a base-frame wrench by damped least squares, integrated
+through `M_a*xdd + D_a*xd + K_a*x = F_ext`, then converted to planned joint
+targets by screw IK. `I` and `O` are strictly interlocked: entering impedance
+exits admittance first, and entering admittance exits impedance first. Nero
+admittance is intentionally not enabled yet.
+
+Because the URDF omits friction, backlash, cable forces, payload error, motor
+torque-tracking error, and joint elasticity, the residual is a total model
+disturbance estimate rather than a calibrated contact-force measurement.
+
 The local joint-space equivalence is the full matrix relation
 `Kq=Jg.T Kx Jg`, `Dq=Jg.T Dx Jg`. Off-diagonal coupling is retained; this
 stage does not replace it with diagonal MIT gains. For a nonsingular six-axis
@@ -165,6 +203,12 @@ ros2 launch armbycontroller keyboard_control.launch.py \
   cartesian_impedance_base_z_rotation_stiffness:=4.0
 
 # Start directly in MIT impedance mode by adding impedance_enabled:=true.
+```
+
+Inspect the observer output after entering MIT with `I`:
+
+```bash
+ros2 topic echo /arm_external_joint_torque
 ```
 
 Dry run:

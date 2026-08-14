@@ -18,8 +18,8 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 import websocket
 
-from armbycontroller.ik_core import quaternion_to_rotation_matrix
-from armbycontroller.ik_core import rotation_matrix_to_quaternion
+from armbycontroller.ik.core import quaternion_to_rotation_matrix
+from armbycontroller.ik.core import rotation_matrix_to_quaternion
 from armbycontroller.lie import rotation_exp
 from armbycontroller.lie import rotation_from_vector
 from armbycontroller.lie import rotation_vector

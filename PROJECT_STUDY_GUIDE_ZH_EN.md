@@ -4,12 +4,14 @@
 
 本项目通过 ROS 2、键盘输入和 AGX SDK 控制 Nero 与 Piper-L。当前分支
 `feature/cartesian-impedance-step-by-step` 的目标，是从已经存在的关节 MIT
-阻抗出发，逐层建立公式清楚、坐标一致、可测试的空间笛卡尔阻抗。
+阻抗出发，逐层建立公式清楚、坐标一致、可测试的空间笛卡尔阻抗，并为
+Piper-L 增加由动量观测外力驱动的笛卡尔导纳模式。
 
 This project controls Nero and Piper-L through ROS 2, keyboard input, and the
 AGX SDK. The goal of `feature/cartesian-impedance-step-by-step` is to start
 from the existing joint MIT impedance and build a formula-explicit,
-frame-consistent, testable Cartesian impedance controller in stages.
+frame-consistent, testable Cartesian impedance controller in stages, plus a
+Piper-L Cartesian-admittance mode driven by momentum-observer external torque.
 
 当前阶段已把纯数学核心接入 `mit_tick()` 和 AGX MIT/CAN。默认
 `impedance_backend:=cartesian`；设为 `joint` 可以保留旧关节 MIT 作为对照。
@@ -19,6 +21,12 @@ The pure formula core is now wired into `mit_tick()` and AGX MIT/CAN. The
 default is `impedance_backend:=cartesian`; selecting `joint` retains the old
 joint MIT backend for comparison. Passing software integration tests does not
 establish physical stability on real hardware.
+
+交互后端严格互锁：`I` 切换阻抗，`O` 切换导纳；进入一个模式会先退出另一个，
+两者绝不同时运行。导纳目前只支持 Piper-L。 / Interaction backends are
+strictly interlocked: `I` toggles impedance and `O` toggles admittance;
+entering either first exits the other, and both can never run together.
+Admittance currently supports Piper-L only.
 
 ## 2. 心智模型 / Mental model
 
@@ -267,6 +275,36 @@ unique task gain. The strict interface rejects both non-unique cases rather
 than silently introducing pseudoinverse assumptions. The actual control law
 still uses `tau=Jg^T F` directly and does not need to recover Kx.
 
+### 5.7 广义动量观测器 / Generalized momentum observer
+
+```text
+M(q) qddot + C(q,qdot) qdot + g(q) = tau_motor + tau_ext
+p = M(q) qdot
+Mdot = C + C^T
+pdot = tau_motor + tau_ext + C^T qdot - g
+beta = g - C^T qdot = g - dT/dq
+r = K_o [p - p(0) - integral(tau_motor - beta + r) dt]
+```
+
+这里的 `beta` 是由 URDF 动力学计算的已知项，不是人工/标定 bias，不能从公式中
+删除；当前固定标定 bias 为零。 / Here `beta` is a known term computed from
+URDF dynamics, not an empirical/calibration bias, and must not be removed from
+the equation; the current fixed calibration bias is zero.
+
+`r` 是外部关节力矩的一阶低通估计，`K_o` 的单位为 `1/s`。正的 `r_i` 表示
+环境对机械臂施加了关节 `i` 正方向的广义力矩。该公式不需要 `qddot`，也不反求
+`M^-1`。 / `r` is a first-order low-pass estimate of external joint torque,
+and `K_o` has units `1/s`. Positive `r_i` means the environment applies a
+generalized torque in joint `i`'s positive direction. The equation needs
+neither `qddot` nor `M^-1`.
+
+实现使用空间惯量前向/后向递推以 O(n) 计算 `p`。`C^T qdot` 通过
+`Mdot qdot-C qdot` 获得，其中 `Mdot qdot` 是 `p=M(q)qdot` 沿 `qdot` 的单次
+方向导数，不构造完整 Coriolis 矩阵。 / The implementation computes `p` in
+O(n) through spatial-inertia forward/backward recursion. It obtains
+`C^T qdot` from `Mdot qdot-C qdot`; `Mdot qdot` is one directional derivative
+of `p=M(q)qdot` along `qdot`, without constructing a full Coriolis matrix.
+
 ## 6. 架构 / Architecture
 
 ```text
@@ -293,6 +331,22 @@ Keyboard / Pose target
                          t_ff=tau_cmd
                                  |
                          pyAgxArm / CAN
+                                 |
+              one shared 100 Hz measured q/qdot/motor-torque sample
+                                 |
+                 /arm_dynamics_state (JointState)
+                                 |
+                 separate momentum-observer process
+                                 |
+          /arm_external_joint_torque (effort = r, N.m)
+                                 |
+                  DLS: tau_ext = J_g^T F_ext
+                                 |
+              M_a xdd + D_a xd + K_a x = F_ext
+                                 |
+             Exp(rotation-vector), p -> screw IK
+                                 |
+                       planned move_j
 ```
 
 旧关节 MIT 路径仍可通过 `impedance_backend:=joint` 选择，用于同机对照。
@@ -319,19 +373,48 @@ comparison on the same arm.
    total torque.
 11. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
     `move_mit(kp=0,kd=0,t_ff=tau_cmd)`.
+12. 控制器每个 100 Hz 周期读取一次 SDK 缓存的 `q/qdot/tau_motor`，并发布
+    `/arm_dynamics_state`；该流在 planned、阻抗和导纳模式都存在。 / Once per
+    100 Hz cycle, the controller reads cached SDK `q/qdot/tau_motor` and
+    publishes `/arm_dynamics_state`; the stream exists in planned, impedance,
+    and admittance modes.
+13. 独立观测器进程只订阅该 topic；它不连接 CAN，也不再次读取机械臂。 / The
+    separate observer process only subscribes to that topic; it neither
+    connects to CAN nor reads the arm again.
+14. 观测器按消息时间戳逐帧积分；区间 `[t_{k-1},t_k]` 使用上一周期的实测
+    `tau_motor[k-1]`，ROS 调度延迟不参与 `dt`。 / The observer integrates every
+    timestamped sample; interval `[t_{k-1},t_k]` uses the preceding cycle's
+    measured `tau_motor[k-1]`, so ROS scheduling delay does not enter `dt`.
+15. 观测器发布 `/arm_external_joint_torque`；`JointState.effort` 是 `r`，单位
+    N·m。 / The observer publishes `/arm_external_joint_torque`; its
+    `JointState.effort` is `r` in N·m.
+16. Piper-L 导纳开启时，使用 `tau_ext=J_g^T F_ext` 的阻尼最小二乘解估计
+    `F_ext`，积分虚拟质量-阻尼-弹簧方程，并以旋转向量指数映射生成连续 SE(3)
+    目标。 / With Piper-L admittance active, a damped least-squares solution of
+    `tau_ext=J_g^T F_ext` estimates `F_ext`; the virtual mass-damper-spring
+    equation is integrated and a rotation-vector exponential generates a
+    continuous SE(3) target.
+17. 旋量 IK 将目标转换为关节位置，并由 planned `move_j` 后端发送；该路径不
+    调用 MIT。 / Screw IK converts the target to joint position and the planned
+    `move_j` backend sends it; this path does not use MIT.
 
 ## 8. 模块地图 / Module map
 
 | 模块 / Module | 责任 / Responsibility |
 | --- | --- |
-| `armbycontroller/cartesian_impedance.py` | 纯数学公式、坐标验证、完整双向阻抗等价关系（仅在逆关系唯一时允许） / Pure formula, frame validation, and full bidirectional impedance equivalence only when the inverse is unique |
+| `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、坐标验证和完整双向等价关系（仅逆关系唯一时） / Pure impedance formula, frame validation, and full bidirectional equivalence only when the inverse is unique |
+| `armbycontroller/impedance/admittance.py` | 纯导纳虚拟动力学和 `tau_ext -> F_ext` 阻尼最小二乘 / Pure admittance virtual dynamics and damped least-squares `tau_ext -> F_ext` mapping |
 | `armbycontroller/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学 / URDF PoE FK, space Jacobian, RNEA inverse dynamics |
-| `armbycontroller/screw_ik.py` | 使用完整 SE(3) 空间误差和 PoE 空间雅可比的数值 IK / Numerical IK using a full SE(3) space error and PoE space Jacobian |
-| `armbycontroller/ik_core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
-| `armbycontroller/keyboard_controller.py` | JOINT/IK 参考、笛卡尔公式调用、绝对力矩上限和 MIT/CAN 发送；也保留旧关节 MIT 对照路径 / JOINT/IK reference, Cartesian formula invocation, absolute torque limit, and MIT/CAN transmission; also retains the old joint MIT comparison path |
+| `armbycontroller/ik/screw.py` | 使用完整 SE(3) 空间误差和 PoE 空间雅可比的数值 IK / Numerical IK using a full SE(3) space error and PoE space Jacobian |
+| `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
+| `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
+| `armbycontroller/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
+| `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `test/test_cartesian_impedance.py` | 坐标、符号、耦合、功率与模型支撑契约 / Frame, sign, coupling, power, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
+| `test/test_momentum_observer.py` | 空间动量、动能梯度、残差收敛、离散稳定性及禁止 SDK/CAN 访问 / Spatial momentum, kinetic gradient, residual convergence, discrete stability, and forbidden SDK/CAN-access contracts |
+| `test/test_cartesian_admittance.py` | wrench 估计、虚拟平衡、旋转向量、边界和重置契约 / Wrench-estimation, virtual-equilibrium, rotation-vector, bound, and reset contracts |
 
 模型调用方直接依赖 `UrdfScrewModel` 和 `project_gravity_vector`；项目不再提供
 `UrdfGravityModel`、`nero_mount_gravity` 或 `create_tracik_solver` 浅兼容名称。
@@ -357,8 +440,33 @@ implementation.
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_torque_limit` | 1 or n | N·m | `8.0` per joint |
 | `mit_command_rate` | scalar | Hz | `100.0` |
+| `dynamics_state_topic` | string | — | `/arm_dynamics_state`; `effort=tau_motor` |
+| `momentum_observer_enabled` | bool | — | `true`，只启动/停止独立观测进程 / only starts/stops the separate observer process |
+| `momentum_observer_rate` | scalar | Hz | `100.0`，预期输入频率；计算由每条输入消息触发 / expected input rate; every input message triggers an update |
+| `momentum_observer_gain` | 1 or n | 1/s | `10.0` |
+| `momentum_observer_max_period` | scalar | s | `0.05`；较大数据间隙时重置 / reset after a larger stream gap |
+| `external_torque_topic` | string | — | `/arm_external_joint_torque`；`effort` 为 N·m / `effort` is N·m |
+| `admittance_virtual_mass` | 6 | N·m·s²/rad, kg | `[0.12,0.12,0.12,1.5,1.5,1.5]` |
+| `admittance_damping` | 6 | N·m·s/rad, N·s/m | `[0.8,0.8,0.8,8,8,8]` |
+| `admittance_stiffness` | 6 | N·m/rad, N/m | `[0.8,0.8,0.8,8,8,8]` |
+| `admittance_wrench_deadband` | 6 | N·m, N | `[0.03,0.03,0.03,0.15,0.15,0.15]` |
+| `admittance_wrench_limit` | 6 | N·m, N | `[2,2,2,8,8,8]` |
+| `admittance_offset_limit` | 6 | rad, m | `[0.35,0.35,0.35,0.10,0.10,0.10]` |
+| `admittance_velocity_limit` | 6 | rad/s, m/s | `[0.5,0.5,0.5,0.15,0.15,0.15]` |
+| `admittance_wrench_filter_hz` | scalar | Hz | `5.0` |
+| `admittance_wrench_dls_damping` | scalar | — | `0.05` |
+| `admittance_wrench_timeout` | scalar | s | `0.10`; stale wrench becomes zero |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
+
+启用 URDF 重力/逆动力学补偿时，补偿项严格为经过 `mit_gravity_scale` 和绝对
+力矩限幅的模型输出，不再叠加 `mit_feedforward` 或任何固定标定 bias。
+`mit_feedforward` 只在没有 URDF 补偿的关节对照 backend 中作为显式手动力矩。
+/ With URDF gravity/inverse-dynamics compensation enabled, the compensation
+term is strictly the scaled and absolute-bounded model output; neither
+`mit_feedforward` nor any fixed calibration bias is added. `mit_feedforward`
+remains an explicit manual torque only for the joint comparison backend when
+URDF compensation is absent.
 
 `mit_kp/mit_kd` 只属于 `joint` 对照 backend。Cartesian backend 无条件向固件
 发送 `kp=kd=0`，防止关节 PD 与 `J^T F` 重复计算。
@@ -398,6 +506,26 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 - 软件计算上限不是驱动器电流硬限，也不是力传感器测量。 / A software
   command limit is neither a drive-current hard limit nor a force-sensor
   measurement.
+- 动量观测器是被动监视器；它不修改 `tau_cmd`，也不触发急停。 / The momentum
+  observer is a passive monitor; it neither changes `tau_cmd` nor triggers an
+  emergency stop.
+- 观测器进程禁止访问 SDK/CAN；输入只能来自控制器复用的 100 Hz
+  `/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
+  its only input is the controller's reused 100 Hz `/arm_dynamics_state`
+  stream.
+- `I/O` 是互锁切换，不是叠加：导纳运行在 planned `move_j`，阻抗运行在 MIT；
+  同时按下两个键会保持原模式。 / `I/O` are interlocked switches, not layers:
+  admittance runs on planned `move_j`, impedance runs on MIT, and pressing
+  both keys together leaves the current mode unchanged.
+- 导纳路径不受 ±8 N·m MIT 命令限幅保护；驱动器内部 planned-position 力矩由
+  固件决定。软件仅限制 wrench、虚拟速度/位移和单周期 IK 关节步长。 /
+  Admittance is not protected by the ±8 N·m MIT command clip; drive torque in
+  planned-position mode is determined by firmware. Software only bounds the
+  wrench, virtual velocity/offset, and per-cycle IK joint step.
+- 离散实现要求 `momentum_observer_gain * momentum_observer_max_period < 2`；
+  不稳定组合在启动时拒绝。 / The discrete implementation requires
+  `momentum_observer_gain * momentum_observer_max_period < 2`; unstable
+  combinations are rejected at startup.
 
 ## 11. 已知风险 / Known risks
 
@@ -413,8 +541,32 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   so low gains and the absolute torque bound remain necessary.
 - URDF 不包含摩擦、线缆力、齿隙、未知负载和驱动延迟。 / URDF omits
   friction, cable forces, backlash, unknown payload, and drive delay.
+- 因此观测残差包含接触、摩擦、齿隙、负载误差、力矩跟踪误差和编码器噪声；未
+  验证前不能把它解释为纯接触力矩或安全碰撞阈值。 / The residual therefore
+  combines contact, friction, backlash, payload error, torque-tracking error,
+  and encoder noise; before validation it is neither pure contact torque nor
+  a safe collision threshold.
+- `/arm_dynamics_state.effort` 是 SDK 电机状态中的力矩估计，不是六维力/力矩
+  传感器测量，也不是硬件同步采样。 / `/arm_dynamics_state.effort` is the
+  SDK motor-state torque estimate, not a six-axis force/torque-sensor reading
+  or a hardware-synchronous sample.
+- SDK 在 `connect()` 后由后台线程持续接收 CAN；控制器读取的是解析器当前缓存。
+  `get_joint_angles()` 与逐关节 `get_motor_states()` 是不同反馈消息，因而同一循环
+  内也不是硬件原子快照。观测器不会再次调用它们。 / After `connect()`, the SDK
+  receives CAN in a background thread and the controller reads its current
+  parser cache. `get_joint_angles()` and per-joint `get_motor_states()` are
+  different feedback messages, so one loop still does not form a
+  hardware-atomic snapshot. The observer never calls them again.
 - 100 Hz Python/ROS 循环不是硬实时。 / A 100 Hz Python/ROS loop is not
   hard real time.
+- 由关节残差反解 Cartesian wrench 在奇异位形附近病态；DLS 只能正则化，不能
+  恢复不可观方向。 / Joint-residual-to-Cartesian-wrench inversion is
+  ill-conditioned near singularities; DLS regularizes it but cannot recover
+  unobservable directions.
+- 导纳依赖动量残差，因而摩擦/模型误差会形成假外力；`0.10 s` 超时只将旧
+  wrench 清零，随后虚拟弹簧回到入口锚点。 / Admittance inherits friction and
+  model error as false external wrench; the `0.10 s` timeout only zeros stale
+  wrench, after which the virtual spring returns toward its entry anchor.
 - 目标位姿不连续会直接造成力矩跳变；本设计明确不使用力矩变化率限制掩盖这种
   输入，目标生成器必须自己保持连续。 / A discontinuous pose reference causes
   an immediate torque step; this design deliberately does not hide it with a
@@ -452,6 +604,10 @@ source install/setup.bash
 cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_cartesian_impedance.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_momentum_observer.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_cartesian_admittance.py
 ```
 
 ### 全部测试 / Full tests
@@ -526,6 +682,31 @@ current pose so the first task error is zero; press `P` to update references
 through screw IK. First hardware trials require physical arm support, an
 accessible emergency stop, and a clear workspace.
 
+Piper-L 导纳使用同一启动命令。保持 `impedance_enabled:=false`，启动后按 `O`
+捕获当前位姿并进入导纳；再次按 `O` 退出。若阻抗已开启，`O` 会先退出阻抗；若
+导纳已开启，`I` 会先退出导纳。导纳中 `P`、手动 jog 和 home 被锁住。 /
+Piper-L admittance uses the same launch command. Keep
+`impedance_enabled:=false`, then press `O` to capture the current pose and
+enter admittance; press `O` again to leave. If impedance is active, `O` exits
+it first; if admittance is active, `I` exits it first. `P`, manual jog, and
+home are locked while admittance is active.
+
+实机按 `O` 前必须已有新鲜的 `/arm_external_joint_torque`（默认不超过
+`0.10 s`）；否则控制器拒绝进入并提示检查该 topic。 / Before pressing `O` on
+hardware, `/arm_external_joint_torque` must be fresh (no older than `0.10 s`
+by default); otherwise entry is rejected with a topic diagnostic.
+
+两个实机命令都会默认启动 100 Hz 被动动量观测器。进入 MIT 后查看： / Both
+hardware commands start the passive 100 Hz momentum observer by default.
+After entering MIT, inspect:
+
+```bash
+ros2 topic echo /arm_external_joint_torque
+```
+
+若只想运行控制器，启动参数追加 `momentum_observer_enabled:=false`。 / Add
+`momentum_observer_enabled:=false` to run only the controller.
+
 ## 13. 诊断 / Diagnostics
 
 公式层应依次检查：
@@ -549,6 +730,17 @@ The formula layer should be diagnosed in this order:
    `J_g M^-1 tau_null≈0`?
 9. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
    Do logged `task`, `null`, and `model` sum to the pre-clip `total`?
+10. `/arm_dynamics_state` 是否约为 100 Hz，且 `position/velocity/effort`
+    分别来自 SDK 的关节角、关节速度和电机力矩。 / Is
+    `/arm_dynamics_state` near 100 Hz, with `position/velocity/effort` sourced
+    from SDK joint angle, joint velocity, and motor torque?
+11. 静止无接触时，残差是否稳定但可能存在摩擦/模型偏置；接触时符号是否符合关节
+    正方向。 / At rest without contact, is the residual stable despite possible
+    friction/model bias, and does contact follow the positive joint sign?
+12. 按 `O` 后是否 `admittance=true, impedance=false`；随后按 `I` 是否先退出
+    planned 导纳再进入 MIT 阻抗。 / After `O`, is admittance true and
+    impedance false; after `I`, does planned admittance exit before MIT
+    impedance enters?
 
 ## 14. 分阶段学习与实现路线 / Staged learning and implementation path
 
@@ -570,6 +762,16 @@ The formula layer should be diagnosed in this order:
    twist from a continuous joint reference.
 6. **低增益实机 / Low-gain hardware**：先静止保持，再毫米级 IK，保存完整日志。
    / First stationary hold, then millimetre IK steps with complete logs.
+7. **动量观测 / Momentum observation**：已完成只读 100 Hz topic seam、独立进程、
+   O(n) 动量递推和残差发布；尚未完成摩擦辨识或碰撞阈值验证。 / The read-only
+   100 Hz topic seam, separate process, O(n) momentum recursion, and residual
+   publication are done; friction identification and collision-threshold
+   validation remain undone.
+8. **Piper-L 导纳 / Piper-L admittance**：已完成 `O` 键、I/O 互锁、DLS wrench、
+   虚拟动力学、旋量 IK 和 planned adapter；实机手感与残差质量仍需低速验证。 /
+   The `O` key, I/O interlock, DLS wrench, virtual dynamics, screw IK, and
+   planned adapter are implemented; hardware feel and residual quality still
+   require low-speed validation.
 
 ## 15. 练习 / Exercises
 
@@ -590,6 +792,9 @@ The formula layer should be diagnosed in this order:
    零空间恢复力矩非零且 `J_g M^-1 tau_null≈0`。 / Use the final right singular
    vector of Nero's `6×7` Jacobian as a posture error and verify nonzero
    restoring torque with `J_g M^-1 tau_null≈0`.
+8. 证明 `pdot=tau+tau_ext+C^T qdot-g`，并用一自由度恒定外力矩仿真验证 `r`
+   收敛。 / Derive `pdot=tau+tau_ext+C^T qdot-g` and verify residual
+   convergence with a one-DOF constant-external-torque simulation.
 
 ## 16. 术语表 / Glossary
 
@@ -597,6 +802,8 @@ The formula layer should be diagnosed in this order:
 | --- | --- | --- |
 | 关节阻抗 | Joint impedance | Joint-space spring-damper torque law |
 | 笛卡尔阻抗 | Cartesian impedance | Tool-space wrench spring-damper law |
+| 笛卡尔导纳 | Cartesian admittance | External wrench drives a virtual mass-damper-spring pose |
+| 互锁 | Interlock | Entering impedance exits admittance and vice versa |
 | 空间雅可比 | Space Jacobian | PoE space-twist Jacobian `[omega; v]` |
 | 几何雅可比 | Geometric Jacobian | Tool-origin velocity Jacobian `[omega; p_dot]` |
 | wrench | Wrench | Moment-force vector `[M; F]` |
@@ -609,6 +816,9 @@ The formula layer should be diagnosed in this order:
 | 旋量 IK | Screw IK | IK based on PoE screws and SE(3) logarithms |
 | 旋转向量 | Rotation vector | `Log(R_d R^T)^vee` 轴角姿态误差，不是 RPY 差值 / Axis-angle orientation error, not an RPY difference |
 | 空间误差旋量 | Space-error twist | `Log(T_d T^-1)^vee`，表达在基坐标系并与 `J_s` 配对 / Base-frame SE(3) error paired with `J_s` |
+| 广义动量 | Generalized momentum | `p=M(q)qdot` |
+| 动量观测残差 | Momentum-observer residual | 外部关节力矩的一阶低通估计；也包含未建模扰动 / First-order estimate of external joint torque that also contains unmodelled disturbances |
+| 阻尼最小二乘 | Damped least squares | Regularized solve of `tau_ext=J^T F_ext` near rank loss |
 | MIT 命令 | MIT command | Native motor command with `p_des/v_des/kp/kd/t_ff` |
 
 ## 17. 主要资料 / Primary sources
@@ -621,6 +831,14 @@ The formula layer should be diagnosed in this order:
   and Automation, 1987. DOI: 10.1109/JRA.1987.1087068.
 - Neville Hogan, “Impedance Control: An Approach to Manipulation,” ASME Journal
   of Dynamic Systems, Measurement, and Control, 1985.
+- Christian Ott, Alin Albu-Schäffer, Andreas Kugi, and Gerd Hirzinger,
+  “Cartesian Impedance Control of Flexible Joint Robots: A Passivity-Based
+  Approach,” IEEE Transactions on Robotics, 2008,
+  https://doi.org/10.1109/TRO.2008.915438.
+- Alessandro De Luca and Raffaella Mattone, “Sensorless Robot Collision
+  Detection and Hybrid Force/Motion Control,” IEEE ICRA, 2005, pp. 999-1004.
+  DOI: 10.1109/ROBOT.2005.1570247. 广义动量残差公式来源。 / Primary source
+  for the generalized-momentum residual.
 - Matthias Mayr and Julian M. Salt-Ducaju, “A C++ Implementation of a
   Cartesian Impedance Controller for Robotic Manipulators,” JOSS 9(93), 5194,
   2024, https://doi.org/10.21105/joss.05194. 本项目采用其 `J^T` 任务力矩
@@ -632,6 +850,12 @@ The formula layer should be diagnosed in this order:
 - 本仓库 `armbycontroller/screw_model.py`：PoE、空间雅可比和 RNEA 的实际实现。
   / This repository's `armbycontroller/screw_model.py`: the implemented PoE,
   space Jacobian, and RNEA model.
-- 本仓库 `armbycontroller/keyboard_controller.py`：当前 AGX MIT 方程和硬件发送
-  基线。 / This repository's `armbycontroller/keyboard_controller.py`: the
-  current AGX MIT equation and hardware-transmission baseline.
+- 本仓库 `armbycontroller/ros/keyboard_controller_node.py`：当前 ROS 状态机、
+  AGX MIT/planned adapter 与互锁基线。 / This repository's
+  `armbycontroller/ros/keyboard_controller_node.py`: the current ROS state
+  machine, AGX MIT/planned adapters, and interlock baseline.
+- AgileX Robotics, Piper API：后台读取线程、`MessageAbstract.timestamp`、
+  `get_joint_angles()` 与高频 `get_motor_states()`：
+  https://github.com/agilexrobotics/pyAgxArm/blob/master/docs/piper/piper_api.md
+- AgileX Robotics, Nero API：相同状态接口（7 轴）：
+  https://github.com/agilexrobotics/pyAgxArm/blob/master/docs/nero/nero_api.md

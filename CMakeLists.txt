@@ -31,11 +31,12 @@ install(TARGETS
 )
 
 install(PROGRAMS
-  armbycontroller/keyboard_controller.py
+  armbycontroller/ros/keyboard_controller_node.py
   armbycontroller/pose_controller.py
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
+  armbycontroller/ros/momentum_observer_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -70,6 +71,14 @@ if(BUILD_TESTING)
   )
   ament_add_pytest_test(cartesian_impedance_formula_test
     test/test_cartesian_impedance.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(momentum_observer_test
+    test/test_momentum_observer.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(cartesian_admittance_test
+    test/test_cartesian_admittance.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
 endif()

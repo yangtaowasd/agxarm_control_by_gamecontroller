@@ -6,12 +6,12 @@ import modern_robotics as mr
 import numpy as np
 import pytest
 
-from armbycontroller.cartesian_impedance import cartesian_impedance_command
-from armbycontroller.cartesian_impedance import cartesian_impedance_diagonals
-from armbycontroller.cartesian_impedance import cartesian_pose_error
-from armbycontroller.cartesian_impedance import equivalent_cartesian_impedance
-from armbycontroller.cartesian_impedance import equivalent_joint_impedance
-from armbycontroller.cartesian_impedance import geometric_jacobian
+from armbycontroller.impedance.cartesian import cartesian_impedance_command
+from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
+from armbycontroller.impedance.cartesian import cartesian_pose_error
+from armbycontroller.impedance.cartesian import equivalent_cartesian_impedance
+from armbycontroller.impedance.cartesian import equivalent_joint_impedance
+from armbycontroller.impedance.cartesian import geometric_jacobian
 from armbycontroller.screw_model import UrdfScrewModel
 
 
@@ -19,7 +19,9 @@ class FixedModel:
     """Minimal PoE model seam with explicit pose and space Jacobian."""
 
     def __init__(self, pose=None, space_jacobian=None):
-        self.pose = np.eye(4) if pose is None else np.asarray(pose, dtype=float)
+        self.pose = (
+            np.eye(4) if pose is None else np.asarray(pose, dtype=float)
+        )
         self.jacobian = (
             np.eye(6)
             if space_jacobian is None

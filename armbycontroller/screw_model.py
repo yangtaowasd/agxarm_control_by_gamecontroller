@@ -518,3 +518,114 @@ class UrdfScrewModel:
             self.mr_glist,
             self.space_screws,
         )
+
+    def _spatial_momentum_state(self, joint_positions, joint_velocities):
+        """Return link twists, transforms, subspaces, and momenta in O(n)."""
+        positions = self._state(joint_positions, "joint_positions")
+        velocities = self._state(joint_velocities, "joint_velocities")
+        node_count = len(self._links)
+        twists = [np.zeros(6) for _ in range(node_count)]
+        x_up = [None] * len(self._edges)
+        subspaces = [None] * len(self._edges)
+        for edge_index, (parent, child, joint) in enumerate(self._edges):
+            coordinate = (
+                positions[joint.q_index] if joint.q_index >= 0 else 0.0
+            )
+            parent_to_child = (
+                joint.origin
+                @ joint_transform(joint.kind, joint.axis, coordinate)
+            )
+            x_motion = adjoint(transform_inverse(parent_to_child))
+            if joint.kind in ("revolute", "continuous"):
+                subspace = np.concatenate((joint.axis, np.zeros(3)))
+            elif joint.kind == "prismatic":
+                subspace = np.concatenate((np.zeros(3), joint.axis))
+            else:
+                subspace = np.zeros(6)
+            speed = (
+                velocities[joint.q_index] if joint.q_index >= 0 else 0.0
+            )
+            twists[child] = (
+                x_motion @ twists[parent] + subspace * speed
+            )
+            x_up[edge_index] = x_motion
+            subspaces[edge_index] = subspace
+        momenta = [
+            self._spatial_inertias[index] @ twists[index]
+            for index in range(node_count)
+        ]
+        return twists, momenta, x_up, subspaces
+
+    def generalized_momentum(self, joint_positions, joint_velocities):
+        """Return ``p=M(q)qdot`` by a spatial O(n) backward recursion."""
+        _, momenta, x_up, subspaces = self._spatial_momentum_state(
+            joint_positions, joint_velocities
+        )
+        result = np.zeros(self.joint_count)
+        for edge_index in range(len(self._edges) - 1, -1, -1):
+            parent, child, joint = self._edges[edge_index]
+            if joint.q_index >= 0:
+                result[joint.q_index] = (
+                    subspaces[edge_index] @ momenta[child]
+                )
+            momenta[parent] = (
+                momenta[parent] + x_up[edge_index].T @ momenta[child]
+            )
+        return result
+
+    def kinetic_energy(self, joint_positions, joint_velocities):
+        """Return rigid-link kinetic energy from spatial inertia and twist."""
+        twists, momenta, _, _ = self._spatial_momentum_state(
+            joint_positions, joint_velocities
+        )
+        return 0.5 * sum(
+            float(twist @ momentum)
+            for twist, momentum in zip(twists, momenta)
+        )
+
+    def kinetic_energy_gradient(
+        self, joint_positions, joint_velocities, step=1e-6
+    ):
+        """Return ``dT/dq=C(q,qdot).T qdot`` by central differences."""
+        positions = self._state(joint_positions, "joint_positions")
+        velocities = self._state(joint_velocities, "joint_velocities")
+        step = float(step)
+        if not math.isfinite(step) or step <= 0.0:
+            raise ValueError("kinetic energy gradient step must be positive")
+        gradient = np.zeros(self.joint_count)
+        for index in range(self.joint_count):
+            offset = np.zeros(self.joint_count)
+            offset[index] = step
+            gradient[index] = (
+                self.kinetic_energy(positions + offset, velocities)
+                - self.kinetic_energy(positions - offset, velocities)
+            ) / (2.0 * step)
+        return gradient
+
+    def momentum_observer_terms(self, joint_positions, joint_velocities):
+        """Return generalized momentum and ``beta=g-dT/dq``."""
+        positions = self._state(joint_positions, "joint_positions")
+        velocities = self._state(joint_velocities, "joint_velocities")
+        momentum = self.generalized_momentum(positions, velocities)
+        speed = float(np.linalg.norm(velocities))
+        if speed < 1e-12:
+            momentum_derivative = np.zeros(self.joint_count)
+        else:
+            step = 1e-6 / max(1.0, speed)
+            momentum_derivative = (
+                self.generalized_momentum(
+                    positions + step * velocities, velocities
+                )
+                - self.generalized_momentum(
+                    positions - step * velocities, velocities
+                )
+            ) / (2.0 * step)
+        # Mdot*qdot is the directional derivative of p=M(q)qdot along qdot.
+        # Since Mdot=C+C.T, beta=g-C.T*qdot=g+C*qdot-Mdot*qdot.
+        beta = (
+            self.inverse_dynamics(
+                positions, velocities, np.zeros(self.joint_count)
+            )
+            - momentum_derivative
+        )
+        return momentum, beta

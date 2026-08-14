@@ -301,7 +301,9 @@ def cartesian_impedance_command(
                 mass, jacobian.T
             )
         except np.linalg.LinAlgError as error:
-            raise ValueError("dynamics mass_matrix must be nonsingular") from error
+            raise ValueError(
+                "dynamics mass_matrix must be nonsingular"
+            ) from error
         jacobian_mass_inverse = mass_inverse_jacobian_transpose.T
         operational_inverse_inertia = (
             jacobian @ mass_inverse_jacobian_transpose

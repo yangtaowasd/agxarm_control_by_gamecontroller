@@ -59,11 +59,11 @@ private:
       {KEY_5, 4}, {KEY_6, 5}, {KEY_7, 6}, {KEY_A, 7},
       {KEY_D, 8}, {KEY_SPACE, 9}, {KEY_E, 10}, {KEY_P, 11},
       {KEY_W, 12}, {KEY_S, 13}, {KEY_Z, 14}, {KEY_X, 15},
-      {KEY_I, 16},
+      {KEY_I, 16}, {KEY_O, 23},
       {KEY_UP, 17}, {KEY_DOWN, 18}, {KEY_LEFT, 19}, {KEY_RIGHT, 20},
       {KEY_PAGEUP, 21}, {KEY_PAGEDOWN, 22},
     };
-    states_.assign(23, 0);
+    states_.assign(24, 0);
   }
 
   void tick()
