@@ -2,7 +2,6 @@
 """ROS 2 adapter for passive generalized-momentum torque observation."""
 
 import math
-from pathlib import Path
 
 import numpy as np
 import rclpy
@@ -12,13 +11,17 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
 from armbycontroller.ik.core import resolve_urdf_path
-from armbycontroller.momentum_observer import GeneralizedMomentumObserver
-from armbycontroller.screw_model import UrdfScrewModel
+from armbycontroller.ik.core import resolve_tool_urdf_path
+from armbycontroller.modeling.momentum_observer import (
+    GeneralizedMomentumObserver,
+)
+from armbycontroller.modeling.screw_model import project_gravity_vector
+from armbycontroller.modeling.screw_model import UrdfScrewModel
 
 
 MODEL_PROFILES = {
-    "piper_l": (6, "link6", "piper_l_with_gripper_description.xacro"),
-    "nero": (7, "link7", "nero_with_left_revo2_description.xacro"),
+    "piper_l": (6, "link6"),
+    "nero": (7, "link7"),
 }
 
 
@@ -33,6 +36,8 @@ class MomentumObserverNode(Node):
         self.declare_parameter("tip_link", "")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("gravity_urdf_path", "")
+        self.declare_parameter("nero_mount", "")
+        self.declare_parameter("tool_configuration", "auto")
         self.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
         self.declare_parameter(
             "dynamics_state_topic", "/arm_dynamics_state"
@@ -51,7 +56,7 @@ class MomentumObserverNode(Node):
         ).lower()
         if self.robot_model not in MODEL_PROFILES:
             raise ValueError("robot_model must be nero or piper_l")
-        self.joint_count, default_tip, accessory = MODEL_PROFILES[
+        self.joint_count, default_tip = MODEL_PROFILES[
             self.robot_model
         ]
         self.base_frame = str(self.get_parameter("base_frame").value)
@@ -79,8 +84,14 @@ class MomentumObserverNode(Node):
         )
         if gain.ndim == 0 or gain.size == 1:
             gain = np.full(self.joint_count, float(gain.reshape(-1)[0]))
+        nero_mount = str(
+            self.get_parameter("nero_mount").value
+        ).strip().lower()
         gravity = np.asarray(
-            self.get_parameter("gravity_vector").value, dtype=float
+            project_gravity_vector(nero_mount)
+            if self.robot_model == "nero" and nero_mount
+            else self.get_parameter("gravity_vector").value,
+            dtype=float,
         )
         bare_urdf = resolve_urdf_path(
             str(self.get_parameter("urdf_path").value), self.robot_model
@@ -88,9 +99,11 @@ class MomentumObserverNode(Node):
         configured = str(
             self.get_parameter("gravity_urdf_path").value
         )
-        model_path = (
-            Path(configured).expanduser().resolve()
-            if configured else bare_urdf.parent / accessory
+        model_path = resolve_tool_urdf_path(
+            bare_urdf,
+            self.robot_model,
+            str(self.get_parameter("tool_configuration").value),
+            configured,
         )
         self.model = UrdfScrewModel(
             model_path,

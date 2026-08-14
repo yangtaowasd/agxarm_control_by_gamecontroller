@@ -23,11 +23,15 @@ from armbycontroller.ik.core import radial_workspace_check
 from armbycontroller.ik.core import rotation_error_angle
 from armbycontroller.ik.core import rotation_matrix_to_quaternion
 from armbycontroller.ik.core import resolve_firmware_name
+from armbycontroller.ik.core import resolve_tool_urdf_path
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import set_joint_acceleration_limits
 from armbycontroller.ik.core import solve_pointing_ik
 from armbycontroller.ros.keyboard_controller_node import ArmJointJogState
 from armbycontroller.ros.keyboard_controller_node import ArmKeyboardController
+from armbycontroller.ros.keyboard_controller_node import (
+    estimate_joint_velocity,
+)
 from armbycontroller.ros.keyboard_controller_node import (
     bounded_model_feedforward,
 )
@@ -49,19 +53,19 @@ from armbycontroller.ros.keyboard_controller_node import MotorFeedback
 from armbycontroller.ros.keyboard_controller_node import (
     limit_mit_combined_torque,
 )
-from armbycontroller.lie import rotation_from_vector
-from armbycontroller.lie import rotation_vector
-from armbycontroller.lie import space_pose_error
-from armbycontroller.lie import transform as screw_transform
+from armbycontroller.modeling.lie import rotation_from_vector
+from armbycontroller.modeling.lie import rotation_vector
+from armbycontroller.modeling.lie import space_pose_error
+from armbycontroller.modeling.lie import transform as screw_transform
 from armbycontroller.motion_link_bridge import phone_rotation
 from armbycontroller.motion_link_bridge import relative_target_rotation
 from armbycontroller.motion_link_bridge import websocket_url
 from armbycontroller.pose_controller import PoseController
-from armbycontroller.screw_model import UrdfScrewModel
-from armbycontroller.screw_model import project_gravity_vector
+from armbycontroller.modeling.screw_model import UrdfScrewModel
+from armbycontroller.modeling.screw_model import project_gravity_vector
 
 
-def test_keyboard_launch_exposes_cartesian_and_nero_nullspace_gains():
+def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     launch_path = (
         Path(__file__).resolve().parents[1]
         / "launch" / "keyboard_control.launch.py"
@@ -72,21 +76,70 @@ def test_keyboard_launch_exposes_cartesian_and_nero_nullspace_gains():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    assert module.COMMON[
-        "cartesian_impedance_base_z_rotation_stiffness"
-    ] == "4.0"
-    assert module.COMMON[
-        "cartesian_impedance_nullspace_stiffness"
-    ] == "0.4"
-    assert module.COMMON[
-        "cartesian_impedance_nullspace_damping"
-    ] == "0.1"
+    assert "cartesian_impedance_base_z_rotation_stiffness" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "cartesian_impedance_nullspace_stiffness" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "cartesian_impedance_nullspace_damping" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "cartesian_impedance_model_scale" not in module.COMMON
     assert module.COMMON["dynamics_state_topic"] == "/arm_dynamics_state"
     assert module.COMMON[
         "external_torque_topic"
     ] == "/arm_external_joint_torque"
     assert module.OBSERVER["momentum_observer_enabled"] == "true"
-    assert module.OBSERVER["momentum_observer_rate"] == "100.0"
+    assert "momentum_observer_rate" in (
+        module.CONFIGURED_OBSERVER_PARAMETERS
+    )
+    assert "momentum_observer_rate" not in module.OBSERVER
+    assert "cartesian_impedance_model_scale" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "tool_configuration" in module.CONFIGURED_PARAMETERS
+    assert "velocity_filter_time_constant" in (
+        module.CONFIGURED_PARAMETERS
+    )
+
+
+def test_robot_configs_separate_nero_and_piper_parameters():
+    config_root = Path(__file__).resolve().parents[1] / "config"
+    common = (config_root / "common.yaml").read_text(encoding="utf-8")
+    nero = (config_root / "nero.yaml").read_text(encoding="utf-8")
+    piper = (config_root / "piper_l.yaml").read_text(encoding="utf-8")
+
+    assert "control_rate: 100.0" in common
+    assert "firmware:" not in common
+    assert "nero_mount: side" in nero
+    assert "tool_configuration: none" in nero
+    assert "nero_velocity_estimation_enabled: true" in nero
+    assert "admittance_virtual_mass" not in nero
+    assert "tool_configuration: gripper" in piper
+    assert "nero_mount" not in piper
+    assert "nero_velocity_estimation_enabled" not in piper
+    assert "admittance_virtual_mass" in piper
+    assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in nero
+    assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in piper
+
+
+def test_launch_selects_one_robot_specific_config_filename():
+    launch_path = (
+        Path(__file__).resolve().parents[1]
+        / "launch" / "keyboard_control.launch.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "keyboard_control_launch_configs", launch_path
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.ROBOT_CONFIG_FILENAMES == {
+        "nero": "nero.yaml",
+        "piper_l": "piper_l.yaml",
+    }
+    assert module.USE_ROBOT_CONFIG == "__robot__"
 
 
 def _write_test_urdf(tmp_path, body):
@@ -158,6 +211,30 @@ def test_nero_urdf_resolves_from_validated_screw_package():
 
     assert path.name == "nero_description.urdf"
     assert "nero_screw_dynamics" in str(path)
+
+
+@pytest.mark.parametrize(
+    ("tool_configuration", "expected_name"),
+    [
+        ("auto", "nero_description.urdf"),
+        ("none", "nero_description.urdf"),
+        ("left_revo2", "nero_with_left_revo2_description.xacro"),
+        ("right_revo2", "nero_with_right_revo2_description.xacro"),
+    ],
+)
+def test_nero_tool_configuration_selects_matching_urdf(
+    tool_configuration, expected_name
+):
+    bare = (
+        Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf/nero/urdf/nero_description.urdf"
+    )
+
+    selected = resolve_tool_urdf_path(
+        bare, "nero", tool_configuration
+    )
+
+    assert selected.name == expected_name
 
 
 @pytest.mark.parametrize(
@@ -640,6 +717,55 @@ def test_motor_feedback_uses_one_complete_cached_sdk_sample():
     assert feedback.position == pytest.approx([0.1, -0.2])
     assert feedback.velocity == pytest.approx([0.25, 0.5])
     assert feedback.torque == pytest.approx([-0.5, -1.0])
+
+
+def test_velocity_estimator_low_pass_filters_position_difference():
+    velocity = estimate_joint_velocity(
+        [0.0, 0.0], [0.1, -0.2], [0.0, 0.0], 0.1, 0.1
+    )
+
+    assert velocity == pytest.approx([0.5, -1.0])
+
+
+def test_nero_v112_feedback_estimates_velocity_when_sdk_reports_zero(
+    monkeypatch,
+):
+    class FakeArm:
+        def __init__(self):
+            self.position = [0.0, 0.0]
+
+        def get_joint_angles(self):
+            return SimpleNamespace(msg=self.position)
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(
+                velocity=0.0,
+                torque=0.0,
+            ))
+
+    timestamps = iter([10.0, 10.1])
+    monkeypatch.setattr(
+        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        lambda: next(timestamps),
+    )
+    controller = object.__new__(ArmKeyboardController)
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.robot_model = "nero"
+    controller.firmware_name = "v112"
+    controller.nero_velocity_estimation_enabled = True
+    controller.velocity_filter_time_constant = 0.0
+    controller.feedback_previous_position = None
+    controller.feedback_previous_velocity = np.zeros(2)
+    controller.feedback_previous_time = None
+
+    first = controller.read_motor_feedback()
+    controller.arm.position = [0.1, -0.2]
+    second = controller.read_motor_feedback()
+
+    assert first.velocity == pytest.approx([0.0, 0.0])
+    assert second.velocity == pytest.approx([1.0, -2.0])
 
 
 def test_external_torque_callback_uses_urdf_jacobian_without_sdk(

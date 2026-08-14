@@ -25,7 +25,7 @@ tau_task = Jg^T Fc
 tau_0 = K0 (q0-q) + D0 (dq0-dq)
 N_tau = I - Jg^T (Jg M^-1 Jg^T)^+ Jg M^-1
 tau_null = N_tau tau_0                 # Nero 7-axis only
-tau_model = C(q,qdot)qdot + g(q)
+tau_model = model_scale .* (C(q,qdot)qdot + g(q))
 tau_cmd = tau_task + tau_null + tau_model
 ```
 
@@ -43,7 +43,7 @@ delta_q = Js(q)^# V_error
 ```
 
 SO(3)/SE(3) logarithms, exponentials, and pose-error construction are
-concentrated in `armbycontroller/lie.py`. Keyboard orientation increments,
+concentrated in `armbycontroller/modeling/lie.py`. Keyboard orientation increments,
 Motion Link orientation limiting, URDF RPY conversion, Cartesian orientation
 error, and FK verification reuse that module. Quaternion conversion remains
 at ROS message seams, while URDF and phone RPY values remain input formats.
@@ -61,16 +61,19 @@ damping. The torque projector uses the URDF mass matrix and keeps
 does not intentionally move the Cartesian task. This term is disabled for the
 six-axis Piper-L.
 
-`tau_cmd` is the immediate, stateless equation result. The MIT adapter applies
-only a per-joint absolute limit (±8 N·m by default, including model support).
-It does not apply a previous-cycle torque-rate limiter (`delta_tau` or
-`delta_tau_max`).
+`model_scale` is a scalar or per-joint vector in `[0, 1]`; it is independent
+from task/nullspace gains and defaults to `1.0`. `tau_cmd` is the immediate,
+stateless equation result. The MIT adapter applies only a per-joint absolute
+limit (±8 N·m by default, including model support). It does not apply a
+previous-cycle torque-rate limiter (`delta_tau` or `delta_tau_max`).
 
 ## Passive momentum observer and Piper-L admittance
 
 The launch file also starts a passive generalized-momentum observer. The
-controller reads one cached SDK `q`, `qdot`, and motor-torque sample per
-100 Hz cycle and publishes it on `/arm_dynamics_state` in every backend. A
+controller reads one cached `q`, `qdot`, and motor-torque sample per 100 Hz
+cycle and publishes it on `/arm_dynamics_state` in every backend. Nero v111
+and v112 do not expose motor velocity through the current SDK, so `qdot` is a
+low-pass filtered finite difference of joint position for those profiles. A
 separate process subscribes to that stream and publishes estimated external
 joint torque in the `effort` field of `/arm_external_joint_torque`:
 
@@ -111,6 +114,61 @@ pose only, the unique reverse relation is
 `Kx=Jg^-T Kq Jg^-1`, `Dx=Jg^-T Dq Jg^-1`; redundant or singular cases are
 explicitly rejected instead of silently using a pseudoinverse. See
 `PROJECT_STUDY_GUIDE_ZH_EN.md` for the bilingual derivation and staged plan.
+
+## Unified controller interface and experiments
+
+All three in-tree interaction algorithms now run behind the same ROS/CAN-free
+controller seam:
+
+```text
+ControlInput(state, reference, wrench, timestamp, period)
+    -> ControllerAdapter.reset/step
+    -> ControlResult(MIT or planned-position command, diagnostic signals)
+```
+
+`joint_impedance`, `cartesian_impedance`, and the current
+`cartesian_admittance` are adapters registered with `ControlEngine`. The ROS
+node remains responsible for mode interlocks, feedback acquisition, command
+transmission, and emergency stop. Each executed cycle is published as schema
+version 1 JSON on `/arm_control_sample`; enable/disable and emergency-stop
+events are published on `/arm_control_event`.
+
+The workspace also contains the standalone `piper_l_admittance_mit` and
+`nero_admittance_mit` packages. They implement a different velocity-admittance
+chain (`wrench -> admittance twist -> bounded weighted DLS -> MIT reference`).
+This repository intentionally retains its pose-offset chain
+(`wrench -> bounded SE(3) offset -> screw IK -> planned move_j`) for now; the
+standalone implementation is a future alternative adapter, not silently mixed
+into the current controller.
+
+Start a self-describing JSONL experiment together with keyboard control:
+
+```bash
+ros2 launch armbycontroller keyboard_control.launch.py \
+  robot_model:=piper_l \
+  experiment_recording_enabled:=true \
+  experiment_name:=cartesian_impedance_gain_a \
+  experiment_output_directory:=~/.ros/armbycontroller/experiments
+```
+
+Each fresh run directory contains `manifest.json`, `samples.jsonl`,
+`events.jsonl`, and `summary.json`. The summary reports sample/event counts,
+controller and command-mode counts, period statistics, joint-reference RMSE,
+maximum absolute joint error, and maximum estimated torque. Recording is in a
+separate process and never accesses CAN. When launched independently, control
+it with:
+
+```bash
+ros2 run armbycontroller experiment_recorder_node.py --ros-args \
+  -p experiment_name:=manual_comparison
+ros2 service call /arm_experiment_recorder/recording \
+  std_srvs/srv/SetBool '{data: true}'
+ros2 service call /arm_experiment_recorder/recording \
+  std_srvs/srv/SetBool '{data: false}'
+```
+
+The file map outside `ros/`, `ik/`, and `impedance/` is split by category under
+`docs/file_map/README_ZH_EN.md`.
 
 ## Build
 
@@ -171,27 +229,53 @@ For comparison, `impedance_backend:=joint` retains the previous native MIT
 joint impedance and its `mit_kp`, `mit_kd`, `mit_feedforward`, and
 `mit_gravity_*` parameters.
 
+## Controller configuration
+
+`keyboard_control.launch.py` loads two ordered ROS parameter files:
+`config/common.yaml`, followed by exactly one robot profile,
+`config/nero.yaml` or `config/piper_l.yaml`. The common file contains only the
+shared controller/observer rates and default interaction backend. Firmware,
+tool, gravity/model compensation, joint gains, Cartesian gains, torque limits,
+trajectory limits, and observer tuning are explicit in each robot file.
+Piper-L admittance parameters exist only in `piper_l.yaml`; Nero velocity and
+nullspace parameters exist only in `nero.yaml`.
+
+The Nero profile explicitly uses `nero_mount: side` and
+`tool_configuration: none`, so it loads the bare `nero_description.urdf`.
+The Piper-L profile independently uses `tool_configuration: gripper`.
+The physical tool and mount must match the selected robot profile.
+
+Explicit launch arguments override both files. Use `common_config:=...` to
+replace the shared layer or `controller_config:=...` to replace the selected
+robot layer. With the default `controller_config:=__robot__`, `robot_model`
+selects `nero.yaml` or `piper_l.yaml` automatically.
+
+For Nero J1 through J7, use a seven-value
+`cartesian_impedance_model_scale`. J4 is the fourth value. Keep all values at
+`1.0` until a supported, static torque calibration identifies a scale; do not
+guess a J4 value from motion drift alone. Removing the incorrectly modeled
+Revo2 removes about `1.57 N.m` from the previously reproduced J4 model torque
+at the logged pose. The latest hardware log reported software `1.11` while
+`firmware: auto` selects the verified `v112` profile, so confirm the device
+version and set `firmware: v111` only if that report is confirmed.
+
 Run Nero:
 
 ```bash
 ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
-  can_interface:=can0 firmware:=auto nero_mount:=horizontal \
-  impedance_backend:=cartesian impedance_enabled:=false \
-  cartesian_impedance_nullspace_stiffness:=0.4 \
-  cartesian_impedance_nullspace_damping:=0.1 \
+  can_interface:=can0 execute_motion:=true \
   move_home_on_start:=false reset_emergency_stop_on_start:=true
 ```
 
-Nero requires an explicit mounting choice. Use `nero_mount:=horizontal` when
-the base is normally mounted on a horizontal surface (`gravity_vector=[0,0,-g]`),
-or `nero_mount:=side` for the project's `pitch=-90°` side-mount convention
-(`gravity_vector=[-g,0,0]`). Left/right side-mount yaw does not change gravity
-in `base_link`. Omitting the choice intentionally stops launch.
-Nero kinematics and dynamics use `nero_with_left_revo2_description.xacro` by
-default. The fixed Revo2 mass/inertia is included while MIT commands are sent
-only to joints 1 through 7. Press `I` to capture the current tool pose and
-nullspace posture before enabling Cartesian MIT.
+The default configuration uses the project's `pitch=-90°` side-mount
+convention (`gravity_vector=[-g,0,0]`). Override it with
+`nero_mount:=horizontal` only when the base is on a horizontal surface
+(`gravity_vector=[0,0,-g]`). Left/right side-mount yaw does not change gravity
+in `base_link`. Nero `tool_configuration: none` loads the bare
+`nero_description.urdf`; no gripper or Revo2 mass/inertia is included. Press
+`I` to capture the current tool pose and nullspace posture before enabling
+Cartesian MIT.
 
 Run Piper-L with the same keys:
 

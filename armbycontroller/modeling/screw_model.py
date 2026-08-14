@@ -7,14 +7,14 @@ import xml.etree.ElementTree as ET
 
 import modern_robotics as mr
 import numpy as np
-from armbycontroller.lie import adjoint
-from armbycontroller.lie import force_cross
-from armbycontroller.lie import joint_transform
-from armbycontroller.lie import motion_cross
-from armbycontroller.lie import rotation_exp
-from armbycontroller.lie import spatial_inertia
-from armbycontroller.lie import transform
-from armbycontroller.lie import transform_inverse
+from armbycontroller.modeling.lie import adjoint
+from armbycontroller.modeling.lie import force_cross
+from armbycontroller.modeling.lie import joint_transform
+from armbycontroller.modeling.lie import motion_cross
+from armbycontroller.modeling.lie import rotation_exp
+from armbycontroller.modeling.lie import spatial_inertia
+from armbycontroller.modeling.lie import transform
+from armbycontroller.modeling.lie import transform_inverse
 
 
 def project_gravity_vector(orientation):

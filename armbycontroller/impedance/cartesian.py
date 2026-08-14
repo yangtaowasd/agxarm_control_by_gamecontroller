@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from armbycontroller.lie import rotation_vector
-from armbycontroller.lie import skew
+from armbycontroller.modeling.lie import rotation_vector
+from armbycontroller.modeling.lie import skew
 
 
 @dataclass(frozen=True)
@@ -204,6 +204,7 @@ def cartesian_impedance_command(
     nullspace_reference_velocity=None,
     nullspace_stiffness=0.0,
     nullspace_damping=0.0,
+    model_scale=1.0,
 ):
     """
     Evaluate strict Cartesian impedance and map it to joint torque.
@@ -218,10 +219,12 @@ def cartesian_impedance_command(
         tau_0   = K_0 (q_0 - q) + D_0 (qdot_0 - qdot)
         N_tau   = I - J.T (J M^-1 J.T)^+ J M^-1
         tau_n   = N_tau tau_0
-        tau_m   = C(q, q_dot) q_dot + g(q)
+        tau_m   = s_m .* (C(q, q_dot) q_dot + g(q))
         tau_cmd = tau_x + tau_n + tau_m
 
-    ``tau_m`` is obtained from URDF inverse dynamics with zero acceleration.
+    ``tau_m`` is obtained from URDF inverse dynamics with zero acceleration,
+    then multiplied by the scalar or per-joint ``model_scale``.  This makes
+    model calibration explicit without changing task or nullspace gains.
     The optional dynamically consistent nullspace term is intended for a
     redundant arm such as seven-axis Nero.  It uses the URDF mass matrix and
     satisfies ``J M^-1 tau_n = 0`` up to numerical tolerance.  No diagonal
@@ -322,6 +325,11 @@ def cartesian_impedance_command(
     if dynamics_model is None:
         model_torque = np.zeros(positions.size, dtype=float)
     else:
+        scale = _nonnegative_joint_gain(
+            model_scale, positions.size, "model_scale"
+        )
+        if np.any(scale > 1.0):
+            raise ValueError("model_scale values must be in [0, 1]")
         model_torque = np.asarray(
             dynamics_model.inverse_dynamics(
                 positions,
@@ -337,6 +345,7 @@ def cartesian_impedance_command(
             raise ValueError(
                 "dynamics model must return one finite torque per joint"
             )
+        model_torque = scale * model_torque
     command_torque = task_torque + nullspace_torque + model_torque
     if not all(
         np.all(np.isfinite(values))

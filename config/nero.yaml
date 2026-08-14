@@ -1,0 +1,41 @@
+# Nero-only parameters for the current side-mounted bare arm.
+arm_keyboard_controller:
+  ros__parameters:
+    firmware: auto
+    nero_mount: side
+    tool_configuration: none
+
+    # pyAgxArm v111/v112 reports zero motor velocity; estimate dq from q.
+    nero_velocity_estimation_enabled: true
+    velocity_filter_time_constant: 0.03  # s
+
+    mit_kp: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    mit_kd: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+    mit_feedforward: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    mit_gravity_compensation_enabled: true
+    mit_gravity_scale: 1.0
+    mit_gravity_torque_limit: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+    cartesian_impedance_rotation_stiffness: 0.4
+    cartesian_impedance_base_z_rotation_stiffness: 4.0
+    cartesian_impedance_translation_stiffness: 10.0
+    cartesian_impedance_rotation_damping: 0.08
+    cartesian_impedance_translation_damping: 0.8
+    cartesian_impedance_nullspace_stiffness: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
+    cartesian_impedance_nullspace_damping: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+    cartesian_impedance_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+
+    # J1...J7 model multiplier. J4 is the fourth value.
+    # Keep 1.0 until bare-arm static torque calibration is available.
+    cartesian_impedance_model_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+arm_momentum_observer:
+  ros__parameters:
+    nero_mount: side
+    tool_configuration: none
+    momentum_observer_gain: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    momentum_observer_max_period: 0.05  # s

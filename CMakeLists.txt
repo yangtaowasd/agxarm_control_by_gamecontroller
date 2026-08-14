@@ -37,6 +37,7 @@ install(PROGRAMS
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
   armbycontroller/ros/momentum_observer_node.py
+  armbycontroller/ros/experiment_recorder_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -44,6 +45,11 @@ install(DIRECTORY
   launch
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
+)
+
+install(DIRECTORY
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 install(DIRECTORY
@@ -79,6 +85,14 @@ if(BUILD_TESTING)
   )
   ament_add_pytest_test(cartesian_admittance_test
     test/test_cartesian_admittance.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(controller_interface_test
+    test/test_control_interface.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(experiment_framework_test
+    test/test_experiment.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
 endif()

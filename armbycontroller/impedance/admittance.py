@@ -5,7 +5,7 @@ import math
 
 import numpy as np
 
-from armbycontroller.lie import rotation_from_vector
+from armbycontroller.modeling.lie import rotation_from_vector
 
 
 def _vector(values, name, *, positive=False, nonnegative=False):

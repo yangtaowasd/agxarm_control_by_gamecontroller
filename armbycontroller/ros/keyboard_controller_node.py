@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Unified ROS 2 keyboard controller for Nero and Piper-L arms."""
 
+import json
 import math
 import time
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -17,17 +17,30 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32MultiArray
+from std_msgs.msg import String
 
 from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
 from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
-from armbycontroller.impedance.cartesian import cartesian_impedance_command
 from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
 from armbycontroller.impedance.cartesian import geometric_jacobian
 from armbycontroller.impedance.admittance import CartesianAdmittance
 from armbycontroller.impedance.admittance import estimate_cartesian_wrench
-from armbycontroller.screw_model import UrdfScrewModel
+from armbycontroller.control import CartesianAdmittanceController
+from armbycontroller.control import CartesianImpedanceController
+from armbycontroller.control import ControlEngine
+from armbycontroller.control import ControlInput
+from armbycontroller.control import ControlReference
+from armbycontroller.control import ControlSafetyError
+from armbycontroller.control import ControlState
+from armbycontroller.control import JointMitController
+from armbycontroller.control import MitCommand
+from armbycontroller.control import PositionCommand
+from armbycontroller.control import bounded_model_feedforward as _bounded_model
+from armbycontroller.control import control_sample
+from armbycontroller.control import limit_mit_combined_torque as _limit_mit
+from armbycontroller.modeling.screw_model import UrdfScrewModel
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -35,7 +48,9 @@ from armbycontroller.ik.core import increment_tool_orientation
 from armbycontroller.ik.core import prepare_planned_joint_mode
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import resolve_firmware_name
+from armbycontroller.ik.core import resolve_tool_urdf_path
 from armbycontroller.ik.core import set_joint_acceleration_limits
+from armbycontroller.modeling.screw_model import project_gravity_vector
 
 
 KEY_JOINT_1, KEY_JOINT_7 = 0, 6
@@ -73,6 +88,40 @@ class MotorFeedback:
     position: np.ndarray
     velocity: np.ndarray
     torque: np.ndarray
+
+
+def estimate_joint_velocity(
+    previous_position,
+    current_position,
+    previous_velocity,
+    period,
+    time_constant,
+):
+    """Estimate joint velocity with a first-order low-pass differentiator."""
+    previous = np.asarray(previous_position, dtype=float)
+    current = np.asarray(current_position, dtype=float)
+    velocity = np.asarray(previous_velocity, dtype=float)
+    period = float(period)
+    time_constant = float(time_constant)
+    if (
+        previous.ndim != 1
+        or current.shape != previous.shape
+        or velocity.shape != previous.shape
+        or not all(
+            np.all(np.isfinite(values))
+            for values in (previous, current, velocity)
+        )
+        or not math.isfinite(period)
+        or period <= 0.0
+        or not math.isfinite(time_constant)
+        or time_constant < 0.0
+    ):
+        raise ValueError("velocity estimator inputs are invalid")
+    raw_velocity = (current - previous) / period
+    if time_constant == 0.0:
+        return raw_velocity
+    alpha = period / (time_constant + period)
+    return velocity + alpha * (raw_velocity - velocity)
 
 
 class ArmJointJogState:
@@ -249,57 +298,31 @@ def expand_joint_values(values, joint_count, name):
 
 
 def bounded_model_feedforward(model_torque, scale, torque_limit):
-    """Scale and bound URDF inverse-dynamics torque without a bias."""
-    model_torque = np.asarray(model_torque, dtype=float)
-    torque_limit = np.asarray(torque_limit, dtype=float)
-    return np.clip(
-        float(scale) * model_torque, -torque_limit, torque_limit
-    )
+    """Compatibility export; implementation lives at the controller seam."""
+    return _bounded_model(model_torque, scale, torque_limit)
 
 
 def limit_mit_combined_torque(
-    feedforward, reference_position, reference_velocity,
-    measured_position, measured_velocity, kp, kd, torque_limit,
+    feedforward,
+    reference_position,
+    reference_velocity,
+    measured_position,
+    measured_velocity,
+    kp,
+    kd,
+    torque_limit,
 ):
-    """Adjust t_ff to keep the estimated MIT reference torque bounded."""
-    feedforward = np.asarray(feedforward, dtype=float)
-    reference_position = np.asarray(reference_position, dtype=float)
-    reference_velocity = np.asarray(reference_velocity, dtype=float)
-    measured_position = np.asarray(measured_position, dtype=float)
-    measured_velocity = np.asarray(measured_velocity, dtype=float)
-    kp = np.asarray(kp, dtype=float)
-    kd = np.asarray(kd, dtype=float)
-    torque_limit = np.asarray(torque_limit, dtype=float)
-    shapes = {
-        values.shape for values in (
-            feedforward, reference_position, reference_velocity,
-            measured_position, measured_velocity, kp, kd, torque_limit,
-        )
-    }
-    if len(shapes) != 1 or not all(
-        np.all(np.isfinite(values))
-        for values in (
-            feedforward, reference_position, reference_velocity,
-            measured_position, measured_velocity, kp, kd, torque_limit,
-        )
-    ) or np.any(torque_limit <= 0.0):
-        raise ValueError(
-            "MIT torque limiter inputs must be finite equal arrays"
-        )
-    feedback = (
-        kp * (reference_position - measured_position)
-        + kd * (reference_velocity - measured_velocity)
+    """Compatibility export; implementation lives at the controller seam."""
+    return _limit_mit(
+        feedforward,
+        reference_position,
+        reference_velocity,
+        measured_position,
+        measured_velocity,
+        kp,
+        kd,
+        torque_limit,
     )
-    desired_total = feedback + feedforward
-    bounded_total = np.clip(desired_total, -torque_limit, torque_limit)
-    # Keep the feed-forward channel itself inside the same safe envelope. If
-    # the PD term alone exceeds twice the limit, exact cancellation is not
-    # possible without changing Kp/Kd; estimated_total exposes that condition.
-    bounded_feedforward = np.clip(
-        bounded_total - feedback, -torque_limit, torque_limit
-    )
-    estimated_total = feedback + bounded_feedforward
-    return bounded_feedforward, estimated_total
 
 
 class JointTrajectoryState:
@@ -406,6 +429,10 @@ class ArmKeyboardController(Node):
         self.declare_parameter("keyboard_topic", "/arm_keyboard_state")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
+        self.declare_parameter("nero_mount", "")
+        self.declare_parameter("tool_configuration", "auto")
+        self.declare_parameter("nero_velocity_estimation_enabled", True)
+        self.declare_parameter("velocity_filter_time_constant", 0.03)
         self.declare_parameter("control_rate", 100.0)
         self.declare_parameter("step_rad", 0.005)
         self.declare_parameter("speed_percent", 20)
@@ -446,6 +473,8 @@ class ArmKeyboardController(Node):
         self.declare_parameter(
             "external_torque_topic", "/arm_external_joint_torque"
         )
+        self.declare_parameter("control_sample_topic", "/arm_control_sample")
+        self.declare_parameter("control_event_topic", "/arm_control_event")
         self.declare_parameter("mit_kp", default_mit_kp)
         self.declare_parameter("mit_kd", default_mit_kd)
         scalar_or_array = ParameterDescriptor(dynamic_typing=True)
@@ -485,6 +514,9 @@ class ArmKeyboardController(Node):
         )
         self.declare_parameter(
             "cartesian_impedance_torque_limit", [8.0], scalar_or_array
+        )
+        self.declare_parameter(
+            "cartesian_impedance_model_scale", [1.0], scalar_or_array
         )
         self.declare_parameter(
             "admittance_virtual_mass",
@@ -537,6 +569,18 @@ class ArmKeyboardController(Node):
         self.can_interface = str(self.get_parameter("can_interface").value)
         self.firmware_name = resolve_firmware_name(
             self.robot_model, self.get_parameter("firmware").value
+        )
+        self.nero_mount = str(
+            self.get_parameter("nero_mount").value
+        ).strip().lower()
+        self.tool_configuration = str(
+            self.get_parameter("tool_configuration").value
+        ).strip().lower()
+        self.nero_velocity_estimation_enabled = bool(
+            self.get_parameter("nero_velocity_estimation_enabled").value
+        )
+        self.velocity_filter_time_constant = float(
+            self.get_parameter("velocity_filter_time_constant").value
         )
         self.control_rate = float(self.get_parameter("control_rate").value)
         self.step_rad = float(self.get_parameter("step_rad").value)
@@ -628,6 +672,12 @@ class ArmKeyboardController(Node):
         self.external_torque_topic = str(
             self.get_parameter("external_torque_topic").value
         )
+        self.control_sample_topic = str(
+            self.get_parameter("control_sample_topic").value
+        )
+        self.control_event_topic = str(
+            self.get_parameter("control_event_topic").value
+        )
         self.mit_kp = expand_joint_values(
             self.get_parameter("mit_kp").value, self.joint_count, "mit_kp"
         )
@@ -718,6 +768,16 @@ class ArmKeyboardController(Node):
             ),
             dtype=float,
         )
+        self.cartesian_model_scale = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_model_scale"
+                ).value,
+                self.joint_count,
+                "cartesian_impedance_model_scale",
+            ),
+            dtype=float,
+        )
         task_parameter_names = (
             "admittance_virtual_mass",
             "admittance_damping",
@@ -756,9 +816,15 @@ class ArmKeyboardController(Node):
             ],
             wrench_filter_hz=self.admittance_wrench_filter_hz,
         )
-        self.gravity_vector = np.asarray(
-            self.get_parameter("gravity_vector").value, dtype=float
-        )
+        configured_gravity = self.get_parameter("gravity_vector").value
+        if self.robot_model == "nero" and self.nero_mount:
+            self.gravity_vector = np.asarray(
+                project_gravity_vector(self.nero_mount), dtype=float
+            )
+        else:
+            self.gravity_vector = np.asarray(
+                configured_gravity, dtype=float
+            )
         self.mit_trajectory_max_velocity = expand_joint_values(
             self.get_parameter("mit_trajectory_max_velocity").value,
             self.joint_count,
@@ -780,6 +846,13 @@ class ArmKeyboardController(Node):
 
         if self.control_rate <= 0.0:
             raise ValueError("control_rate must be > 0")
+        if (
+            not math.isfinite(self.velocity_filter_time_constant)
+            or self.velocity_filter_time_constant < 0.0
+        ):
+            raise ValueError(
+                "velocity_filter_time_constant must be finite and >= 0"
+            )
         if not 1 <= self.speed_percent <= 100:
             raise ValueError("speed_percent must be in [1, 100]")
         if self.joint_max_acceleration <= 0.0:
@@ -857,6 +930,14 @@ class ArmKeyboardController(Node):
             raise ValueError(
                 "Cartesian absolute torque limits must be in (0, 10] N·m"
             )
+        if (
+            not np.all(np.isfinite(self.cartesian_model_scale))
+            or np.any(self.cartesian_model_scale < 0.0)
+            or np.any(self.cartesian_model_scale > 1.0)
+        ):
+            raise ValueError(
+                "Cartesian model scales must be in [0, 1]"
+            )
         if any(
             value <= 0.0
             for values in (
@@ -904,13 +985,11 @@ class ArmKeyboardController(Node):
         urdf_path = resolve_urdf_path(
             str(self.get_parameter("urdf_path").value), self.robot_model
         )
-        equipped_urdf_path = (
-            Path(self.gravity_urdf_path).expanduser().resolve()
-            if self.gravity_urdf_path
-            else urdf_path.parent / {
-                "piper_l": "piper_l_with_gripper_description.xacro",
-                "nero": "nero_with_left_revo2_description.xacro",
-            }[self.robot_model]
+        equipped_urdf_path = resolve_tool_urdf_path(
+            urdf_path,
+            self.robot_model,
+            self.tool_configuration,
+            self.gravity_urdf_path,
         )
         self.gravity_model = None
         if self.mit_gravity_compensation_enabled:
@@ -946,6 +1025,7 @@ class ArmKeyboardController(Node):
             self.pointing_roll_samples,
             pointing_axis_only=False,
         )
+        self.control_engine = self._build_control_engine()
         self.ik_target_rotation = None
         self.control_mode = "joint"
         self.ik_target_position = None
@@ -961,6 +1041,9 @@ class ArmKeyboardController(Node):
         self.admittance_enabled = False
         self.admittance_previous_control_mode = "joint"
         self.last_admittance_tick_time = None
+        self.feedback_previous_position = None
+        self.feedback_previous_velocity = np.zeros(self.joint_count)
+        self.feedback_previous_time = None
         self.latest_external_wrench = np.zeros(6)
         self.latest_external_wrench_received_at = -math.inf
 
@@ -972,6 +1055,12 @@ class ArmKeyboardController(Node):
         )
         self.dynamics_state_publisher = self.create_publisher(
             JointState, self.dynamics_state_topic, 20
+        )
+        self.control_sample_publisher = self.create_publisher(
+            String, self.control_sample_topic, 100
+        )
+        self.control_event_publisher = self.create_publisher(
+            String, self.control_event_topic, 20
         )
         self.external_torque_sub = self.create_subscription(
             JointState,
@@ -1008,6 +1097,202 @@ class ArmKeyboardController(Node):
             return
         self.key_state = [1 if value else 0 for value in data[:KEY_COUNT]]
         self.last_keyboard_time = time.monotonic()
+
+    def _build_control_engine(self):
+        """Create pure controller adapters from the validated node settings."""
+        controllers = []
+        joint_count = int(getattr(
+            self, "joint_count", len(self.jog.target_joints)
+        ))
+        joint_settings = ("mit_kp", "mit_kd", "mit_feedforward")
+        if all(hasattr(self, name) for name in joint_settings):
+            controllers.append(JointMitController(
+                joint_count,
+                self.mit_kp,
+                self.mit_kd,
+                self.mit_feedforward,
+                getattr(
+                    self,
+                    "mit_gravity_torque_limit",
+                    [10.0] * joint_count,
+                ),
+                dynamics_model=getattr(self, "gravity_model", None),
+                model_scale=getattr(self, "mit_gravity_scale", 1.0),
+            ))
+
+        model = getattr(self, "gravity_model", None)
+        if model is None:
+            model = getattr(getattr(self, "ik_solver", None), "model", None)
+        cartesian_settings = (
+            "cartesian_stiffness",
+            "cartesian_damping",
+            "cartesian_torque_limit",
+        )
+        if model is not None and all(
+            hasattr(self, name) for name in cartesian_settings
+        ):
+            controllers.append(CartesianImpedanceController(
+                model,
+                self.cartesian_stiffness,
+                self.cartesian_damping,
+                self.cartesian_torque_limit,
+                nullspace_stiffness=getattr(
+                    self, "cartesian_nullspace_stiffness", None
+                ),
+                nullspace_damping=getattr(
+                    self, "cartesian_nullspace_damping", None
+                ),
+                nullspace_enabled=(
+                    getattr(self, "robot_model", "piper_l") == "nero"
+                ),
+                model_scale=getattr(
+                    self,
+                    "cartesian_model_scale",
+                    np.ones(joint_count),
+                ),
+            ))
+        if (
+            hasattr(self, "admittance_controller")
+            and hasattr(self, "ik_engine")
+        ):
+            controllers.append(CartesianAdmittanceController(
+                model,
+                self.admittance_controller,
+                self.ik_engine,
+                getattr(self, "mit_max_joint_step", 0.05),
+                joint_count=joint_count,
+            ))
+        return ControlEngine(controllers)
+
+    def _get_control_engine(self, controller_name):
+        engine = getattr(self, "control_engine", None)
+        if engine is None or controller_name not in engine.available:
+            engine = self._build_control_engine()
+            self.control_engine = engine
+        if controller_name not in engine.available:
+            raise RuntimeError(
+                f"controller adapter {controller_name!r} is unavailable"
+            )
+        return engine
+
+    def _next_control_input(self, feedback=None, external_wrench=None):
+        """Capture one shared sample for a controller adapter."""
+        now = time.monotonic()
+        nominal = 1.0 / getattr(self, "mit_command_rate", 100.0)
+        previous = getattr(self, "last_mit_tick_time", None)
+        period = (
+            nominal
+            if previous is None
+            else float(np.clip(now - previous, 0.25 * nominal, 2.0 * nominal))
+        )
+        self.last_mit_tick_time = now
+        trajectory = getattr(self, "mit_trajectory", None)
+        if trajectory is None:
+            reference_position = np.asarray(
+                self.jog.target_joints, dtype=float
+            )
+            reference_velocity = np.zeros(self.joint_count)
+            reference_acceleration = np.zeros(self.joint_count)
+        else:
+            (
+                reference_position,
+                reference_velocity,
+                reference_acceleration,
+            ) = trajectory.step(self.jog.target_joints, period)
+
+        position = feedback.position if feedback is not None else None
+        velocity = feedback.velocity if feedback is not None else None
+        effort = feedback.torque if feedback is not None else None
+        if position is None:
+            try:
+                position = extract_joint_angles(
+                    self.arm.get_joint_angles(), self.joint_count
+                )
+            except Exception:
+                position = None
+        if velocity is None:
+            velocity = self.read_joint_velocities()
+        position_valid = position is not None
+        velocity_valid = velocity is not None
+        effort_valid = effort is not None
+        if position is None:
+            position = reference_position
+        if velocity is None:
+            velocity = np.zeros(self.joint_count)
+        if effort is None:
+            effort = np.zeros(self.joint_count)
+        state = ControlState(
+            position,
+            velocity,
+            effort,
+            position_valid=position_valid,
+            velocity_valid=velocity_valid,
+            effort_valid=effort_valid,
+        )
+        reference = ControlReference(
+            reference_position,
+            reference_velocity,
+            reference_acceleration,
+            np.zeros(6) if external_wrench is None else external_wrench,
+        )
+        return ControlInput(now, period, state, reference)
+
+    def _publish_control_result(self, sample, result, interaction_mode):
+        publisher = getattr(self, "control_sample_publisher", None)
+        if publisher is None:
+            return
+        message = String()
+        message.data = json.dumps(
+            control_sample(
+                sample,
+                result,
+                robot_model=getattr(self, "robot_model", "unknown"),
+                interaction_mode=interaction_mode,
+            ),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        publisher.publish(message)
+
+    def _publish_control_event(self, event, **fields):
+        publisher = getattr(self, "control_event_publisher", None)
+        if publisher is None:
+            return
+        message = String()
+        message.data = json.dumps(
+            {
+                "timestamp": time.monotonic(),
+                "robot_model": getattr(self, "robot_model", "unknown"),
+                "event": str(event),
+                **fields,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        publisher.publish(message)
+
+    def _send_control_result(self, result):
+        command = result.command
+        if isinstance(command, MitCommand):
+            for index in range(command.position.size):
+                self.arm.move_mit(
+                    joint_index=index + 1,
+                    p_des=float(command.position[index]),
+                    v_des=float(command.velocity[index]),
+                    kp=float(command.kp[index]),
+                    kd=float(command.kd[index]),
+                    t_ff=float(command.feedforward[index]),
+                )
+            return
+        if isinstance(command, PositionCommand):
+            self.jog.sync_target(command.position)
+            self.send_target("Cartesian admittance")
+            return
+        raise TypeError(
+            f"unsupported control command {type(command).__name__}"
+        )
 
     def connect_arm(self):
         config = create_agx_arm_config(
@@ -1404,24 +1689,23 @@ class ArmKeyboardController(Node):
                 return
             if backend == "cartesian":
                 try:
-                    current_pose = self.gravity_model.forward_kinematics(
-                        joints
-                    )
-                    nullspace_options = self._cartesian_nullspace_options(
-                        np.asarray(joints, dtype=float),
-                        np.zeros(self.joint_count),
-                    )
-                    cartesian_impedance_command(
-                        self.gravity_model,
-                        self.gravity_model,
+                    state = ControlState(
                         joints,
                         velocities,
-                        current_pose,
-                        np.zeros(6),
-                        self.cartesian_stiffness,
-                        self.cartesian_damping,
-                        **nullspace_options,
+                        np.zeros(self.joint_count),
+                        effort_valid=False,
                     )
+                    preflight = ControlInput(
+                        time.monotonic(),
+                        1.0 / self.mit_command_rate,
+                        state,
+                        ControlReference.hold(joints),
+                    )
+                    engine = self._get_control_engine(
+                        "cartesian_impedance"
+                    )
+                    engine.reset("cartesian_impedance", state)
+                    engine.step("cartesian_impedance", preflight)
                 except Exception as exc:
                     self.get_logger().error(
                         "cannot enter Cartesian MIT: formula preflight "
@@ -1436,6 +1720,26 @@ class ArmKeyboardController(Node):
         if self.impedance_enabled:
             self.last_mit_tick_time = None
             self.mit_trajectory.reset(joints)
+            selected = (
+                "cartesian_impedance"
+                if backend == "cartesian"
+                else "joint_impedance"
+            )
+            if (
+                getattr(self, "control_engine", None) is not None
+                or all(
+                    hasattr(self, name)
+                    for name in ("mit_kp", "mit_kd", "mit_feedforward")
+                )
+            ):
+                state = ControlState(
+                    joints,
+                    np.zeros(self.joint_count),
+                    np.zeros(self.joint_count),
+                    velocity_valid=False,
+                    effort_valid=False,
+                )
+                self._get_control_engine(selected).reset(selected, state)
             if backend == "cartesian":
                 pose = self.gravity_model.forward_kinematics(joints)
                 self.ik_target_position = np.asarray(
@@ -1459,6 +1763,9 @@ class ArmKeyboardController(Node):
                     else "holding current joints"
                 )
             )
+            self._publish_control_event(
+                "controller_enabled", controller=selected
+            )
             self.mit_tick()
             return
         if self.execute_motion and not prepare_planned_joint_mode(
@@ -1469,6 +1776,9 @@ class ArmKeyboardController(Node):
             )
             return
         self.get_logger().info("backend=planned position control")
+        self._publish_control_event(
+            "controller_disabled", controller=f"{backend}_impedance"
+        )
         self.send_target("MIT exit hold")
 
     def _check_interaction_mode_invariant(self):
@@ -1549,7 +1859,24 @@ class ArmKeyboardController(Node):
         self.remember_ik_valid(
             self.ik_target_position, self.ik_target_rotation, joints
         )
-        self.admittance_controller.reset(pose)
+        joint_count = int(getattr(
+            self, "joint_count", len(self.jog.target_joints)
+        ))
+        state = ControlState(
+            joints,
+            feedback.velocity
+            if feedback is not None else np.zeros(joint_count),
+            feedback.torque
+            if feedback is not None else np.zeros(joint_count),
+            velocity_valid=feedback is not None,
+            effort_valid=feedback is not None,
+        )
+        if hasattr(self, "ik_engine"):
+            engine = self._get_control_engine("cartesian_admittance")
+            engine.reset("cartesian_admittance", state)
+        else:
+            # Retain the legacy formula seam for isolated state-machine tests.
+            self.admittance_controller.reset(pose)
         self.latest_external_wrench = np.zeros(6)
         self.latest_external_wrench_received_at = time.monotonic()
         self.last_admittance_tick_time = None
@@ -1558,6 +1885,9 @@ class ArmKeyboardController(Node):
         self.get_logger().warning(
             "backend=planned joint + control=Cartesian admittance; "
             "I is interlocked; press O to exit"
+        )
+        self._publish_control_event(
+            "controller_enabled", controller="cartesian_admittance"
         )
 
     def _exit_admittance(self, reason):
@@ -1576,6 +1906,11 @@ class ArmKeyboardController(Node):
         self.control_mode = self.admittance_previous_control_mode
         self._check_interaction_mode_invariant()
         self.send_target(f"admittance exit hold ({reason})")
+        self._publish_control_event(
+            "controller_disabled",
+            controller="cartesian_admittance",
+            reason=str(reason),
+        )
         self.get_logger().info("Cartesian admittance exited")
 
     def external_torque_callback(self, message):
@@ -1636,11 +1971,59 @@ class ArmKeyboardController(Node):
                 return None
             velocities.append(velocity)
             torques.append(torque)
+        position = np.asarray(positions, dtype=float)
+        velocity = self._select_feedback_velocity(
+            position, np.asarray(velocities, dtype=float)
+        )
         return MotorFeedback(
-            position=np.asarray(positions, dtype=float),
-            velocity=np.asarray(velocities, dtype=float),
+            position=position,
+            velocity=velocity,
             torque=np.asarray(torques, dtype=float),
         )
+
+    def _select_feedback_velocity(self, positions, sdk_velocities):
+        """Use finite differences for Nero firmware with zero SDK speed."""
+        estimate = (
+            getattr(self, "robot_model", "") == "nero"
+            and getattr(self, "firmware_name", "") in ("v111", "v112")
+            and getattr(self, "nero_velocity_estimation_enabled", True)
+        )
+        if not estimate:
+            return np.asarray(sdk_velocities, dtype=float).copy()
+
+        position = np.asarray(positions, dtype=float)
+        now = time.monotonic()
+        previous_position = getattr(
+            self, "feedback_previous_position", None
+        )
+        previous_time = getattr(self, "feedback_previous_time", None)
+        previous_velocity = np.asarray(
+            getattr(
+                self,
+                "feedback_previous_velocity",
+                np.zeros(position.size),
+            ),
+            dtype=float,
+        )
+        if (
+            previous_position is None
+            or previous_time is None
+            or previous_velocity.shape != position.shape
+            or now <= previous_time
+        ):
+            velocity = np.zeros(position.size, dtype=float)
+        else:
+            velocity = estimate_joint_velocity(
+                previous_position,
+                position,
+                previous_velocity,
+                now - previous_time,
+                getattr(self, "velocity_filter_time_constant", 0.03),
+            )
+        self.feedback_previous_position = position.copy()
+        self.feedback_previous_velocity = velocity.copy()
+        self.feedback_previous_time = now
+        return velocity
 
     def read_joint_velocities(self):
         """Read cached motor velocity for MIT dynamics and torque limiting."""
@@ -1734,217 +2117,62 @@ class ArmKeyboardController(Node):
             if getattr(self, "impedance_backend", "joint") == "cartesian":
                 self._cartesian_mit_tick(feedback)
                 return
-            now = time.monotonic()
-            nominal_period = 1.0 / getattr(self, "mit_command_rate", 100.0)
-            last_tick = getattr(self, "last_mit_tick_time", None)
-            trajectory_period = (
-                nominal_period if last_tick is None
-                else float(np.clip(
-                    now - last_tick, 0.25 * nominal_period,
-                    2.0 * nominal_period,
-                ))
-            )
-            self.last_mit_tick_time = now
-            trajectory = getattr(self, "mit_trajectory", None)
-            if trajectory is None:
-                reference_position = np.asarray(
-                    self.jog.target_joints, dtype=float
-                )
-                reference_velocity = np.zeros(self.joint_count, dtype=float)
-                reference_acceleration = np.zeros(
-                    self.joint_count, dtype=float
-                )
-            else:
-                (
-                    reference_position,
-                    reference_velocity,
-                    reference_acceleration,
-                ) = trajectory.step(
-                    self.jog.target_joints, trajectory_period
-                )
-            kp_values = np.asarray(self.mit_kp, dtype=float)
-            kd_values = np.asarray(self.mit_kd, dtype=float)
-            joint_velocity = (
-                feedback.velocity
-                if feedback is not None
-                else self.read_joint_velocities()
-            )
-            if joint_velocity is None:
-                joint_velocity = np.zeros(self.joint_count, dtype=float)
+            sample = self._next_control_input(feedback)
+            if not sample.state.velocity_valid:
                 self.get_logger().warning(
                     "motor velocity unavailable; torque limit assumes zero "
                     "velocity",
                     throttle_duration_sec=1.0,
                 )
-            feedforward = np.asarray(self.mit_feedforward, dtype=float)
-            joints = feedback.position if feedback is not None else None
-            if joints is None:
-                try:
-                    joints = extract_joint_angles(
-                        self.arm.get_joint_angles(), self.joint_count
-                    )
-                except Exception:
-                    pass
-            gravity_model = getattr(self, "gravity_model", None)
-            if gravity_model is not None:
-                if joints is None:
-                    self.get_logger().warning(
-                        "joint feedback unavailable; URDF model torque is "
-                        "zero",
-                        throttle_duration_sec=1.0,
-                    )
-                else:
-                    if hasattr(gravity_model, "inverse_dynamics"):
-                        model_torque = gravity_model.inverse_dynamics(
-                            joints,
-                            reference_velocity,
-                            reference_acceleration,
-                        )
-                    else:
-                        model_torque = gravity_model.compensation(joints)
-                    feedforward = bounded_model_feedforward(
-                        model_torque,
-                        self.mit_gravity_scale,
-                        self.mit_gravity_torque_limit,
-                    )
-                    self.get_logger().info(
-                        "URDF inverse dynamics raw=%s bounded=%s N·m"
-                        % (
-                            np.round(model_torque, 3).tolist(),
-                            np.round(feedforward, 3).tolist(),
-                        ),
-                        throttle_duration_sec=2.0,
-                    )
-            if joints is None:
+            if not sample.state.position_valid:
                 self.get_logger().warning(
                     "joint feedback unavailable; combined torque limit is "
                     "inactive",
                     throttle_duration_sec=1.0,
                 )
-            else:
-                feedforward, estimated_total = limit_mit_combined_torque(
-                    feedforward,
-                    reference_position,
-                    reference_velocity,
-                    joints,
-                    joint_velocity,
-                    kp_values,
-                    kd_values,
-                    self.mit_gravity_torque_limit,
-                )
-                if np.any(
-                    np.abs(estimated_total)
-                    > np.asarray(self.mit_gravity_torque_limit) + 1e-9
-                ):
-                    self.get_logger().warning(
-                        "PD torque alone prevents the configured combined "
-                        "limit; "
-                        "t_ff is already maximally counteracting it",
-                        throttle_duration_sec=1.0,
-                    )
-                self.get_logger().info(
-                    "estimated combined MIT torque=%s N·m"
-                    % np.round(estimated_total, 3).tolist(),
+            result = self._get_control_engine("joint_impedance").step(
+                "joint_impedance", sample
+            )
+            limit = np.asarray(
+                getattr(
+                    self,
+                    "mit_gravity_torque_limit",
+                    [10.0] * self.joint_count,
+                ),
+                dtype=float,
+            )
+            if np.any(np.abs(result.command.estimated_torque) > limit + 1e-9):
+                self.get_logger().warning(
+                    "PD torque alone prevents the configured combined limit; "
+                    "t_ff is already maximally counteracting it",
                     throttle_duration_sec=2.0,
                 )
-            for index, position in enumerate(reference_position):
-                self.arm.move_mit(
-                    joint_index=index + 1,
-                    p_des=float(position),
-                    v_des=float(reference_velocity[index]),
-                    kp=float(kp_values[index]),
-                    kd=float(kd_values[index]),
-                    t_ff=float(feedforward[index]),
-                )
+            self.get_logger().info(
+                "estimated combined MIT torque=%s N·m"
+                % np.round(result.command.estimated_torque, 3).tolist(),
+                throttle_duration_sec=2.0,
+            )
+            self._send_control_result(result)
+            self._publish_control_result(sample, result, "impedance")
         except Exception as exc:
             self.get_logger().error(f"MIT command failed: {exc}")
             self.trigger_emergency_stop()
 
     def _cartesian_mit_tick(self, feedback=None):
         """Evaluate ``J.T F + C*dq + g`` and send it only through t_ff."""
-        now = time.monotonic()
-        nominal_period = 1.0 / getattr(self, "mit_command_rate", 100.0)
-        last_tick = getattr(self, "last_mit_tick_time", None)
-        trajectory_period = (
-            nominal_period if last_tick is None
-            else float(np.clip(
-                now - last_tick,
-                0.25 * nominal_period,
-                2.0 * nominal_period,
-            ))
+        sample = self._next_control_input(feedback)
+        result = self._get_control_engine("cartesian_impedance").step(
+            "cartesian_impedance", sample
         )
-        self.last_mit_tick_time = now
-
-        trajectory = getattr(self, "mit_trajectory", None)
-        if trajectory is None:
-            reference_position = np.asarray(
-                self.jog.target_joints, dtype=float
-            )
-            reference_velocity = np.zeros(
-                self.joint_count, dtype=float
-            )
-        else:
-            reference_position, reference_velocity, _ = trajectory.step(
-                self.jog.target_joints, trajectory_period
-            )
-
-        measured_velocity = (
-            feedback.velocity
-            if feedback is not None
-            else self.read_joint_velocities()
-        )
-        if measured_velocity is None:
-            raise RuntimeError(
-                "complete joint velocity feedback is required"
-            )
-        measured_position = (
-            feedback.position
-            if feedback is not None
-            else extract_joint_angles(
-                self.arm.get_joint_angles(), self.joint_count
-            )
-        )
-        if measured_position is None:
-            raise RuntimeError(
-                "complete joint position feedback is required"
-            )
-        measured_position = np.asarray(measured_position, dtype=float)
-        model = getattr(self, "gravity_model", None)
-        if model is None:
-            raise RuntimeError("URDF screw dynamics model is unavailable")
-
-        desired_pose = model.forward_kinematics(reference_position)
-        reference_jacobian, _ = geometric_jacobian(
-            model, reference_position
-        )
-        desired_twist = reference_jacobian @ reference_velocity
-        nullspace_options = self._cartesian_nullspace_options(
-            reference_position, reference_velocity
-        )
-        result = cartesian_impedance_command(
-            model,
-            model,
-            measured_position,
-            measured_velocity,
-            desired_pose,
-            desired_twist,
-            self.cartesian_stiffness,
-            self.cartesian_damping,
-            **nullspace_options,
-        )
-        torque_limit = np.asarray(
-            self.cartesian_torque_limit, dtype=float
-        )
-        command_torque = np.clip(
-            result.command_torque, -torque_limit, torque_limit
-        )
-        self.last_cartesian_impedance_command = result
-        if np.any(np.abs(result.command_torque) > torque_limit):
+        raw = result.raw
+        command_torque = result.command.feedforward
+        self.last_cartesian_impedance_command = raw
+        if result.signals["torque_clipped"]:
             self.get_logger().warning(
                 "Cartesian MIT absolute torque limit active: raw=%s, "
                 "sent=%s N·m"
                 % (
-                    np.round(result.command_torque, 3).tolist(),
+                    np.round(raw.command_torque, 3).tolist(),
                     np.round(command_torque, 3).tolist(),
                 ),
                 throttle_duration_sec=1.0,
@@ -1953,25 +2181,18 @@ class ArmKeyboardController(Node):
             "Cartesian MIT error=%s wrench=%s task=%s null=%s model=%s "
             "total=%s sent=%s N·m"
             % (
-                np.round(result.pose_error, 4).tolist(),
-                np.round(result.commanded_wrench, 3).tolist(),
-                np.round(result.task_torque, 3).tolist(),
-                np.round(result.nullspace_torque, 3).tolist(),
-                np.round(result.model_torque, 3).tolist(),
-                np.round(result.command_torque, 3).tolist(),
+                np.round(raw.pose_error, 4).tolist(),
+                np.round(raw.commanded_wrench, 3).tolist(),
+                np.round(raw.task_torque, 3).tolist(),
+                np.round(raw.nullspace_torque, 3).tolist(),
+                np.round(raw.model_torque, 3).tolist(),
+                np.round(raw.command_torque, 3).tolist(),
                 np.round(command_torque, 3).tolist(),
             ),
             throttle_duration_sec=2.0,
         )
-        for index, position in enumerate(measured_position):
-            self.arm.move_mit(
-                joint_index=index + 1,
-                p_des=float(position),
-                v_des=0.0,
-                kp=0.0,
-                kd=0.0,
-                t_ff=float(command_torque[index]),
-            )
+        self._send_control_result(result)
+        self._publish_control_result(sample, result, "impedance")
 
     def _admittance_tick(self, feedback):
         """Advance the Piper-L virtual dynamics and send one planned target."""
@@ -1994,13 +2215,20 @@ class ArmKeyboardController(Node):
             if wrench_age <= self.admittance_wrench_timeout
             else np.zeros(6)
         )
-        state = self.admittance_controller.step(wrench, period)
-        seed = np.asarray(feedback.position, dtype=float)
+        control_state = ControlState(
+            feedback.position, feedback.velocity, feedback.torque
+        )
+        sample = ControlInput(
+            now,
+            period,
+            control_state,
+            ControlReference.hold(feedback.position, wrench),
+        )
         try:
-            result = self.ik_engine.solve(
-                state.desired_pose[:3, 3],
-                state.desired_pose[:3, :3],
-                seed,
+            result = self._get_control_engine(
+                "cartesian_admittance"
+            ).step(
+                "cartesian_admittance", sample
             )
         except IkFailure as error:
             self.get_logger().warning(
@@ -2008,25 +2236,23 @@ class ArmKeyboardController(Node):
             )
             self._exit_admittance("IK failure")
             return
-        if (
-            float(np.max(np.abs(result.joints - seed)))
-            > self.mit_max_joint_step
-        ):
+        except ControlSafetyError as error:
             self.get_logger().warning(
-                "admittance IK joint step exceeded the configured bound; "
-                "exiting to hold"
+                f"admittance safety rejection; exiting to hold: {error}"
             )
             self._exit_admittance("IK joint-step bound")
             return
-        self.jog.sync_target(result.joints)
+        state = result.raw
+        joints = result.command.position
         self.ik_target_position = state.desired_pose[:3, 3].copy()
         self.ik_target_rotation = state.desired_pose[:3, :3].copy()
         self.remember_ik_valid(
             self.ik_target_position,
             self.ik_target_rotation,
-            result.joints,
+            joints,
         )
-        self.send_target("Cartesian admittance")
+        self._send_control_result(result)
+        self._publish_control_result(sample, result, "admittance")
         self.get_logger().info(
             "admittance wrench=%s offset=%s"
             % (
@@ -2148,6 +2374,7 @@ class ArmKeyboardController(Node):
         self.emergency_stopped = True
         self.arm_ready = False
         self.get_logger().error("ELECTRONIC EMERGENCY STOP requested")
+        self._publish_control_event("emergency_stop")
         if self.execute_motion and self.arm_connected:
             try:
                 self.arm.electronic_emergency_stop()

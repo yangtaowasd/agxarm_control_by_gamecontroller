@@ -1,0 +1,44 @@
+# Piper-L-only parameters for the arm with its standard gripper.
+arm_keyboard_controller:
+  ros__parameters:
+    firmware: auto
+    tool_configuration: gripper
+    gravity_vector: [0.0, 0.0, -9.80665]
+
+    mit_kp: [0.3, 0.5, 0.5, 0.5, 1.0, 0.3]
+    mit_kd: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    mit_feedforward: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    mit_gravity_compensation_enabled: true
+    mit_gravity_scale: 1.0
+    mit_gravity_torque_limit: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+    cartesian_impedance_rotation_stiffness: 0.4
+    cartesian_impedance_base_z_rotation_stiffness: 4.0
+    cartesian_impedance_translation_stiffness: 10.0
+    cartesian_impedance_rotation_damping: 0.08
+    cartesian_impedance_translation_damping: 0.8
+    cartesian_impedance_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+    cartesian_impedance_model_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    # Piper-L-only Cartesian admittance tuning.
+    admittance_virtual_mass: [0.12, 0.12, 0.12, 1.5, 1.5, 1.5]
+    admittance_damping: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+    admittance_stiffness: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+    admittance_wrench_deadband: [0.03, 0.03, 0.03, 0.15, 0.15, 0.15]
+    admittance_wrench_limit: [2.0, 2.0, 2.0, 8.0, 8.0, 8.0]
+    admittance_offset_limit: [0.35, 0.35, 0.35, 0.10, 0.10, 0.10]
+    admittance_velocity_limit: [0.5, 0.5, 0.5, 0.15, 0.15, 0.15]
+    admittance_wrench_filter_hz: 5.0
+    admittance_wrench_dls_damping: 0.05
+    admittance_wrench_timeout: 0.10  # s
+
+    mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+
+arm_momentum_observer:
+  ros__parameters:
+    tool_configuration: gripper
+    gravity_vector: [0.0, 0.0, -9.80665]
+    momentum_observer_gain: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    momentum_observer_max_period: 0.05  # s

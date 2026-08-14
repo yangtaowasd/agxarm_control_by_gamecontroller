@@ -1,0 +1,11 @@
+# Parameters intentionally shared by Nero and Piper-L.
+arm_keyboard_controller:
+  ros__parameters:
+    control_rate: 100.0       # Hz
+    mit_command_rate: 100.0   # Hz
+    impedance_enabled: false
+    impedance_backend: cartesian
+
+arm_momentum_observer:
+  ros__parameters:
+    momentum_observer_rate: 100.0  # Hz

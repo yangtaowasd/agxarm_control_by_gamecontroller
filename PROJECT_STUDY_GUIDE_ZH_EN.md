@@ -188,16 +188,20 @@ This relation applies to redundant and non-redundant arms. It does not require
 The formula core evaluates inverse dynamics with zero desired acceleration:
 
 ```text
-tau_model = ID(q, qdot, 0)
+tau_raw   = ID(q, qdot, 0)
           = C(q, qdot) qdot + g(q)
+tau_model = s_model .* tau_raw
 
 tau_cmd = tau_task + tau_null + tau_model
 ```
 
-它使用实测 `q/qdot`，不把 IK 参考速度或轨迹加速度混入模型支撑。
+`s_model` 是 `[0,1]` 内的标量或逐关节向量，由
+`cartesian_impedance_model_scale` 配置。它使用实测 `q/qdot`，不把 IK 参考
+速度或轨迹加速度混入模型支撑。
 
-It uses measured `q/qdot`; IK reference velocity and trajectory acceleration
-are not mixed into model support.
+`s_model` is a scalar or per-joint vector in `[0,1]`, configured by
+`cartesian_impedance_model_scale`. The model uses measured `q/qdot`; IK
+reference velocity and trajectory acceleration are not mixed into support.
 
 `tau_cmd` 是当前采样的直接公式结果，控制器不读取上一周期力矩，也不实现
 `delta_tau`/`delta_tau_max` 力矩变化率限制。MIT adapter 只实施逐关节绝对
@@ -308,51 +312,55 @@ of `p=M(q)qdot` along `qdot`, without constructing a full Coriolis matrix.
 ## 6. 架构 / Architecture
 
 ```text
-Keyboard / Pose target
-          |
-          v
-     Screw IK target                 measured q, qdot
-          |                                  |
-          +----------------------+-----------+
-                                 |
-                                 v
-                Cartesian impedance formula core
-             FK -> J_s -> J_g -> e/twist -> wrench
-                                 |
-                    tau_task = J_g^T wrench
-                                 |
-             Nero: M(q) nullspace torque tau_null
-                                 |
-       URDF ID(q, qdot, 0) + tau_task + tau_null
-                                 |
-                  absolute torque clip (no delta-tau)
-                                 |
-              MIT: kp=0, kd=0, p_des=q, v_des=0,
-                         t_ff=tau_cmd
-                                 |
-                         pyAgxArm / CAN
-                                 |
-              one shared 100 Hz measured q/qdot/motor-torque sample
-                                 |
-                 /arm_dynamics_state (JointState)
-                                 |
-                 separate momentum-observer process
-                                 |
-          /arm_external_joint_torque (effort = r, N.m)
-                                 |
-                  DLS: tau_ext = J_g^T F_ext
-                                 |
-              M_a xdd + D_a xd + K_a x = F_ext
-                                 |
-             Exp(rotation-vector), p -> screw IK
-                                 |
-                       planned move_j
+Keyboard / IK reference       measured q/qdot/tau       observer wrench
+          |                            |                       |
+          +----------------------------+-----------------------+
+                                       |
+                                ControlInput
+                                       |
+              +------------------------+------------------------+
+              |                        |                        |
+       joint_impedance         cartesian_impedance     cartesian_admittance
+       controller adapter       controller adapter      controller adapter
+              |                        |                        |
+         MIT command          J^T F + null + model      SE(3) offset + IK
+              |                  zero-gain MIT                 |
+              +------------------------+                 planned position
+                                       |                        |
+                                       +-----------+------------+
+                                                   |
+                                              ControlResult
+                                                   |
+                       +---------------------------+-------------------+
+                       |                                               |
+               ROS/AGX hardware adapter                       control_sample
+                       |                                               |
+                  pyAgxArm / CAN                     /arm_control_sample (JSON)
+                                                                       |
+                                                          experiment recorder
+                                                                       |
+                                           manifest + samples + events + summary
 ```
 
-旧关节 MIT 路径仍可通过 `impedance_backend:=joint` 选择，用于同机对照。
+`ControlEngine` 只接受标准化 `ControlInput`，并返回 MIT 或 planned-position
+`ControlResult`。三个 controller adapter 不访问 ROS、磁盘或 CAN；ROS 节点保留
+模式互锁、状态采集、安全检查和硬件发送。旧关节 MIT 路径仍可通过
+`impedance_backend:=joint` 选择，用于同机对照。
 
-The old joint MIT path remains selectable with `impedance_backend:=joint` for
-comparison on the same arm.
+`ControlEngine` consumes only normalized `ControlInput` and returns an MIT or
+planned-position `ControlResult`. The three controller adapters do not access
+ROS, disk, or CAN; the ROS node retains interlocks, acquisition, safety checks,
+and hardware transmission. The old joint MIT path remains selectable with
+`impedance_backend:=joint` for comparison on the same arm.
+
+工作区另有 `piper_l_admittance_mit` 和 `nero_admittance_mit`：它们使用速度导纳、
+有界加权 DLS 和 MIT 参考。本仓库当前导纳仍是位姿偏置、旋量 IK 和 planned
+`move_j`；两者是待比较的独立 controller adapter，而不是同一公式的重复副本。 /
+The workspace also has `piper_l_admittance_mit` and `nero_admittance_mit`, which
+use velocity admittance, bounded weighted DLS, and MIT references. This
+repository retains pose-offset admittance, screw IK, and planned `move_j`; they
+are alternative controller adapters to compare, not duplicate copies of one
+formula.
 
 ## 7. 数据流 / Data flow
 
@@ -397,6 +405,19 @@ comparison on the same arm.
 17. 旋量 IK 将目标转换为关节位置，并由 planned `move_j` 后端发送；该路径不
     调用 MIT。 / Screw IK converts the target to joint position and the planned
     `move_j` backend sends it; this path does not use MIT.
+18. 每个实际执行的 controller 周期将同一 `ControlInput` 与 `ControlResult` 合并
+    为 schema v1 `Control Sample`，发布到 `/arm_control_sample`；缺失反馈使用
+    validity flag，不写 NaN。 / Every executed controller cycle combines the
+    same `ControlInput` and `ControlResult` into a schema-v1 Control Sample on
+    `/arm_control_sample`; missing feedback uses validity flags, never NaN.
+19. controller 使能、退出和急停作为离散 `Control Event` 发布到
+    `/arm_control_event`。 / Controller enable, exit, and emergency stop are
+    published as discrete Control Events on `/arm_control_event`.
+20. 可选 recorder 进程订阅两个 JSON topic，流式写入 `samples.jsonl` 和
+    `events.jsonl`；启动/收尾原子写 `manifest.json` 与 `summary.json`。 /
+    The optional recorder process subscribes to both JSON topics, streams
+    `samples.jsonl` and `events.jsonl`, and atomically writes `manifest.json`
+    and `summary.json` at start/close.
 
 ## 8. 模块地图 / Module map
 
@@ -404,17 +425,31 @@ comparison on the same arm.
 | --- | --- |
 | `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、坐标验证和完整双向等价关系（仅逆关系唯一时） / Pure impedance formula, frame validation, and full bidirectional equivalence only when the inverse is unique |
 | `armbycontroller/impedance/admittance.py` | 纯导纳虚拟动力学和 `tau_ext -> F_ext` 阻尼最小二乘 / Pure admittance virtual dynamics and damped least-squares `tau_ext -> F_ext` mapping |
-| `armbycontroller/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
-| `armbycontroller/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学 / URDF PoE FK, space Jacobian, RNEA inverse dynamics |
+| `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
+| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗、当前位姿导纳三个无 ROS/CAN controller adapter / Three ROS/CAN-free adapters: joint MIT, Cartesian impedance, and current pose admittance |
+| `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
+| `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
+| `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学 / URDF PoE FK, space Jacobian, RNEA inverse dynamics |
 | `armbycontroller/ik/screw.py` | 使用完整 SE(3) 空间误差和 PoE 空间雅可比的数值 IK / Numerical IK using a full SE(3) space error and PoE space Jacobian |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
 | `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
-| `armbycontroller/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
+| `armbycontroller/modeling/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
+| `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
+| `config/common.yaml` | 两种机械臂确实共用的周期和默认 backend / Rates and default backend genuinely shared by both arms |
+| `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴增益/比例/限制和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis tuning, limits, and observer parameters |
+| `config/piper_l.yaml` | Piper-L 独立固件、夹爪、6 轴增益/比例/限制、导纳和观测器参数 / Piper-L-only firmware, gripper, six-axis tuning, limits, admittance, and observer parameters |
 | `test/test_cartesian_impedance.py` | 坐标、符号、耦合、功率与模型支撑契约 / Frame, sign, coupling, power, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
 | `test/test_momentum_observer.py` | 空间动量、动能梯度、残差收敛、离散稳定性及禁止 SDK/CAN 访问 / Spatial momentum, kinetic gradient, residual convergence, discrete stability, and forbidden SDK/CAN-access contracts |
 | `test/test_cartesian_admittance.py` | wrench 估计、虚拟平衡、旋转向量、边界和重置契约 / Wrench-estimation, virtual-equilibrium, rotation-vector, bound, and reset contracts |
+| `test/test_control_interface.py` | 三个 controller adapter 的共用 interface、命令和 sample schema 契约 / Shared interface, command, and sample-schema contracts for three adapters |
+| `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
+
+用户要求排除 `ros/`、`ik/`、`impedance/` 后的详细文件分类，见
+`docs/file_map/README_ZH_EN.md` 及其四个分类子文档。 / For the requested
+detailed classification outside `ros/`, `ik/`, and `impedance/`, see
+`docs/file_map/README_ZH_EN.md` and its four category documents.
 
 模型调用方直接依赖 `UrdfScrewModel` 和 `project_gravity_vector`；项目不再提供
 `UrdfGravityModel`、`nero_mount_gravity` 或 `create_tracik_solver` 浅兼容名称。
@@ -439,6 +474,11 @@ implementation.
 | `cartesian_impedance_nullspace_stiffness` | 1 or n | N·m/rad | `0.4`，仅 Nero / Nero only |
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_torque_limit` | 1 or n | N·m | `8.0` per joint |
+| `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
+| `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
+| `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
+| `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
+| `velocity_filter_time_constant` | scalar | s | `0.03`，一阶低通差分 / first-order filtered finite difference |
 | `mit_command_rate` | scalar | Hz | `100.0` |
 | `dynamics_state_topic` | string | — | `/arm_dynamics_state`; `effort=tau_motor` |
 | `momentum_observer_enabled` | bool | — | `true`，只启动/停止独立观测进程 / only starts/stops the separate observer process |
@@ -458,6 +498,12 @@ implementation.
 | `admittance_wrench_timeout` | scalar | s | `0.10`; stale wrench becomes zero |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
+| `control_sample_topic` | string | — | `/arm_control_sample`; schema-v1 JSON `std_msgs/String` |
+| `control_event_topic` | string | — | `/arm_control_event`; JSON `std_msgs/String` |
+| `experiment_recording_enabled` | bool | — | `false`; 是否启动独立 recorder / whether to launch the separate recorder |
+| `experiment_output_directory` | path | — | `~/.ros/armbycontroller/experiments` |
+| `experiment_name` | string | — | `manual_control` |
+| `experiment_flush_every` | scalar | samples/events | `1`; 每条刷新，安全优先 / flush every record, prioritizing recoverability |
 
 启用 URDF 重力/逆动力学补偿时，补偿项严格为经过 `mit_gravity_scale` 和绝对
 力矩限幅的模型输出，不再叠加 `mit_feedforward` 或任何固定标定 bias。
@@ -474,6 +520,14 @@ URDF compensation is absent.
 `mit_kp/mit_kd` belong only to the `joint` comparison backend. The Cartesian
 backend always sends `kp=kd=0`, preventing native joint PD from double-counting
 `J^T F`.
+
+上述控制整定值先读取 `config/common.yaml`，再按 `robot_model` 读取
+`config/nero.yaml` 或 `config/piper_l.yaml`。同名 launch 参数显式传值时优先于
+两层 YAML。`can_interface`、`execute_motion`、话题和进程开关仍由 launch 管理。
+/ These values load from `config/common.yaml` and then the `nero.yaml` or
+`piper_l.yaml` selected by `robot_model`. Explicit same-name launch values take
+precedence over both YAML layers. `can_interface`, `execute_motion`, topics,
+and process switches remain launch-managed.
 
 旋转刚度向量按基座坐标系组成
 `[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`。独立提高 `K_base_z`
@@ -500,6 +554,11 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 - Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
   Nero nullspace gains must be nonnegative, and nullspace torque shares the
   same ±8 N·m total-torque envelope.
+- `cartesian_impedance_model_scale` 只能减小模型项，不能超过 `1.0`；它不是自动
+  标定。修改 J4 前必须支撑机械臂并在多个静态姿态比较实测保持力矩。 /
+  `cartesian_impedance_model_scale` can only reduce model support and cannot
+  exceed `1.0`; it is not automatic calibration. Support the arm and compare
+  measured holding torque at several static poses before changing J4.
 - `move_mit()` 对各轴依次调用，CAN 层不提供整批原子提交或逐帧 ACK。 /
   `move_mit()` is called sequentially per axis; CAN provides neither atomic
   batch commit nor per-frame acknowledgement here.
@@ -526,6 +585,15 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   不稳定组合在启动时拒绝。 / The discrete implementation requires
   `momentum_observer_gain * momentum_observer_max_period < 2`; unstable
   combinations are rejected at startup.
+- controller adapter 禁止直接访问 ROS、磁盘或 CAN；所有输出仍经过 ROS/AGX
+  adapter 的模式与硬件检查。 / Controller adapters must not access ROS, disk,
+  or CAN directly; every output still crosses the ROS/AGX adapter's mode and
+  hardware checks.
+- experiment recorder 默认不启动、从不连接 CAN；记录失败不能生成机械臂命令。
+  JSONL 每条记录独立成行，异常退出时已刷新行仍可恢复。 / The experiment
+  recorder is disabled by default and never connects to CAN; recording failure
+  cannot produce arm commands. Each JSONL record is independent, so flushed
+  lines survive an abnormal exit.
 
 ## 11. 已知风险 / Known risks
 
@@ -550,6 +618,12 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   传感器测量，也不是硬件同步采样。 / `/arm_dynamics_state.effort` is the
   SDK motor-state torque estimate, not a six-axis force/torque-sensor reading
   or a hardware-synchronous sample.
+- Nero v111/v112 的 SDK 速度字段固定为零；控制器现在以位置有限差分和 `0.03 s`
+  一阶低通估算速度。它仍受编码器量化、缓存不同步和 Python 调度抖动影响。 /
+  The Nero v111/v112 SDK velocity field is fixed at zero; the controller now
+  estimates velocity from position differences with a `0.03 s` first-order
+  low-pass filter. Encoder quantization, cache skew, and Python scheduling
+  jitter still affect it.
 - SDK 在 `connect()` 后由后台线程持续接收 CAN；控制器读取的是解析器当前缓存。
   `get_joint_angles()` 与逐关节 `get_motor_states()` 是不同反馈消息，因而同一循环
   内也不是硬件原子快照。观测器不会再次调用它们。 / After `connect()`, the SDK
@@ -577,14 +651,31 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   `link6`，不能把它当作指尖接触点。 / Piper-L IK and dynamics both read
   `piper_l_with_gripper_description.xacro`, so gripper mass enters dynamics;
   the task point remains `link6`, not the fingertip contact point.
-- Nero 的 IK、质量矩阵和逆动力学默认读取
-  `nero_with_left_revo2_description.xacro`，固定 Revo2 质量进入模型；任务点为
-  `link7`。 / Nero IK, mass matrix, and inverse dynamics load
-  `nero_with_left_revo2_description.xacro` by default, including the fixed
-  Revo2 mass; the task point is `link7`.
+- Nero 文件的 `tool_configuration=none` 读取裸臂
+  `nero_description.urdf`，不包含手或夹爪质量；也可在物理安装确实变化后显式
+  选择 `gripper`、`left_revo2` 或 `right_revo2`。错误的工具选择会直接形成错误
+  重力力矩，任务点仍为 `link7`。 / Nero `tool_configuration=none` loads the
+  bare `nero_description.urdf`, with no hand or gripper mass. Select `gripper`,
+  `left_revo2`, or `right_revo2` only after the physical installation changes.
+  A wrong tool directly creates wrong gravity torque; the task point remains
+  `link7`.
 - 任务空间阻抗和 IK 目标生成必须解耦，慢 IK 不能阻塞力矩刷新。 / Task
   impedance and IK target generation must be decoupled so slow IK cannot block
   torque refresh.
+- `/arm_control_sample` 在控制进程内进行 JSON 序列化；磁盘写入在独立进程，但
+  Python 序列化和 ROS publish 仍会增加非硬实时循环的负载。 / Control samples
+  are JSON-serialized in the control process. Disk writes are separate, but
+  Python serialization and ROS publication still add load to the non-real-time
+  loop.
+- `summary.json` 的关节位置 RMSE 使用每周期 `reference.position-state.position`，
+  是控制参考跟踪指标，不等于 Cartesian 误差、接触质量或稳定性证明。 / The
+  joint-position RMSE in `summary.json` uses
+  `reference.position-state.position`; it is a reference-tracking metric, not
+  Cartesian error, contact quality, or proof of stability.
+- JSON topic 使用 schema version 保护格式演进，但当前没有 custom ROS message
+  的编译期字段检查；新版本 consumer 必须显式处理 `schema_version`。 / JSON
+  topics carry a schema version but lack compile-time field checks from custom
+  ROS messages; future consumers must handle `schema_version` explicitly.
 
 ## 12. 构建、测试和运行 / Build, test, and run
 
@@ -598,6 +689,42 @@ colcon build --packages-select armbycontroller --symlink-install
 source install/setup.bash
 ```
 
+### 配置文件 / Configuration file
+
+launch 先加载 `config/common.yaml`，再根据 `robot_model` 只加载
+`config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期和默认 backend；
+固件、工具、重力/模型比例、逐关节增益与限制、轨迹和观测器参数全部按机器人
+分开，导纳仅在 Piper-L 文件，Nero 速度估计和零空间仅在 Nero 文件。显式 launch
+参数仍有最高优先级。`common_config:=/path/common.yaml` 可替换共用层，
+`controller_config:=/path/robot.yaml` 可替换机器人层。 / Launch first loads
+`config/common.yaml`, then only `config/nero.yaml` or `config/piper_l.yaml`
+according to `robot_model`. Common holds only shared rates/default backend;
+firmware, tool, gravity/model scales, joint gains/limits, trajectories, and
+observer tuning are robot-specific. Admittance exists only in Piper-L, while
+Nero velocity estimation and nullspace tuning exist only in Nero. Explicit
+launch arguments have highest priority. `common_config` and
+`controller_config` can replace the respective layers.
+
+Nero 文件对应当前侧装、无手机械臂，显式设置 `tool_configuration=none`；
+Piper-L 文件独立设置 `tool_configuration=gripper`。最近实机日志报告软件 `1.11`，
+但 Nero 的 `firmware=auto` 仍选择项目
+原来验证的 `v112` profile；实机再次查询确认后，若确为 1.11，再把 YAML 改为
+`v111`。 / Nero explicitly uses `tool_configuration=none`; Piper-L independently
+uses `tool_configuration=gripper`. The latest Nero log reported software
+`1.11`, while its `firmware=auto` still selects the previously verified `v112`
+profile. Query the hardware again and change Nero YAML to `v111` only if 1.11
+is confirmed.
+
+`cartesian_impedance_model_scale` 对 Nero 可写 7 个值，顺序为 J1…J7，J4 是第
+4 个。当前保持 `[1.0]`。旧日志中的侧装 Revo2 模型给 J4 约 `3.55 N·m`；改为
+裸臂模型后，同一姿态的预测约为 `1.98 N·m`，去除了约 `1.57 N·m` 的错误末端
+负载贡献。剩余比例仍需机械支撑下的多姿态静态力矩标定。 / For Nero,
+`cartesian_impedance_model_scale` may contain seven values in J1…J7 order; J4
+is the fourth and remains `[1.0]`. The old side-mounted Revo2 model predicted
+about `3.55 N·m` at J4; the bare model predicts about `1.98 N·m` at the same
+pose, removing about `1.57 N·m` of incorrect tool contribution. Calibrate any
+remaining scale at multiple supported static poses.
+
 ### 公式测试 / Formula tests
 
 ```bash
@@ -608,6 +735,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_momentum_observer.py
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_cartesian_admittance.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_control_interface.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_experiment.py
 ```
 
 ### 全部测试 / Full tests
@@ -618,6 +749,38 @@ source /opt/ros/humble/setup.bash
 colcon test --packages-select armbycontroller
 colcon test-result --verbose
 ```
+
+### 实验记录 / Experiment recording
+
+默认不启动 recorder。显式启用会为每次 launch 创建新的 run directory；不会覆盖
+已有实验。 / The recorder is not launched by default. Explicit enablement
+creates a fresh run directory for every launch and never overwrites an existing
+experiment.
+
+```bash
+ros2 launch armbycontroller keyboard_control.launch.py \
+  robot_model:=piper_l \
+  experiment_recording_enabled:=true \
+  experiment_name:=joint_vs_cartesian \
+  experiment_output_directory:=~/.ros/armbycontroller/experiments
+```
+
+输出 / Outputs:
+
+```text
+<run-id>/manifest.json
+<run-id>/samples.jsonl
+<run-id>/events.jsonl
+<run-id>/summary.json
+```
+
+单独启动 recorder 时，通过 `/arm_experiment_recorder/recording` 的
+`std_srvs/srv/SetBool` 开始/结束。`false` 收尾时才写 `summary.json`；急停事件会
+写入 `events.jsonl`，但不会由 recorder 自己触发急停。 / When the recorder is
+started independently, use `/arm_experiment_recorder/recording`
+(`std_srvs/srv/SetBool`) to start/stop. `summary.json` is written when `false`
+closes the run. Emergency-stop events are recorded in `events.jsonl`; the
+recorder never initiates an emergency stop.
 
 ### Nero 公式/模型仿真 / Nero formula/model simulation
 
@@ -645,21 +808,16 @@ source /opt/ros/humble/setup.bash
 source install/setup.bash
 ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
-  can_interface:=can0 firmware:=auto nero_mount:=horizontal \
-  execute_motion:=true impedance_backend:=cartesian \
-  impedance_enabled:=false \
-  cartesian_impedance_nullspace_stiffness:=0.4 \
-  cartesian_impedance_nullspace_damping:=0.1 \
-  cartesian_impedance_torque_limit:=8.0 \
+  can_interface:=can0 execute_motion:=true \
   move_home_on_start:=false reset_emergency_stop_on_start:=true
 ```
 
-`nero_mount` 必须与实际安装一致：平置用 `horizontal`，项目定义的 -90° 侧装
-用 `side`。启动后保持机械臂被支撑，按 `I` 同时捕获当前末端位姿和 7 轴零空间
-姿态，再进入 Cartesian MIT。 / `nero_mount` must match the installation:
-use `horizontal` for a horizontal base and `side` for the project's -90° side
-mount. With the arm physically supported, press `I` to capture both the tool
-pose and seven-axis nullspace posture before entering Cartesian MIT.
+YAML 默认 `nero_mount=side`。若实际平置，必须显式传
+`nero_mount:=horizontal` 或修改 YAML。启动后保持机械臂被支撑，按 `I` 同时
+捕获当前末端位姿和 7 轴零空间姿态，再进入 Cartesian MIT。 / YAML defaults
+to `nero_mount=side`. For a horizontal base, pass
+`nero_mount:=horizontal` or change YAML. With the arm physically supported,
+press `I` to capture both tool pose and nullspace posture before Cartesian MIT.
 
 ### Piper-L 实机接线 / Piper-L hardware wiring
 
@@ -730,10 +888,10 @@ The formula layer should be diagnosed in this order:
    `J_g M^-1 tau_null≈0`?
 9. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
    Do logged `task`, `null`, and `model` sum to the pre-clip `total`?
-10. `/arm_dynamics_state` 是否约为 100 Hz，且 `position/velocity/effort`
-    分别来自 SDK 的关节角、关节速度和电机力矩。 / Is
-    `/arm_dynamics_state` near 100 Hz, with `position/velocity/effort` sourced
-    from SDK joint angle, joint velocity, and motor torque?
+10. `/arm_dynamics_state` 是否约为 100 Hz；Nero v111/v112 的 `velocity` 是否
+    为位置差分估计，其余 profile 是否来自 SDK。 / Is
+    `/arm_dynamics_state` near 100 Hz, with finite-difference `velocity` for
+    Nero v111/v112 and SDK velocity for other profiles?
 11. 静止无接触时，残差是否稳定但可能存在摩擦/模型偏置；接触时符号是否符合关节
     正方向。 / At rest without contact, is the residual stable despite possible
     friction/model bias, and does contact follow the positive joint sign?
@@ -741,6 +899,15 @@ The formula layer should be diagnosed in this order:
     planned 导纳再进入 MIT 阻抗。 / After `O`, is admittance true and
     impedance false; after `I`, does planned admittance exit before MIT
     impedance enters?
+13. `ros2 topic echo /arm_control_sample` 是否显示所选 controller、相同周期的
+    state/reference/command 和 `schema_version: 1`。 / Does
+    `/arm_control_sample` show the selected controller, same-cycle
+    state/reference/command, and `schema_version: 1`?
+14. recorder status 是否给出唯一 run directory；正常收尾后四个文件是否存在，
+    `summary.sample_count` 是否等于 `samples.jsonl` 行数。 / Does recorder
+    status expose a unique run directory, do all four files exist after a
+    normal close, and does `summary.sample_count` equal the number of JSONL
+    sample lines?
 
 ## 14. 分阶段学习与实现路线 / Staged learning and implementation path
 
@@ -772,6 +939,15 @@ The formula layer should be diagnosed in this order:
    The `O` key, I/O interlock, DLS wrench, virtual dynamics, screw IK, and
    planned adapter are implemented; hardware feel and residual quality still
    require low-speed validation.
+9. **统一 controller seam / Unified controller seam**：已完成三个 adapter 的
+   `ControlInput -> ControlResult`、统一命令类型、JSON sample 和共用测试面。 /
+   The three adapters now share `ControlInput -> ControlResult`, normalized
+   command types, JSON samples, and one test surface.
+10. **实验运行 / Experiment runs**：已完成 manifest、JSONL sample/event、原子
+    summary、Memory/JSONL sink 和可选 ROS recorder；自动轨迹脚本和跨 run
+    统计比较仍待完成。 / Manifest, JSONL samples/events, atomic summary,
+    Memory/JSONL sinks, and the optional ROS recorder are implemented;
+    scripted trajectories and cross-run statistical comparison remain.
 
 ## 15. 练习 / Exercises
 
@@ -795,6 +971,15 @@ The formula layer should be diagnosed in this order:
 8. 证明 `pdot=tau+tau_ext+C^T qdot-g`，并用一自由度恒定外力矩仿真验证 `r`
    收敛。 / Derive `pdot=tau+tau_ext+C^T qdot-g` and verify residual
    convergence with a one-DOF constant-external-torque simulation.
+9. 实现一个只返回 `PositionCommand` 的 hold controller adapter，并通过
+   `ControlEngine` 与 Memory sink 对它做十周期实验。 / Implement a hold
+   controller adapter returning only `PositionCommand`, then run ten cycles
+   through `ControlEngine` and the Memory sink.
+10. 对同一路径分别运行 `joint_impedance` 与 `cartesian_impedance`，比较两个
+    `summary.json` 的周期分布、RMSE 与最大估计力矩，并说明为何不能仅凭 RMSE
+    宣称稳定。 / Run the same path with joint and Cartesian impedance, compare
+    period, RMSE, and maximum estimated torque across summaries, and explain
+    why RMSE alone does not establish stability.
 
 ## 16. 术语表 / Glossary
 
@@ -820,6 +1005,11 @@ The formula layer should be diagnosed in this order:
 | 动量观测残差 | Momentum-observer residual | 外部关节力矩的一阶低通估计；也包含未建模扰动 / First-order estimate of external joint torque that also contains unmodelled disturbances |
 | 阻尼最小二乘 | Damped least squares | Regularized solve of `tau_ext=J^T F_ext` near rank loss |
 | MIT 命令 | MIT command | Native motor command with `p_des/v_des/kp/kd/t_ff` |
+| 控制输入 | Control Input | 一个周期的 state、reference、wrench、timestamp 与 period / Same-cycle state, reference, wrench, timestamp, and period |
+| 控制结果 | Control Result | MIT/planned 命令及同周期诊断 signals / MIT/planned command plus same-cycle diagnostic signals |
+| controller adapter | Controller adapter | 实现 `ControlInput -> ControlResult` 且不访问 ROS/CAN 的算法 / Algorithm implementing the common seam without ROS/CAN access |
+| 控制样本 | Control Sample | 可记录的 schema-v1 input/result JSON / Recordable schema-v1 input/result JSON |
+| 实验运行 | Experiment Run | 一个 manifest、顺序 sample/event 流和结束 summary / One manifest, ordered sample/event streams, and closing summary |
 
 ## 17. 主要资料 / Primary sources
 
@@ -847,13 +1037,19 @@ The formula layer should be diagnosed in this order:
   torque-rate limiter.
 - 参考实现 / Reference implementation:
   https://github.com/matthias-mayr/Cartesian-Impedance-Controller
-- 本仓库 `armbycontroller/screw_model.py`：PoE、空间雅可比和 RNEA 的实际实现。
-  / This repository's `armbycontroller/screw_model.py`: the implemented PoE,
+- 本仓库 `armbycontroller/modeling/screw_model.py`：PoE、空间雅可比和 RNEA 的实际实现。
+  / This repository's `armbycontroller/modeling/screw_model.py`: the implemented PoE,
   space Jacobian, and RNEA model.
 - 本仓库 `armbycontroller/ros/keyboard_controller_node.py`：当前 ROS 状态机、
   AGX MIT/planned adapter 与互锁基线。 / This repository's
   `armbycontroller/ros/keyboard_controller_node.py`: the current ROS state
   machine, AGX MIT/planned adapters, and interlock baseline.
+- 本仓库 `armbycontroller/control/core.py` 与 `control/adapters.py`：统一 controller
+  interface、命令 schema 和三个实际 adapter。 / This repository's controller
+  interface, command schema, and three concrete adapters.
+- 本仓库 `armbycontroller/experiment/core.py`：实验 manifest、证据流、sink seam
+  和汇总指标的实际定义。 / This repository's implemented experiment manifest,
+  evidence streams, sink seam, and summary metrics.
 - AgileX Robotics, Piper API：后台读取线程、`MessageAbstract.timestamp`、
   `get_joint_angles()` 与高频 `get_motor_states()`：
   https://github.com/agilexrobotics/pyAgxArm/blob/master/docs/piper/piper_api.md

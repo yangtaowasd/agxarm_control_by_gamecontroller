@@ -6,9 +6,11 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
-from armbycontroller.momentum_observer import GeneralizedMomentumObserver
+from armbycontroller.modeling.momentum_observer import (
+    GeneralizedMomentumObserver,
+)
 from armbycontroller.ros.momentum_observer_node import MomentumObserverNode
-from armbycontroller.screw_model import UrdfScrewModel
+from armbycontroller.modeling.screw_model import UrdfScrewModel
 
 
 def test_observer_ros_adapter_has_no_arm_sdk_or_can_access():

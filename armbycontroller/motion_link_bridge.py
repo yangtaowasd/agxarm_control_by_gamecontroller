@@ -20,9 +20,9 @@ import websocket
 
 from armbycontroller.ik.core import quaternion_to_rotation_matrix
 from armbycontroller.ik.core import rotation_matrix_to_quaternion
-from armbycontroller.lie import rotation_exp
-from armbycontroller.lie import rotation_from_vector
-from armbycontroller.lie import rotation_vector
+from armbycontroller.modeling.lie import rotation_exp
+from armbycontroller.modeling.lie import rotation_from_vector
+from armbycontroller.modeling.lie import rotation_vector
 
 
 def phone_rotation(orientation):

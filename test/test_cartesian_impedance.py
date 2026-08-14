@@ -12,7 +12,7 @@ from armbycontroller.impedance.cartesian import cartesian_pose_error
 from armbycontroller.impedance.cartesian import equivalent_cartesian_impedance
 from armbycontroller.impedance.cartesian import equivalent_joint_impedance
 from armbycontroller.impedance.cartesian import geometric_jacobian
-from armbycontroller.screw_model import UrdfScrewModel
+from armbycontroller.modeling.screw_model import UrdfScrewModel
 
 
 class FixedModel:
@@ -342,6 +342,38 @@ def test_urdf_support_uses_measured_state_and_zero_desired_acceleration():
     assert dynamics.received[2] == pytest.approx([0.0, 0.0])
     assert result.model_torque == pytest.approx([1.0, -2.0])
     assert result.command_torque == pytest.approx([1.0, -2.0])
+
+
+def test_urdf_support_accepts_independent_per_joint_model_scale():
+    result = cartesian_impedance_command(
+        FixedModel(space_jacobian=np.zeros((6, 2))),
+        FixedDynamics([2.0, -4.0]),
+        np.zeros(2),
+        np.zeros(2),
+        np.eye(4),
+        np.zeros(6),
+        np.zeros(6),
+        np.zeros(6),
+        model_scale=[0.5, 0.25],
+    )
+
+    assert result.model_torque == pytest.approx([1.0, -1.0])
+    assert result.command_torque == pytest.approx([1.0, -1.0])
+
+
+def test_urdf_support_rejects_model_scale_above_one():
+    with pytest.raises(ValueError, match="model_scale"):
+        cartesian_impedance_command(
+            FixedModel(space_jacobian=np.zeros((6, 2))),
+            FixedDynamics([2.0, -4.0]),
+            np.zeros(2),
+            np.zeros(2),
+            np.eye(4),
+            np.zeros(6),
+            np.zeros(6),
+            np.zeros(6),
+            model_scale=[1.0, 1.1],
+        )
 
 
 def test_command_torque_has_no_change_rate_limit_between_evaluations():

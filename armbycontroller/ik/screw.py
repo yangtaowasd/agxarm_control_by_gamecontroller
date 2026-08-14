@@ -5,8 +5,8 @@ import math
 
 import numpy as np
 
-from armbycontroller.lie import space_pose_error
-from armbycontroller.lie import transform
+from armbycontroller.modeling.lie import space_pose_error
+from armbycontroller.modeling.lie import transform
 
 
 class ScrewIkFailure(RuntimeError):

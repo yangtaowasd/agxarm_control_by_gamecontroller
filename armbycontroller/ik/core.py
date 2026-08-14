@@ -9,10 +9,30 @@ import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
 
-from armbycontroller.lie import rotation_exp
-from armbycontroller.lie import rotation_vector
+from armbycontroller.modeling.lie import rotation_exp
+from armbycontroller.modeling.lie import rotation_vector
 
 VERIFIED_FIRMWARE = {"nero": "v112", "piper_l": "v188"}
+
+DEFAULT_TOOL_CONFIGURATION = {
+    "nero": "none",
+    "piper_l": "gripper",
+}
+
+TOOL_URDF_FILENAMES = {
+    "nero": {
+        "none": "nero_description.urdf",
+        "gripper": "nero_with_gripper_description.xacro",
+        "left_revo2": "nero_with_left_revo2_description.xacro",
+        "right_revo2": "nero_with_right_revo2_description.xacro",
+    },
+    "piper_l": {
+        "none": "piper_l_description.urdf",
+        "gripper": "piper_l_with_gripper_description.xacro",
+        "left_revo2": "piper_l_with_left_revo2_description.xacro",
+        "right_revo2": "piper_l_with_right_revo2_description.xacro",
+    },
+}
 
 
 def resolve_firmware_name(robot_model, requested_firmware):
@@ -107,12 +127,50 @@ def resolve_urdf_path(parameter_value, robot_model):
     )
 
 
+def resolve_tool_urdf_path(
+    bare_urdf_path,
+    robot_model,
+    tool_configuration="auto",
+    explicit_path="",
+):
+    """Resolve the dynamics/IK URDF for the configured fixed end tool."""
+    if explicit_path:
+        configured = Path(explicit_path).expanduser().resolve()
+        if not configured.is_file():
+            raise ValueError(
+                f"configured gravity_urdf_path does not exist: {configured}"
+            )
+        return configured
+
+    if robot_model not in TOOL_URDF_FILENAMES:
+        raise ValueError("robot_model must be nero or piper_l")
+    requested = str(tool_configuration).strip().lower()
+    if requested == "auto":
+        requested = DEFAULT_TOOL_CONFIGURATION[robot_model]
+    filenames = TOOL_URDF_FILENAMES[robot_model]
+    if requested not in filenames:
+        raise ValueError(
+            f"unsupported {robot_model} tool_configuration {requested!r}; "
+            f"choose auto or one of {sorted(filenames)}"
+        )
+    bare = Path(bare_urdf_path).expanduser().resolve()
+    configured = bare if requested == "none" else bare.parent / filenames[
+        requested
+    ]
+    if not configured.is_file():
+        raise ValueError(
+            f"URDF for {robot_model} tool_configuration={requested!r} "
+            f"does not exist: {configured}"
+        )
+    return configured.resolve()
+
+
 def create_screw_solver(
     urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
 ):
     """Create the shared PoE solver and verify the requested chain DOF."""
     from armbycontroller.ik.screw import ScrewIkSolver
-    from armbycontroller.screw_model import UrdfScrewModel
+    from armbycontroller.modeling.screw_model import UrdfScrewModel
 
     model = UrdfScrewModel(
         urdf_path,
