@@ -2,13 +2,15 @@
 <package format="3">
   <name>armbycontroller</name>
   <version>0.0.0</version>
-  <description>Planned and Cartesian-impedance control for Piper, NERO, and Revo2.</description>
+  <description>Joint and Cartesian keyboard control for Piper, NERO, and Revo2.</description>
 
   <maintainer email="yang@todo.todo">yang</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>ament_cmake_python</build_depend>
+
+  <depend>libx11-dev</depend>
 
   <depend>rclcpp</depend>
   <depend>rclpy</depend>

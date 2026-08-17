@@ -11,12 +11,6 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
-from armbycontroller.backend_api import BackendState
-from armbycontroller.backend_protocol import extract_named_arm_joint_state
-from armbycontroller.backend_protocol import sanitize_action
-from armbycontroller.backend_protocol import sanitize_pose_command
-from armbycontroller.backend_protocol import validate_bind_address
-from armbycontroller.control_protocol import sanitize_controller_keys
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -64,10 +58,8 @@ from armbycontroller.modeling.lie import rotation_vector
 from armbycontroller.modeling.lie import space_pose_error
 from armbycontroller.modeling.lie import transform as screw_transform
 from armbycontroller.motion_link_bridge import phone_rotation
-from armbycontroller.motion_link_bridge import MotionLinkBridge
 from armbycontroller.motion_link_bridge import relative_target_rotation
 from armbycontroller.motion_link_bridge import websocket_url
-from armbycontroller.model_profiles import get_arm_profile
 from armbycontroller.pose_controller import PoseController
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 from armbycontroller.modeling.screw_model import project_gravity_vector
@@ -188,20 +180,6 @@ def test_nero_mount_selection_sets_base_frame_gravity():
         project_gravity_vector("select")
 
 
-def test_model_profiles_are_the_canonical_launch_defaults():
-    nero = get_arm_profile("NERO")
-    piper = get_arm_profile("piper_l")
-
-    assert nero.joint_count == len(nero.initial_joint_positions) == 7
-    assert nero.topic_prefix == "/nero"
-    assert nero.pose_parameters()["tip_link"] == "link7"
-    assert piper.joint_count == len(piper.initial_joint_positions) == 6
-    assert piper.topic_prefix == "/piper_l"
-    assert piper.min_reach < piper.max_reach
-    with pytest.raises(ValueError, match="robot_model"):
-        get_arm_profile("unknown")
-
-
 def test_motion_link_websocket_url_uses_robot_role():
     assert websocket_url(
         "http://127.0.0.1:8080", "a token/+"
@@ -209,105 +187,6 @@ def test_motion_link_websocket_url_uses_robot_role():
         "ws://127.0.0.1:8080/ws?"
         "session=a%20token%2F%2B&role=robot"
     )
-
-
-def test_motion_link_controller_requires_exact_keyboard_protocol():
-    assert sanitize_controller_keys(
-        [1, 0, True] + [0] * 20
-    )[:4] == [1, 0, 1, 0]
-    with pytest.raises(ValueError, match="23"):
-        sanitize_controller_keys([0] * 22)
-    with pytest.raises(ValueError, match="0 or 1"):
-        sanitize_controller_keys([2] * 23)
-
-
-def test_motion_link_monitor_mode_never_publishes_controller_input():
-    bridge = SimpleNamespace(enable_commands=False)
-
-    MotionLinkBridge._accept_controller_message(
-        bridge,
-        {"type": "controller", "keys": [1] * 23},
-    )
-    MotionLinkBridge._release_controller(bridge)
-
-
-def test_backend_filters_and_reorders_shared_joint_state_topic():
-    message = SimpleNamespace(
-        name=["camera_pan", "joint2", "joint1", "joint3", "joint4",
-              "joint5", "joint6", "joint7"],
-        position=[99.0, 0.2, 0.1, 0.3, 0.4, 0.5, 0.6, 0.7],
-        velocity=[9.0, 2.0, 1.0, 3.0, 4.0, 5.0, 6.0, 7.0],
-    )
-    state = extract_named_arm_joint_state(message, "nero")
-
-    assert state["names"] == [f"joint{index}" for index in range(1, 8)]
-    assert state["positions"] == pytest.approx(
-        [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
-    )
-    assert state["velocities"] == pytest.approx(
-        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
-    )
-    unrelated = SimpleNamespace(
-        name=["FL_hip_joint"] * 7,
-        position=[0.0] * 7,
-        velocity=[0.0] * 7,
-    )
-    assert extract_named_arm_joint_state(unrelated, "nero") is None
-
-
-def test_backend_pose_api_normalizes_and_validates_commands():
-    pose = sanitize_pose_command({
-        "position": {"x": "0.3", "y": 0, "z": 0.4},
-        "orientation": {"x": 0, "y": 0, "z": 0, "w": 2},
-    })
-
-    assert pose == {
-        "frameId": "base_link",
-        "position": {"x": 0.3, "y": 0.0, "z": 0.4},
-        "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},
-    }
-    with pytest.raises(ValueError, match="non-zero"):
-        sanitize_pose_command({
-            "position": {"x": 0, "y": 0, "z": 0},
-            "orientation": {"x": 0, "y": 0, "z": 0, "w": 0},
-        })
-
-
-def test_backend_api_actions_and_non_loopback_authentication():
-    assert sanitize_action({"action": "HOME"}) == "home"
-    assert sanitize_action({"action": "release"}) == "release"
-    with pytest.raises(ValueError, match="action must be"):
-        sanitize_action({"action": "move_randomly"})
-
-    validate_bind_address("127.0.0.1", "")
-    validate_bind_address("0.0.0.0", "secret")
-    with pytest.raises(ValueError, match="api_token"):
-        validate_bind_address("0.0.0.0", "")
-
-
-def test_backend_state_reports_fresh_and_stale_feedback(monkeypatch):
-    clock = SimpleNamespace(monotonic=100.0)
-    monkeypatch.setattr("armbycontroller.backend_api.time.monotonic", lambda: (
-        clock.monotonic
-    ))
-    state = BackendState(
-        "nero", True, simulation_mode=False, execute_motion=True
-    )
-    state.update(
-        "jointState", {"positionRad": [0.0] * 7}, joint_feedback=True
-    )
-
-    version, fresh = state.snapshot()
-    assert version == 1
-    assert fresh["connected"] is True
-    assert fresh["commandsEnabled"] is True
-    assert fresh["runtimeMode"] == "hardware"
-    assert fresh["simulationMode"] is False
-    assert fresh["executeMotion"] is True
-
-    clock.monotonic = 102.0
-    _, stale = state.snapshot()
-    assert stale["connected"] is False
 
 
 def test_phone_relative_rotation_is_bounded():
@@ -1362,6 +1241,7 @@ def test_mit_tick_sends_one_impedance_command_per_joint(monkeypatch):
 
         def move_mit(self, **command):
             self.commands.append(command)
+
         def get_motor_states(self, joint_index):
             del joint_index
             self.state_reads += 1
@@ -1726,7 +1606,6 @@ def test_impedance_entry_refuses_incomplete_joint_feedback(monkeypatch):
     logger = FakeLogger()
     controller = object.__new__(ArmKeyboardController)
     controller.impedance_enabled = False
-    controller.simulation_mode = False
     controller.execute_motion = True
     controller.arm_ready = True
     controller.arm = FakeArm()
@@ -1744,9 +1623,7 @@ def test_impedance_entry_refuses_incomplete_joint_feedback(monkeypatch):
     ]
 
 
-def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(
-    monkeypatch,
-):
+def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(monkeypatch):
     class FakeArm:
         def __init__(self):
             self.commands = []

@@ -3,17 +3,6 @@
 ROS 2 control for AGX Nero, Piper-L, and a Revo2 hand. Nero and Piper-L share
 the same controller, keyboard topic, key indices, IK core, and launch files.
 
-## Project layout
-
-- `armbycontroller/`: controllers, kinematics/dynamics, and backend adapters
-- `launch/`: keyboard, RViz pose, and backend-integrated launch entries
-- `agx_arm_urdf/`: bundled Nero, Piper-L, and Revo2 model assets
-- `test/`: functional and regression tests
-- [`docs/architecture.md`](docs/architecture.md): module responsibilities and
-  runtime paths
-- [`docs/phone-remotation-api.md`](docs/phone-remotation-api.md): HTTP/SSE
-  backend contract and Motion Link compatibility
-
 ## Cartesian impedance development branch
 
 `feature/cartesian-impedance-step-by-step` starts from the validated joint MIT
@@ -197,10 +186,32 @@ ros2 service call /arm_experiment_recorder/recording \
 The file map outside `ros/`, `ik/`, and `impedance/` is split by category under
 `docs/file_map/README_ZH_EN.md`.
 
+## CAN and robot startup
+
+Configure both CAN interfaces once:
+
+```bash
+./scripts/setup_can.sh
+```
+
+Then start the required robot:
+
+```bash
+# Nero
+./scripts/start_nero.sh
+
+# Or Piper-L
+./scripts/start_piper_l.sh
+```
+
+The robot scripts do not reconfigure CAN, automatically move home, or clear a
+latched emergency stop. They use the X11 keyboard backend for NoMachine; pass
+`device:=/dev/input/eventN` to use a local evdev keyboard instead.
+
 ## Build
 
 ```bash
-cd /home/yang/demo_ws
+cd /home/techshare/demo_ws
 python3 -m pip install "modern_robotics>=1.1.1"
 colcon build --packages-up-to armbycontroller
 source install/setup.bash
@@ -237,14 +248,11 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `SPACE`: all joints return to zero
 - `E`: electronic emergency stop
 
-For keyboard Cartesian impedance, wait for startup zeroing, press `I`, then
-press `P` to enter IK. `W/S/A/D/Z/X`, arrows, and PageUp/PageDown update the
-desired tool pose. The target is still checked by IK for workspace and joint
-limits, but IK joint positions are used only as the redundant-arm posture
-reference. In joint input mode, the selected joint goal is converted to a tool
-pose by FK. All FK, IK, and Jacobian calculations use the same PoE screw model;
-there is no classical-IK fallback. `P` and `I` are independent, so either order
-works.
+For keyboard IK through MIT, wait for startup zeroing, press `I` to enter MIT,
+then press `P` to enter IK. `W/S/A/D/Z/X`, arrows, and PageUp/PageDown update
+the IK joint target. Both IK target generation and the MIT command loop run at
+100 Hz. A jerk-limited joint trajectory supplies continuous `q_des`, `dq_des`,
+and `ddq_des`; `P` and `I` are independent, so either order works.
 
 The Cartesian backend uses the SDK equation
 `τ_ref=Kp(q_des-q)+Kd(dq_des-dq)+τ_ff` with `Kp=0`, `Kd=0`,
@@ -330,7 +338,7 @@ ros2 launch armbycontroller keyboard_control.launch.py \
   impedance_backend:=cartesian \
   cartesian_impedance_base_z_rotation_stiffness:=4.0
 
-# Start directly in Cartesian impedance mode with impedance_enabled:=true.
+# Start directly in MIT impedance mode by adding impedance_enabled:=true.
 ```
 
 Inspect the observer output after entering MIT with `I`:
@@ -348,8 +356,11 @@ ros2 launch armbycontroller keyboard_control.launch.py \
 
 The controller defaults to 100 Hz IK/control scheduling. Per-tick keyboard
 increments are scaled so the original Cartesian, orientation, and joint jog
-speeds are preserved at the higher rate. Planned mode retains 20 percent speed
-and 1 rad/s² maximum joint acceleration. IK keeps the tool
+speeds are preserved at the higher rate. The MIT reference generator defaults
+to 0.5 rad/s velocity, 1 rad/s² acceleration, and 5 rad/s³ jerk limits, exposed
+as `mit_trajectory_max_velocity`, `mit_trajectory_max_acceleration`, and
+`mit_trajectory_max_jerk`. Planned mode retains 20 percent speed and 1 rad/s²
+maximum joint acceleration. IK keeps the tool
 local `+Z` axis pointing toward `base_link -Z`; rotation around that axis is
 free. It retains ten verified states and pauses for two seconds after recovery.
 Acceleration limits are written and verified one joint at a time because the
@@ -408,14 +419,6 @@ sending `move_j()`.
 
 ## Phone control seam
 
-The versioned HTTP command API, SSE feedback stream, authentication rules, and
-launch profiles for backend integration are documented in
-[`docs/phone-remotation-api.md`](docs/phone-remotation-api.md).
-The existing Motion Link WebSocket bridge remains the default command
-transport; use `backend_transport:=http` when the backend calls the HTTP API
-directly. The launch file gives command ownership to only the selected
-transport unless `backend_transport:=both` is explicitly requested.
-
 `phoneremotation` should publish `geometry_msgs/msg/PoseStamped` to the same
 stable target interface used by terminal control:
 
@@ -426,26 +429,32 @@ Use `base_link` as `header.frame_id`. Feedback is available on
 `/<model>/current_pose` and `/<model>/ik_status`. This keeps phone transport
 outside the robot model and hardware adapters.
 
-The separate Phone Remotation project provides the phone, desktop controller,
-and robot WebSocket roles. From that project's directory, start the web service
-and then select the arm and end effector in the desktop page:
+The Motion Link project at
+`/media/yang/Windows/Users/yang.tao/Desktop/demo/phone remotation` already
+provides the required phone and robot WebSocket roles. Configure the real
+hardware in the backend environment, then start the web service:
 
 ```bash
+cd "/media/yang/Windows/Users/yang.tao/Desktop/demo/phone remotation"
+export AGILEX_ROBOT_MODEL=nero
+export AGILEX_END_EFFECTOR=revo2
 export AGILEX_CAN_INTERFACE=can0
 ./motion-link-control.sh
 ```
 
-Start performs a read-only probe for complete joint feedback. A detected arm
-uses the real controller; otherwise the same model starts in simulation.
-Both paths publish `/joint_states` at 30 Hz and report those joints to the
-browser. Model and end-effector selectors are locked while control is running.
+NERO/PIPER-L and none/Gripper/Revo2 selectors affect only the independent
+simulation preview. The desktop's separate real-hardware button uses the
+immutable backend configuration above; the browser cannot submit a model,
+tool, or CAN interface. Starting real hardware locks preview configuration,
+and stopping it unlocks preview switching.
 
-Once started, the page expands a virtual gamepad and joint keys 1–7. It sends
-the same 23-key `/arm_keyboard_state` protocol as the native keyboard reader,
-including joint/IK (`P`), planned/MIT (`I`), home, and emergency stop. The
-bridge releases all keys on browser or WebSocket disconnect. Phone pose input
-continues to use `/<model>/target_pose`; an active virtual key temporarily
-takes priority and clears the phone reference before phone control resumes.
+The bridge reports live arm joints back to Motion Link. `simulate` lets
+phone-relative orientation command the simulated arm while holding the current
+tool position. Real hardware requires explicit confirmation:
+
+```bash
+./motion-link-control.sh hardware --confirm-move
+```
 
 The first valid phone sample captures both the current phone orientation and
 the current tool pose as zero. Commands stop when samples are older than

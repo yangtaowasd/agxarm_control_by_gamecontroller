@@ -11,7 +11,29 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from armbycontroller.ik.core import resolve_urdf_path
-from armbycontroller.model_profiles import get_arm_profile
+
+
+PROFILES = {
+    "nero": {
+        "topic_prefix": "/nero",
+        "firmware": "auto",
+        "tip_link": "link7",
+        "initial_joint_positions": [0.0, 1.2, 0.0, 0.8, 0.0, 0.0, 0.0],
+        "robot_min_reach": 0.1447354,
+        "robot_max_reach": 0.7374482,
+    },
+    "piper_l": {
+        "topic_prefix": "/piper_l",
+        "firmware": "auto",
+        "tip_link": "link6",
+        # link6 is near [0.30, 0.00, 0.30] m with local +Z downward.
+        "initial_joint_positions": [
+            0.0, 1.3939753, -1.0158306, 0.0, 1.2799181, 0.0
+        ],
+        "robot_min_reach": 0.0,
+        "robot_max_reach": 0.8738043,
+    },
+}
 
 
 def _rviz_config():
@@ -39,7 +61,9 @@ def _rviz_config():
 def _nodes(context):
     """Create model-specific nodes after resolving the launch argument."""
     model = LaunchConfiguration("robot_model").perform(context).lower()
-    profile = get_arm_profile(model)
+    if model not in PROFILES:
+        raise ValueError(f"robot_model must be one of {sorted(PROFILES)}")
+    profile = PROFILES[model]
     urdf_path = resolve_urdf_path("", model)
     rviz_path = _rviz_config()
 
@@ -80,9 +104,7 @@ def _nodes(context):
             executable="pose_controller.py",
             name=f"{model}_ik_controller",
             output="screen",
-            parameters=[common | profile.pose_parameters() | {
-                "firmware": "auto"
-            }],
+            parameters=[common | profile],
         ),
     ]
 

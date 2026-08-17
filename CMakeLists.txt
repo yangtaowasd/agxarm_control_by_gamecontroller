@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(X11 REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 
@@ -23,6 +24,9 @@ add_executable(keyboard
 ament_target_dependencies(keyboard
   rclcpp
   std_msgs
+)
+target_link_libraries(keyboard
+  X11::X11
 )
 
 install(TARGETS
@@ -36,8 +40,6 @@ install(PROGRAMS
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
-  armbycontroller/backend_api.py
-  armbycontroller/hardware_probe.py
   armbycontroller/ros/momentum_observer_node.py
   armbycontroller/ros/experiment_recorder_node.py
   DESTINATION lib/${PROJECT_NAME}
@@ -50,9 +52,15 @@ install(DIRECTORY
 )
 
 install(DIRECTORY
-  docs
   config
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/setup_can.sh
+  scripts/start_nero.sh
+  scripts/start_piper_l.sh
+  DESTINATION share/${PROJECT_NAME}/scripts
 )
 
 install(DIRECTORY

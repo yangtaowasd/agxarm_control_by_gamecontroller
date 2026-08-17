@@ -15,16 +15,11 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 import websocket
 
-from armbycontroller.backend_protocol import extract_named_arm_joint_state
-from armbycontroller.control_protocol import KEY_COUNT
-from armbycontroller.control_protocol import sanitize_controller_keys
 from armbycontroller.ik.core import quaternion_to_rotation_matrix
 from armbycontroller.ik.core import rotation_matrix_to_quaternion
-from armbycontroller.model_profiles import get_arm_profile
 from armbycontroller.modeling.lie import rotation_exp
 from armbycontroller.modeling.lie import rotation_from_vector
 from armbycontroller.modeling.lie import rotation_vector
@@ -84,7 +79,6 @@ class MotionLinkBridge(Node):
         self.declare_parameter("topic_prefix", "/nero")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("enable_commands", False)
-        self.declare_parameter("simulation_mode", True)
         self.declare_parameter("publish_rate_hz", 20.0)
         self.declare_parameter("maximum_rotation_rad", 0.6)
         self.declare_parameter("sample_timeout", 0.25)
@@ -96,15 +90,13 @@ class MotionLinkBridge(Node):
         self.robot_model = str(
             self.get_parameter("robot_model").value
         ).lower()
-        self.model_profile = get_arm_profile(self.robot_model)
+        if self.robot_model not in ("nero", "piper_l"):
+            raise ValueError("robot_model must be nero or piper_l")
         prefix = str(self.get_parameter("topic_prefix").value).strip("/")
         self.topic_prefix = f"/{prefix}" if prefix else ""
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.enable_commands = bool(
             self.get_parameter("enable_commands").value
-        )
-        self.simulation_mode = bool(
-            self.get_parameter("simulation_mode").value
         )
         self.publish_rate_hz = float(
             self.get_parameter("publish_rate_hz").value
@@ -134,9 +126,6 @@ class MotionLinkBridge(Node):
 
         self.target_publisher = self.create_publisher(
             PoseStamped, f"{self.topic_prefix}/target_pose", 10
-        )
-        self.keyboard_publisher = self.create_publisher(
-            Int32MultiArray, "/arm_keyboard_state", 10
         )
         self.create_subscription(
             PoseStamped,
@@ -170,8 +159,6 @@ class MotionLinkBridge(Node):
         self._ik_error = ""
         self._connected = False
         self._last_connect_error = ""
-        self._controller_active = False
-        self._last_controller_at = -math.inf
 
         self.create_timer(1.0 / self.publish_rate_hz, self._publish_target)
         self._thread = threading.Thread(
@@ -204,13 +191,12 @@ class MotionLinkBridge(Node):
             self._current_rotation = rotation
 
     def _joint_callback(self, message):
-        state = extract_named_arm_joint_state(message, self.robot_model)
-        if state is None:
+        expected = 7 if self.robot_model == "nero" else 6
+        values = np.asarray(message.position[:expected], dtype=float)
+        if values.shape != (expected,) or not np.all(np.isfinite(values)):
             return
         with self._lock:
-            self._joint_degrees = np.degrees(
-                state["positions"]
-            ).tolist()
+            self._joint_degrees = np.degrees(values).tolist()
             self._joint_state_at = time.monotonic()
 
     def _ik_status_callback(self, message):
@@ -249,52 +235,12 @@ class MotionLinkBridge(Node):
             self._latest_sample_at = time.monotonic()
             self._last_sequence = sequence
 
-    def _accept_controller_message(self, message):
-        # Monitoring mode must never become a second command source. This
-        # check deliberately happens before parsing so a read-only bridge
-        # cannot publish even a key-release frame onto the control topic.
-        if not self.enable_commands:
-            return
-        if message.get("type") != "controller":
-            return
-        try:
-            keys = sanitize_controller_keys(message.get("keys"))
-        except ValueError:
-            return
-        active = any(keys)
-        with self._lock:
-            if active:
-                self._clear_reference_locked()
-            self._controller_active = active
-            self._last_controller_at = time.monotonic()
-        command = Int32MultiArray()
-        command.data = keys
-        self.keyboard_publisher.publish(command)
-
-    def _release_controller(self):
-        """Release virtual keys only when this bridge owns command input."""
-        if not self.enable_commands:
-            return
-        released = Int32MultiArray()
-        released.data = [0] * KEY_COUNT
-        try:
-            self.keyboard_publisher.publish(released)
-        except Exception:
-            # ROS may invalidate the global context before the worker thread
-            # observes shutdown. There is no live subscriber at that point.
-            pass
-
     def _publish_target(self):
         if not self.enable_commands:
             return
         now = time.monotonic()
         with self._lock:
             if (
-                (
-                    self._controller_active
-                    and now - self._last_controller_at <= 0.3
-                )
-                or
                 self._latest_sample is None
                 or self._current_position is None
                 or now - self._latest_sample_at > self.sample_timeout
@@ -355,10 +301,7 @@ class MotionLinkBridge(Node):
                 ),
                 "endEffector": self.end_effector,
                 "gripper": self.end_effector == "gripper",
-                "mode": (
-                    "SIMULATION" if self.simulation_mode else "HARDWARE"
-                ),
-                "commandsEnabled": self.enable_commands,
+                "mode": "PHONE" if self.enable_commands else "MONITOR",
                 "joints": joints if recent else [],
                 "errors": errors,
             },
@@ -399,7 +342,6 @@ class MotionLinkBridge(Node):
                     except (TypeError, ValueError):
                         continue
                     self._accept_sensor_message(message)
-                    self._accept_controller_message(message)
             except Exception as error:
                 detail = str(error)
                 with self._lock:
@@ -414,7 +356,6 @@ class MotionLinkBridge(Node):
                     )
                 self._stop.wait(1.0)
             finally:
-                self._release_controller()
                 if connection is not None:
                     connection.close()
                 with self._lock:

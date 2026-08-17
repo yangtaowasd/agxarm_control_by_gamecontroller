@@ -24,7 +24,6 @@ from armbycontroller.ik.core import resolve_firmware_name
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import rotation_matrix_to_quaternion
 from armbycontroller.ik.core import set_joint_acceleration_limits
-from armbycontroller.model_profiles import get_arm_profile
 
 
 class PoseController(Node):
@@ -34,11 +33,7 @@ class PoseController(Node):
         super().__init__("pose_controller")
 
         self.declare_parameter("robot_model", "nero")
-        declared_model = str(
-            self.get_parameter("robot_model").value
-        ).lower()
-        default_profile = get_arm_profile(declared_model)
-        self.declare_parameter("topic_prefix", default_profile.topic_prefix)
+        self.declare_parameter("topic_prefix", "/nero")
         self.declare_parameter("target_pose_topic", "")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
@@ -46,12 +41,11 @@ class PoseController(Node):
         self.declare_parameter("firmware_probe_poll_period", 0.1)
         self.declare_parameter("firmware_reconnect_delay", 0.5)
         self.declare_parameter("base_frame", "base_link")
-        self.declare_parameter("tip_link", default_profile.tip_link)
+        self.declare_parameter("tip_link", "link7")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("simulation_mode", False)
         self.declare_parameter(
-            "initial_joint_positions",
-            list(default_profile.initial_joint_positions),
+            "initial_joint_positions", [0.0, 1.2, 0.0, 0.8, 0.0, 0.0, 0.0]
         )
         self.declare_parameter("state_period", 0.05)
         self.declare_parameter("execute_motion", False)
@@ -73,16 +67,17 @@ class PoseController(Node):
         self.declare_parameter("valid_history_size", 10)
         self.declare_parameter("recovery_pause", 2.0)
         self.declare_parameter("workspace_limit_enabled", True)
-        self.declare_parameter("robot_min_reach", default_profile.min_reach)
-        self.declare_parameter("robot_max_reach", default_profile.max_reach)
+        self.declare_parameter("robot_min_reach", 0.1447354)
+        self.declare_parameter("robot_max_reach", 0.7374482)
         self.declare_parameter("workspace_inner_margin", 0.05)
         self.declare_parameter("workspace_outer_margin", 0.10)
 
         self.robot_model = str(
             self.get_parameter("robot_model").value
         ).lower()
-        self.model_profile = get_arm_profile(self.robot_model)
-        self.joint_count = self.model_profile.joint_count
+        if self.robot_model not in ("nero", "piper_l"):
+            raise ValueError("robot_model must be nero or piper_l")
+        self.joint_count = 7 if self.robot_model == "nero" else 6
         prefix = str(self.get_parameter("topic_prefix").value).strip("/")
         self.topic_prefix = f"/{prefix}" if prefix else ""
         configured_target_topic = str(
