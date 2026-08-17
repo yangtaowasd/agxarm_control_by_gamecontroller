@@ -66,6 +66,16 @@ def _nodes(context):
         "simulation_mode": simulation_mode,
         "execute_motion": execute_motion,
         "can_interface": LaunchConfiguration("can_interface"),
+        "firmware": LaunchConfiguration("firmware"),
+        "firmware_probe_timeout": LaunchConfiguration(
+            "firmware_probe_timeout"
+        ),
+        "firmware_probe_poll_period": LaunchConfiguration(
+            "firmware_probe_poll_period"
+        ),
+        "firmware_reconnect_delay": LaunchConfiguration(
+            "firmware_reconnect_delay"
+        ),
         # The publisher remains 30 Hz. A 30 ms acceptance gate leaves
         # scheduler jitter below the nominal 33.3 ms sample interval.
         "command_period": 0.03,
@@ -111,6 +121,16 @@ def generate_launch_description():
             "server_url", default_value="http://127.0.0.1:8080"
         ),
         DeclareLaunchArgument("can_interface", default_value="can0"),
+        DeclareLaunchArgument("firmware", default_value="auto"),
+        DeclareLaunchArgument(
+            "firmware_probe_timeout", default_value="5.0"
+        ),
+        DeclareLaunchArgument(
+            "firmware_probe_poll_period", default_value="0.1"
+        ),
+        DeclareLaunchArgument(
+            "firmware_reconnect_delay", default_value="0.5"
+        ),
         DeclareLaunchArgument("simulation_mode", default_value="true"),
         DeclareLaunchArgument("execute_motion", default_value="false"),
         DeclareLaunchArgument("enable_commands", default_value="false"),

@@ -36,7 +36,7 @@ TOOL_URDF_FILENAMES = {
 
 
 def resolve_firmware_name(robot_model, requested_firmware):
-    """Resolve ``auto`` to the firmware verified on the project hardware."""
+    """Resolve the configured dry-run or pre-detection fallback profile."""
     requested = str(requested_firmware).lower()
     if requested != "auto":
         return requested

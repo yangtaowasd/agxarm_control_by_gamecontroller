@@ -40,6 +40,7 @@ from armbycontroller.control import PositionCommand
 from armbycontroller.control import bounded_model_feedforward as _bounded_model
 from armbycontroller.control import control_sample
 from armbycontroller.control import limit_mit_combined_torque as _limit_mit
+from armbycontroller.hardware import connect_arm_two_stage
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
@@ -429,6 +430,9 @@ class ArmKeyboardController(Node):
         self.declare_parameter("keyboard_topic", "/arm_keyboard_state")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
+        self.declare_parameter("firmware_probe_timeout", 5.0)
+        self.declare_parameter("firmware_probe_poll_period", 0.1)
+        self.declare_parameter("firmware_reconnect_delay", 0.5)
         self.declare_parameter("nero_mount", "")
         self.declare_parameter("tool_configuration", "auto")
         self.declare_parameter("nero_velocity_estimation_enabled", True)
@@ -513,6 +517,16 @@ class ArmKeyboardController(Node):
             scalar_or_array,
         )
         self.declare_parameter(
+            "cartesian_impedance_joint_posture_stiffness",
+            [0.0],
+            scalar_or_array,
+        )
+        self.declare_parameter(
+            "cartesian_impedance_joint_posture_damping",
+            [0.0],
+            scalar_or_array,
+        )
+        self.declare_parameter(
             "cartesian_impedance_torque_limit", [8.0], scalar_or_array
         )
         self.declare_parameter(
@@ -567,8 +581,20 @@ class ArmKeyboardController(Node):
         self.joint_count = self.profile["joint_count"]
         self.keyboard_topic = str(self.get_parameter("keyboard_topic").value)
         self.can_interface = str(self.get_parameter("can_interface").value)
+        self.requested_firmware_name = str(
+            self.get_parameter("firmware").value
+        ).lower()
         self.firmware_name = resolve_firmware_name(
-            self.robot_model, self.get_parameter("firmware").value
+            self.robot_model, self.requested_firmware_name
+        )
+        self.firmware_probe_timeout = float(
+            self.get_parameter("firmware_probe_timeout").value
+        )
+        self.firmware_probe_poll_period = float(
+            self.get_parameter("firmware_probe_poll_period").value
+        )
+        self.firmware_reconnect_delay = float(
+            self.get_parameter("firmware_reconnect_delay").value
         )
         self.nero_mount = str(
             self.get_parameter("nero_mount").value
@@ -758,6 +784,26 @@ class ArmKeyboardController(Node):
             ),
             dtype=float,
         )
+        self.cartesian_joint_posture_stiffness = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_joint_posture_stiffness"
+                ).value,
+                self.joint_count,
+                "cartesian_impedance_joint_posture_stiffness",
+            ),
+            dtype=float,
+        )
+        self.cartesian_joint_posture_damping = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_joint_posture_damping"
+                ).value,
+                self.joint_count,
+                "cartesian_impedance_joint_posture_damping",
+            ),
+            dtype=float,
+        )
         self.cartesian_torque_limit = np.asarray(
             expand_joint_values(
                 self.get_parameter(
@@ -861,6 +907,25 @@ class ArmKeyboardController(Node):
             raise ValueError("joint_acc_timeout must be > 0")
         if self.position_mode_timeout <= 0.0:
             raise ValueError("position_mode_timeout must be > 0")
+        if (
+            not math.isfinite(self.firmware_probe_timeout)
+            or self.firmware_probe_timeout <= 0.0
+        ):
+            raise ValueError("firmware_probe_timeout must be finite and > 0")
+        if (
+            not math.isfinite(self.firmware_probe_poll_period)
+            or self.firmware_probe_poll_period < 0.0
+        ):
+            raise ValueError(
+                "firmware_probe_poll_period must be finite and >= 0"
+            )
+        if (
+            not math.isfinite(self.firmware_reconnect_delay)
+            or self.firmware_reconnect_delay < 0.0
+        ):
+            raise ValueError(
+                "firmware_reconnect_delay must be finite and >= 0"
+            )
         if self.cartesian_step <= 0.0:
             raise ValueError("cartesian_step must be > 0")
         if self.orientation_step_rad <= 0.0:
@@ -918,9 +983,12 @@ class ArmKeyboardController(Node):
             or np.any(self.cartesian_damping < 0.0)
             or np.any(self.cartesian_nullspace_stiffness < 0.0)
             or np.any(self.cartesian_nullspace_damping < 0.0)
+            or np.any(self.cartesian_joint_posture_stiffness < 0.0)
+            or np.any(self.cartesian_joint_posture_damping < 0.0)
         ):
             raise ValueError(
-                "Cartesian and nullspace gains must be nonnegative"
+                "Cartesian, nullspace, and joint-posture gains must be "
+                "nonnegative"
             )
         if (
             not np.all(np.isfinite(self.cartesian_torque_limit))
@@ -1145,6 +1213,12 @@ class ArmKeyboardController(Node):
                 nullspace_enabled=(
                     getattr(self, "robot_model", "piper_l") == "nero"
                 ),
+                joint_posture_stiffness=getattr(
+                    self, "cartesian_joint_posture_stiffness", None
+                ),
+                joint_posture_damping=getattr(
+                    self, "cartesian_joint_posture_damping", None
+                ),
                 model_scale=getattr(
                     self,
                     "cartesian_model_scale",
@@ -1295,16 +1369,17 @@ class ArmKeyboardController(Node):
         )
 
     def connect_arm(self):
-        config = create_agx_arm_config(
-            robot=self.profile["arm_model"],
-            firmeware_version=self.firmware,
-            interface="socketcan",
-            channel=self.can_interface,
-        )
-        self.arm = AgxArmFactory.create_arm(config)
-        self.arm.set_joint_limits_enabled(True)
+        self.device_firmware_info = {}
 
         if not self.execute_motion:
+            config = create_agx_arm_config(
+                robot=self.profile["arm_model"],
+                firmeware_version=self.firmware,
+                interface="socketcan",
+                channel=self.can_interface,
+            )
+            self.arm = AgxArmFactory.create_arm(config)
+            self.arm.set_joint_limits_enabled(True)
             self.get_logger().warning(
                 f"dry-run mode: {self.robot_model} commands are disabled"
             )
@@ -1312,20 +1387,36 @@ class ArmKeyboardController(Node):
             return
 
         try:
-            self.arm.connect()
+            connection = connect_arm_two_stage(
+                robot_model=self.robot_model,
+                arm_model=self.profile["arm_model"],
+                firmware_profiles=self.profile["firmwares"],
+                can_interface=self.can_interface,
+                probe_timeout=self.firmware_probe_timeout,
+                probe_poll_period=self.firmware_probe_poll_period,
+                reconnect_delay=self.firmware_reconnect_delay,
+                report=self.get_logger().info,
+            )
+            self.arm = connection.arm
+            self.device_firmware_info = connection.firmware_info
+            detected_name = connection.firmware_profile
+            if (
+                self.requested_firmware_name != "auto"
+                and detected_name != self.firmware_name
+            ):
+                self.get_logger().warning(
+                    f"configured firmware {self.firmware_name} differs from "
+                    f"detected {detected_name}; using detected profile"
+                )
+            self.firmware_name = detected_name
+            self.firmware = self.profile["firmwares"][detected_name]
+            self.arm.set_joint_limits_enabled(True)
             self.arm_connected = True
             self.get_logger().info(
                 f"connected {self.robot_model} on {self.can_interface} "
-                f"with firmware profile {self.firmware_name}"
+                f"with detected firmware profile {self.firmware_name}; "
+                f"saved device data: {self.device_firmware_info}"
             )
-            try:
-                firmware = self.arm.get_firmware(
-                    timeout=1.0, min_interval=0.0
-                )
-                if firmware:
-                    self.get_logger().info(f"device firmware: {firmware}")
-            except Exception as exc:
-                self.get_logger().warning(f"firmware query failed: {exc}")
             if self.arm_reports_emergency_stop():
                 if not self.reset_emergency_stop_on_start:
                     self.get_logger().error(
@@ -2172,21 +2263,28 @@ class ArmKeyboardController(Node):
                 "Cartesian MIT absolute torque limit active: raw=%s, "
                 "sent=%s N·m"
                 % (
-                    np.round(raw.command_torque, 3).tolist(),
+                    np.round(
+                        result.signals["raw_command_torque"], 3
+                    ).tolist(),
                     np.round(command_torque, 3).tolist(),
                 ),
                 throttle_duration_sec=1.0,
             )
         self.get_logger().info(
-            "Cartesian MIT error=%s wrench=%s task=%s null=%s model=%s "
-            "total=%s sent=%s N·m"
+            "Cartesian MIT error=%s wrench=%s task=%s null=%s posture=%s "
+            "model=%s total=%s sent=%s N·m"
             % (
                 np.round(raw.pose_error, 4).tolist(),
                 np.round(raw.commanded_wrench, 3).tolist(),
                 np.round(raw.task_torque, 3).tolist(),
                 np.round(raw.nullspace_torque, 3).tolist(),
+                np.round(
+                    result.signals["joint_posture_torque"], 3
+                ).tolist(),
                 np.round(raw.model_torque, 3).tolist(),
-                np.round(raw.command_torque, 3).tolist(),
+                np.round(
+                    result.signals["raw_command_torque"], 3
+                ).tolist(),
                 np.round(command_torque, 3).tolist(),
             ),
             throttle_duration_sec=2.0,

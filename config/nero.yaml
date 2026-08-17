@@ -10,19 +10,26 @@ arm_keyboard_controller:
     velocity_filter_time_constant: 0.03  # s
 
     mit_kp: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-    mit_kd: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+    mit_kd: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
     mit_feedforward: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     mit_gravity_compensation_enabled: true
     mit_gravity_scale: 1.0
     mit_gravity_torque_limit: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
 
-    cartesian_impedance_rotation_stiffness: 0.4
-    cartesian_impedance_base_z_rotation_stiffness: 4.0
-    cartesian_impedance_translation_stiffness: 10.0
-    cartesian_impedance_rotation_damping: 0.08
-    cartesian_impedance_translation_damping: 0.8
+    # Nero uses isotropic task-space rotation stiffness.  The stronger
+    # base-Z return is a Piper-L-only tuning choice.
+    cartesian_impedance_rotation_stiffness: 1.9
+    cartesian_impedance_base_z_rotation_stiffness: 1.9
+    cartesian_impedance_translation_stiffness: 70.0
+    cartesian_impedance_rotation_damping: 0.24
+    cartesian_impedance_translation_damping: 1.4
     cartesian_impedance_nullspace_stiffness: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
     cartesian_impedance_nullspace_damping: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+
+    # Low-gain joint-selective outer-loop posture impedance. It intentionally
+    # bypasses the nullspace projector to balance J2/J3/J4 hardware feel.
+    cartesian_impedance_joint_posture_stiffness: [0.0, 0.5, 0.5, 0.6, 0.0, 0.0, 0.0]
+    cartesian_impedance_joint_posture_damping: [0.0, 0.08, 0.08, 0.12, 0.0, 0.0, 0.0]
     cartesian_impedance_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
 
     # J1...J7 model multiplier. J4 is the fourth value.

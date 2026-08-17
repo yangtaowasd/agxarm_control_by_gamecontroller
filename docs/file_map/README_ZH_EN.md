@@ -13,7 +13,8 @@ one.
 1. [控制与实验 / Control and experiments](CONTROL_AND_EXPERIMENT_ZH_EN.md)
 2. [模型与数学 / Model and mathematics](MODEL_AND_MATH_ZH_EN.md)
 3. [交互工具 / Interaction tools](INTERACTION_TOOLS_ZH_EN.md)
-4. [构建、启动、资源与测试 / Build, launch, assets, and tests](BUILD_LAUNCH_ASSETS_TESTS_ZH_EN.md)
+4. [硬件连接 / Hardware connection](HARDWARE_CONNECTION_ZH_EN.md)
+5. [构建、启动、资源与测试 / Build, launch, assets, and tests](BUILD_LAUNCH_ASSETS_TESTS_ZH_EN.md)
 
 ## 阅读顺序 / Reading order
 
@@ -21,4 +22,5 @@ one.
 读交互工具；准备构建、启动或扩展机器人资源时读最后一册。 / For a new control
 algorithm, read control and experiments first, then model and mathematics. Read
 interaction tools for keyboard, phone, or standalone pose integration, and the
-last document for build, launch, and robot-resource work.
+hardware-connection guide for CAN startup. Read the last document for build,
+launch, and robot-resource work.

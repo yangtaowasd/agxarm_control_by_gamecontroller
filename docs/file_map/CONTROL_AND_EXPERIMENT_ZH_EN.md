@@ -11,7 +11,7 @@ they contain no ROS or CAN calls.
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
 | `armbycontroller/control/core.py` | `ControlState`、`ControlReference`、`ControlInput`、命令类型、`ControlResult`、`ControllerAdapter` interface、`ControlEngine` 和稳定控制样本 schema / normalized types, controller interface, engine, and stable sample schema |
-| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗和当前位姿导纳 adapter；力矩限制也集中在这里 / joint MIT, Cartesian impedance, current pose-admittance adapters, and centralized torque limiting |
+| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗、Nero J2/J3/J4 非投影混合姿态项和当前位姿导纳 adapter；力矩限制也集中在这里 / joint MIT, Cartesian impedance, Nero's unprojected hybrid J2/J3/J4-posture term, current pose-admittance adapters, and centralized torque limiting |
 | `armbycontroller/control/__init__.py` | 控制 module 的稳定导出面 / stable exports for the control module |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、指标、sink interface、内存与 JSONL adapter / experiment lifecycle, metrics, sink interface, in-memory and JSONL adapters |
 | `armbycontroller/experiment/__init__.py` | 实验 module 的稳定导出面 / stable exports for the experiment module |

@@ -50,6 +50,9 @@ ROBOT_CONFIG_FILENAMES = {
 }
 CONFIGURED_PARAMETERS = {
     "firmware",
+    "firmware_probe_timeout",
+    "firmware_probe_poll_period",
+    "firmware_reconnect_delay",
     "impedance_enabled",
     "impedance_backend",
     "control_rate",
@@ -67,6 +70,8 @@ CONFIGURED_PARAMETERS = {
     "cartesian_impedance_translation_damping",
     "cartesian_impedance_nullspace_stiffness",
     "cartesian_impedance_nullspace_damping",
+    "cartesian_impedance_joint_posture_stiffness",
+    "cartesian_impedance_joint_posture_damping",
     "cartesian_impedance_torque_limit",
     "cartesian_impedance_model_scale",
     "admittance_virtual_mass",

@@ -14,6 +14,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
+from armbycontroller.hardware import connect_arm_two_stage
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -36,6 +37,9 @@ class PoseController(Node):
         self.declare_parameter("target_pose_topic", "")
         self.declare_parameter("can_interface", "can0")
         self.declare_parameter("firmware", "auto")
+        self.declare_parameter("firmware_probe_timeout", 5.0)
+        self.declare_parameter("firmware_probe_poll_period", 0.1)
+        self.declare_parameter("firmware_reconnect_delay", 0.5)
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("tip_link", "link7")
         self.declare_parameter("urdf_path", "")
@@ -85,8 +89,20 @@ class PoseController(Node):
             else f"{self.topic_prefix}/target_pose"
         )
         self.can_interface = str(self.get_parameter("can_interface").value)
+        self.requested_firmware = str(
+            self.get_parameter("firmware").value
+        ).lower()
         self.firmware = resolve_firmware_name(
-            self.robot_model, self.get_parameter("firmware").value
+            self.robot_model, self.requested_firmware
+        )
+        self.firmware_probe_timeout = float(
+            self.get_parameter("firmware_probe_timeout").value
+        )
+        self.firmware_probe_poll_period = float(
+            self.get_parameter("firmware_probe_poll_period").value
+        )
+        self.firmware_reconnect_delay = float(
+            self.get_parameter("firmware_reconnect_delay").value
         )
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tip_link = str(self.get_parameter("tip_link").value)
@@ -165,6 +181,7 @@ class PoseController(Node):
         self._validate_parameters()
 
         self.robot = None
+        self.device_firmware_info = {}
         self.ik_solver = None
         self.ik_engine = None
         self.simulated_target_joints = self.simulated_joints.copy()
@@ -226,6 +243,7 @@ class PoseController(Node):
             raise ValueError("speed_percent must be in [1, 100]")
         positive = {
             "enable_timeout": self.enable_timeout,
+            "firmware_probe_timeout": self.firmware_probe_timeout,
             "command_period": self.command_period,
             "joint_max_acceleration": self.joint_max_acceleration,
             "joint_max_velocity": self.joint_max_velocity,
@@ -241,6 +259,20 @@ class PoseController(Node):
                 raise ValueError(
                     f"{name} must be finite and greater than zero"
                 )
+        if (
+            not math.isfinite(self.firmware_probe_poll_period)
+            or self.firmware_probe_poll_period < 0.0
+        ):
+            raise ValueError(
+                "firmware_probe_poll_period must be finite and nonnegative"
+            )
+        if (
+            not math.isfinite(self.firmware_reconnect_delay)
+            or self.firmware_reconnect_delay < 0.0
+        ):
+            raise ValueError(
+                "firmware_reconnect_delay must be finite and nonnegative"
+            )
         if (
             self.simulated_joints.shape != (self.joint_count,)
             or not np.all(np.isfinite(self.simulated_joints))
@@ -294,8 +326,7 @@ class PoseController(Node):
         )
 
     def _connect_robot(self):
-        from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
-        from pyAgxArm import create_agx_arm_config
+        from pyAgxArm import ArmModel, NeroFW, PiperFW
 
         if self.robot_model == "nero":
             arm_model = ArmModel.NERO
@@ -317,18 +348,32 @@ class PoseController(Node):
             raise ValueError(
                 f"unsupported {self.robot_model} firmware: {self.firmware}"
             )
-        config = create_agx_arm_config(
-            robot=arm_model,
-            firmeware_version=firmware_map[self.firmware],
-            interface="socketcan",
-            channel=self.can_interface,
+        connection = connect_arm_two_stage(
+            robot_model=self.robot_model,
+            arm_model=arm_model,
+            firmware_profiles=firmware_map,
+            can_interface=self.can_interface,
+            probe_timeout=self.firmware_probe_timeout,
+            probe_poll_period=self.firmware_probe_poll_period,
+            reconnect_delay=self.firmware_reconnect_delay,
+            report=self.get_logger().info,
         )
-        self.robot = AgxArmFactory.create_arm(config)
-        self.robot.connect()
-        time.sleep(0.5)
+        self.robot = connection.arm
+        self.device_firmware_info = connection.firmware_info
+        detected_firmware = connection.firmware_profile
+        if (
+            self.requested_firmware != "auto"
+            and detected_firmware != self.firmware
+        ):
+            self.get_logger().warning(
+                f"configured firmware {self.firmware} differs from detected "
+                f"{detected_firmware}; using detected profile"
+            )
+        self.firmware = detected_firmware
         self.get_logger().info(
             f"connected to {self.robot_model} on {self.can_interface} "
-            f"({self.firmware})"
+            f"with detected profile {self.firmware}; saved device data: "
+            f"{self.device_firmware_info}"
         )
         if not self.execute_motion:
             return

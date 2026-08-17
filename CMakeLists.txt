@@ -95,6 +95,10 @@ if(BUILD_TESTING)
     test/test_experiment.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
+  ament_add_pytest_test(hardware_connection_test
+    test/test_hardware_connection.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
 endif()
 
 ament_package()

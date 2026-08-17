@@ -5,6 +5,9 @@ arm_keyboard_controller:
     mit_command_rate: 100.0   # Hz
     impedance_enabled: false
     impedance_backend: cartesian
+    firmware_probe_timeout: 5.0       # s; first/default connection
+    firmware_probe_poll_period: 0.1   # s
+    firmware_reconnect_delay: 0.5     # s; probe disconnect -> formal connect
 
 arm_momentum_observer:
   ros__parameters:

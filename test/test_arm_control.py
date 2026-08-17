@@ -85,6 +85,12 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert "cartesian_impedance_nullspace_damping" in (
         module.CONFIGURED_PARAMETERS
     )
+    assert "cartesian_impedance_joint_posture_stiffness" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "cartesian_impedance_joint_posture_damping" in (
+        module.CONFIGURED_PARAMETERS
+    )
     assert "cartesian_impedance_model_scale" not in module.COMMON
     assert module.COMMON["dynamics_state_topic"] == "/arm_dynamics_state"
     assert module.COMMON[
@@ -102,6 +108,9 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert "velocity_filter_time_constant" in (
         module.CONFIGURED_PARAMETERS
     )
+    assert "firmware_probe_timeout" in module.CONFIGURED_PARAMETERS
+    assert "firmware_probe_poll_period" in module.CONFIGURED_PARAMETERS
+    assert "firmware_reconnect_delay" in module.CONFIGURED_PARAMETERS
 
 
 def test_robot_configs_separate_nero_and_piper_parameters():
@@ -111,15 +120,31 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     piper = (config_root / "piper_l.yaml").read_text(encoding="utf-8")
 
     assert "control_rate: 100.0" in common
+    assert "firmware_probe_timeout: 5.0" in common
+    assert "firmware_probe_poll_period: 0.1" in common
+    assert "firmware_reconnect_delay: 0.5" in common
     assert "firmware:" not in common
     assert "nero_mount: side" in nero
     assert "tool_configuration: none" in nero
     assert "nero_velocity_estimation_enabled: true" in nero
     assert "admittance_virtual_mass" not in nero
+    assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
+    assert "cartesian_impedance_base_z_rotation_stiffness: 1.9" in nero
+    assert "cartesian_impedance_translation_stiffness: 70.0" in nero
+    assert "cartesian_impedance_rotation_damping: 0.24" in nero
+    assert "cartesian_impedance_translation_damping: 1.4" in nero
+    assert "cartesian_impedance_joint_posture_stiffness" in nero
+    assert "[0.0, 0.5, 0.5, 0.6, 0.0, 0.0, 0.0]" in nero
+    assert "cartesian_impedance_joint_posture_damping" in nero
+    assert "[0.0, 0.08, 0.08, 0.12, 0.0, 0.0, 0.0]" in nero
     assert "tool_configuration: gripper" in piper
     assert "nero_mount" not in piper
     assert "nero_velocity_estimation_enabled" not in piper
     assert "admittance_virtual_mass" in piper
+    assert "cartesian_impedance_rotation_stiffness: 0.4" in piper
+    assert "cartesian_impedance_base_z_rotation_stiffness: 4.0" in piper
+    assert "cartesian_impedance_joint_posture_stiffness" not in piper
+    assert "cartesian_impedance_joint_posture_damping" not in piper
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in nero
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in piper
 
@@ -345,6 +370,70 @@ def test_urdf_gravity_model_includes_all_downstream_masses(tmp_path):
     mass_matrix = model.mass_matrix([0.2, -0.3])
     assert mass_matrix == pytest.approx(mass_matrix.T)
     assert np.all(np.linalg.eigvalsh(mass_matrix) > 0.0)
+
+
+def test_mass_matrix_uses_one_composite_rigid_body_pass(
+    tmp_path, monkeypatch
+):
+    urdf = _write_test_urdf(
+        tmp_path,
+        """<robot name="two_link_crba">
+        <link name="base"/>
+        <link name="middle"><inertial><origin xyz="0.4 0 0"/>
+          <mass value="1.2"/><inertia ixx="0.2" ixy="0" ixz="0"
+          iyy="0.3" iyz="0" izz="0.4"/></inertial></link>
+        <link name="tip"><inertial><origin xyz="0.2 0 0"/>
+          <mass value="0.7"/><inertia ixx="0.1" ixy="0" ixz="0"
+          iyy="0.15" iyz="0" izz="0.2"/></inertial></link>
+        <joint name="joint1" type="revolute"><parent link="base"/>
+          <child link="middle"/><axis xyz="0 1 0"/></joint>
+        <joint name="joint2" type="revolute"><origin xyz="0.8 0 0"/>
+          <parent link="middle"/><child link="tip"/><axis xyz="0 1 0"/>
+        </joint></robot>""",
+    )
+    model = UrdfScrewModel(urdf, "base", "tip", 2)
+    position = np.asarray([0.37, -0.21])
+    expected = mr.MassMatrix(
+        position,
+        model.mr_mlist,
+        model.mr_glist,
+        model.space_screws,
+    )
+
+    def repeated_rnea_is_forbidden(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("mass_matrix must not call mr.MassMatrix")
+
+    monkeypatch.setattr(
+        "armbycontroller.modeling.screw_model.mr.MassMatrix",
+        repeated_rnea_is_forbidden,
+    )
+
+    assert model.mass_matrix(position) == pytest.approx(expected, abs=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "joint_count", "tip_link"),
+    [("nero", 7, "link7"), ("piper_l", 6, "link6")],
+)
+def test_composite_mass_matrix_matches_modern_robotics_reference(
+    model_name, joint_count, tip_link
+):
+    urdf = (
+        Path(__file__).resolve().parents[1]
+        / "agx_arm_urdf" / model_name / "urdf"
+        / f"{model_name}_description.urdf"
+    )
+    model = UrdfScrewModel(urdf, "base_link", tip_link, joint_count)
+    position = np.linspace(-0.31, 0.27, joint_count)
+    expected = mr.MassMatrix(
+        position,
+        model.mr_mlist,
+        model.mr_glist,
+        model.space_screws,
+    )
+
+    assert model.mass_matrix(position) == pytest.approx(expected, abs=1e-10)
 
 
 @pytest.mark.parametrize(
@@ -580,10 +669,129 @@ def test_shared_engine_rejects_workspace_before_calling_solver():
 LIMITS = [(-1.0, 1.0)] * 7
 
 
-def test_auto_firmware_matches_verified_hardware_versions():
+def test_auto_firmware_fallback_matches_verified_hardware_versions():
     assert resolve_firmware_name("nero", "auto") == "v112"
     assert resolve_firmware_name("piper_l", "auto") == "v188"
     assert resolve_firmware_name("piper_l", "v189") == "v189"
+
+
+def test_keyboard_hardware_connection_uses_saved_probe_result(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.joint_limits_enabled = False
+
+        def set_joint_limits_enabled(self, enabled):
+            self.joint_limits_enabled = enabled
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    captured = {}
+    formal_arm = FakeArm()
+
+    def fake_two_stage(**values):
+        captured.update(values)
+        return SimpleNamespace(
+            arm=formal_arm,
+            firmware_info={"software_version": "1.11"},
+            firmware_profile="v111",
+        )
+
+    monkeypatch.setattr(
+        "armbycontroller.ros.keyboard_controller_node.connect_arm_two_stage",
+        fake_two_stage,
+    )
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    controller = object.__new__(ArmKeyboardController)
+    controller.robot_model = "nero"
+    controller.profile = {
+        "arm_model": "nero-sdk",
+        "firmwares": {"default": "default", "v111": "v111"},
+    }
+    controller.can_interface = "can-test"
+    controller.firmware_probe_timeout = 4.0
+    controller.firmware_probe_poll_period = 0.2
+    controller.firmware_reconnect_delay = 0.5
+    controller.requested_firmware_name = "auto"
+    controller.firmware_name = "v112"
+    controller.firmware = "v112"
+    controller.execute_motion = True
+    controller.arm_connected = False
+    controller.arm_ready = False
+    controller.arm_reports_emergency_stop = lambda: False
+    controller.enable_arm = lambda: False
+
+    controller.connect_arm()
+
+    assert captured["robot_model"] == "nero"
+    assert captured["probe_timeout"] == pytest.approx(4.0)
+    assert captured["probe_poll_period"] == pytest.approx(0.2)
+    assert captured["reconnect_delay"] == pytest.approx(0.5)
+    assert controller.arm is formal_arm
+    assert controller.arm_connected
+    assert formal_arm.joint_limits_enabled
+    assert controller.device_firmware_info == {"software_version": "1.11"}
+    assert controller.firmware_name == "v111"
+    assert controller.firmware == "v111"
+
+
+def test_pose_hardware_connection_uses_saved_probe_result(monkeypatch):
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+    captured = {}
+    formal_arm = object()
+
+    def fake_two_stage(**values):
+        captured.update(values)
+        return SimpleNamespace(
+            arm=formal_arm,
+            firmware_info={"software_version": "S-V1.8-8"},
+            firmware_profile="v188",
+        )
+
+    monkeypatch.setattr(
+        "armbycontroller.pose_controller.connect_arm_two_stage",
+        fake_two_stage,
+    )
+    monkeypatch.setattr(
+        PoseController, "get_logger", lambda self: FakeLogger()
+    )
+    monkeypatch.setattr("armbycontroller.pose_controller.time.sleep", lambda _: None)
+    controller = object.__new__(PoseController)
+    controller.robot_model = "piper_l"
+    controller.can_interface = "can-test"
+    controller.firmware_probe_timeout = 3.0
+    controller.firmware_probe_poll_period = 0.05
+    controller.firmware_reconnect_delay = 0.5
+    controller.requested_firmware = "auto"
+    controller.firmware = "v188"
+    controller.execute_motion = False
+
+    controller._connect_robot()
+
+    assert captured["robot_model"] == "piper_l"
+    assert captured["probe_timeout"] == pytest.approx(3.0)
+    assert captured["probe_poll_period"] == pytest.approx(0.05)
+    assert captured["reconnect_delay"] == pytest.approx(0.5)
+    assert controller.robot is formal_arm
+    assert controller.device_firmware_info == {
+        "software_version": "S-V1.8-8"
+    }
+    assert controller.firmware == "v188"
 
 
 def keys(*pressed):

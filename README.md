@@ -25,8 +25,9 @@ tau_task = Jg^T Fc
 tau_0 = K0 (q0-q) + D0 (dq0-dq)
 N_tau = I - Jg^T (Jg M^-1 Jg^T)^+ Jg M^-1
 tau_null = N_tau tau_0                 # Nero 7-axis only
+tau_posture = Kp_j (q_ref-q) + Dp_j (dq_ref-dq)
 tau_model = model_scale .* (C(q,qdot)qdot + g(q))
-tau_cmd = tau_task + tau_null + tau_model
+tau_cmd = tau_task + tau_null + tau_posture + tau_model
 ```
 
 The Cartesian-impedance orientation error is an SO(3) logarithmic rotation
@@ -49,10 +50,13 @@ error, and FK verification reuse that module. Quaternion conversion remains
 at ROS message seams, while URDF and phone RPY values remain input formats.
 
 The rotational stiffness about base-frame Z is independently configurable as
-`cartesian_impedance_base_z_rotation_stiffness` (default `4.0 N.m/rad`). The
-shared `cartesian_impedance_rotation_stiffness` value (default `0.4 N.m/rad`)
-continues to set base-frame X/Y rotation. This strengthens the principal J1
-return direction without raising all wrist rotation axes together.
+`cartesian_impedance_base_z_rotation_stiffness`. Piper-L uses its dedicated
+`[0.4, 0.4, 4.0] N.m/rad` rotational tuning to strengthen base-Z return
+without raising all wrist rotation axes together. Nero deliberately disables
+that Piper-L-specific reinforcement and uses isotropic
+`[1.9, 1.9, 1.9] N.m/rad` task-space rotation stiffness. Its translation
+stiffness is `70 N/m`; rotational and translational damping are respectively
+`0.24 N.m.s/rad` and `1.4 N.s/m`.
 
 Nero's seventh joint is controlled by a dynamically consistent nullspace
 impedance. Its defaults are `0.4 N.m/rad` stiffness and `0.1 N.m.s/rad`
@@ -61,11 +65,23 @@ damping. The torque projector uses the URDF mass matrix and keeps
 does not intentionally move the Cartesian task. This term is disabled for the
 six-axis Piper-L.
 
+Pure Cartesian impedance restores tool pose but does not guarantee an
+independent spring at every joint. In the recorded Nero configurations, J4 is
+effectively absent from the one-dimensional kinematic nullspace, so projected
+nullspace gains cannot give it a joint spring. Nero therefore adds a narrowly
+configured, unprojected outer-loop posture term on J2/J3/J4. Stiffness is
+`[0, 0.5, 0.5, 0.6, 0, 0, 0] N.m/rad` and damping is
+`[0, 0.08, 0.08, 0.12, 0, 0, 0] N.m.s/rad`. This hybrid term intentionally
+changes the Cartesian task and is disabled by default for Piper-L. It is
+computed in software and sent through `tau_ff`; firmware MIT `kp=kd=0`
+remains unchanged.
+
 `model_scale` is a scalar or per-joint vector in `[0, 1]`; it is independent
-from task/nullspace gains and defaults to `1.0`. `tau_cmd` is the immediate,
-stateless equation result. The MIT adapter applies only a per-joint absolute
-limit (±8 N·m by default, including model support). It does not apply a
-previous-cycle torque-rate limiter (`delta_tau` or `delta_tau_max`).
+from task/nullspace/posture gains and defaults to `1.0`. `tau_cmd` is the
+immediate, stateless equation result. The MIT adapter applies only a per-joint
+absolute limit (±8 N·m by default, including model support and posture
+torque). It does not apply a previous-cycle torque-rate limiter (`delta_tau`
+or `delta_tau_max`).
 
 ## Passive momentum observer and Piper-L admittance
 
@@ -184,6 +200,13 @@ validated in `nero_screw_dynamics`. Nero URDF/Xacro files are resolved from
 that package first. Piper-L remains supported through the model bundled in
 `armbycontroller`. Both models use the same screw-theory IK/FK and
 inverse-dynamics module; `pytracik` is no longer required.
+The dynamically consistent nullspace mass matrix uses one CRBA tree sweep
+instead of seven repeated inverse-dynamics calls on Nero. Cartesian impedance
+also caches target FK/Jacobian while the joint reference is unchanged; current
+measured-state kinematics and dynamics are never cached. On the captured
+1,218-sample Nero trace, these changes reduced offline pure-control replay from
+about 9.72 ms to about 2.4 ms per cycle without changing recorded torques
+beyond `1.8e-11 N.m`.
 Internal callers use `create_screw_solver`, `UrdfScrewModel`, and
 `project_gravity_vector` directly; the old TRAC-IK and gravity-model
 compatibility aliases have been removed.
@@ -212,11 +235,12 @@ and `ddq_des`; `P` and `I` are independent, so either order works.
 The Cartesian backend uses the SDK equation
 `τ_ref=Kp(q_des-q)+Kd(dq_des-dq)+τ_ff` with `Kp=0`, `Kd=0`,
 `p_des=q_measured`, `v_des=0`, and
-`τ_ff=clip(Jg.T Fc+tau_null+C(q,dq)dq+g(q), ±τ_limit)`. Thus the firmware does
-not add a second joint spring or damper. `tau_null` is nonzero only for Nero.
-A continuous joint reference supplies the target pose, target twist, and Nero
-nullspace posture through FK/Jacobian; this reference continuity is not a
-torque-rate limiter.
+`τ_ff=clip(Jg.T Fc+tau_null+tau_posture+C(q,dq)dq+g(q), ±τ_limit)`. Thus the
+firmware does not add a second joint spring or damper. `tau_null` is nonzero
+only for Nero; the unprojected `tau_posture` is configured only on Nero
+J2/J3/J4. A continuous joint reference supplies the target pose, target twist,
+nullspace posture, and joint-posture reference; this reference continuity is
+not a torque-rate limiter.
 
 Piper-L kinematics and inverse dynamics both use
 `piper_l_with_gripper_description.xacro`. Accessory joints are fixed at their
@@ -234,11 +258,12 @@ joint impedance and its `mit_kp`, `mit_kd`, `mit_feedforward`, and
 `keyboard_control.launch.py` loads two ordered ROS parameter files:
 `config/common.yaml`, followed by exactly one robot profile,
 `config/nero.yaml` or `config/piper_l.yaml`. The common file contains only the
-shared controller/observer rates and default interaction backend. Firmware,
-tool, gravity/model compensation, joint gains, Cartesian gains, torque limits,
-trajectory limits, and observer tuning are explicit in each robot file.
-Piper-L admittance parameters exist only in `piper_l.yaml`; Nero velocity and
-nullspace parameters exist only in `nero.yaml`.
+shared controller/observer rates, default interaction backend, and firmware
+probe timing. Firmware configuration checks, tool, gravity/model compensation,
+joint gains, Cartesian gains, torque limits, trajectory limits, and observer
+tuning are explicit in each robot file.
+Piper-L admittance parameters exist only in `piper_l.yaml`; Nero velocity,
+nullspace, and joint-selective posture parameters exist only in `nero.yaml`.
 
 The Nero profile explicitly uses `nero_mount: side` and
 `tool_configuration: none`, so it loads the bare `nero_description.urdf`.
@@ -256,8 +281,12 @@ For Nero J1 through J7, use a seven-value
 guess a J4 value from motion drift alone. Removing the incorrectly modeled
 Revo2 removes about `1.57 N.m` from the previously reproduced J4 model torque
 at the logged pose. The latest hardware log reported software `1.11` while
-`firmware: auto` selects the verified `v112` profile, so confirm the device
-version and set `firmware: v111` only if that report is confirmed.
+real hardware now always uses two connections. A first SDK `default` instance
+reads and saves the complete firmware dictionary, then disconnects. After the
+shared `firmware_reconnect_delay` (default `0.5 s`), a distinct second instance
+is created with the detected profile (`1.11 -> v111` for Nero,
+`S-V1.8-8 -> v188` for Piper-L). The probe neither enables the arm nor sends
+motion. Failure to obtain or parse `software_version` aborts startup.
 
 Run Nero:
 
@@ -273,9 +302,10 @@ convention (`gravity_vector=[-g,0,0]`). Override it with
 `nero_mount:=horizontal` only when the base is on a horizontal surface
 (`gravity_vector=[0,0,-g]`). Left/right side-mount yaw does not change gravity
 in `base_link`. Nero `tool_configuration: none` loads the bare
-`nero_description.urdf`; no gripper or Revo2 mass/inertia is included. Press
-`I` to capture the current tool pose and nullspace posture before enabling
-Cartesian MIT.
+`nero_description.urdf`; no gripper or Revo2 mass/inertia is included. Nero
+also uses equal X/Y/Z rotational stiffness; the stronger base-Z setting is
+reserved for Piper-L. Press `I` to capture the current tool pose, nullspace
+posture, and J2/J3/J4 posture reference before enabling Cartesian MIT.
 
 Run Piper-L with the same keys:
 
@@ -320,9 +350,9 @@ joints, and forces them to zero strictly in joint order from 1 through the
 final joint. Each joint must reach zero before the next command is sent. Use
 `reset_emergency_stop_on_start:=false move_home_on_start:=false` to preserve
 the current state instead. Only use automatic homing when the complete path to
-zero is clear. `firmware:=auto` selects
-`v112` for Nero and `v188` for Piper-L; an explicit firmware argument still
-overrides it.
+zero is clear. `firmware:=auto` uses the two-stage hardware result. An explicit
+firmware argument is checked and reported, but the detected hardware profile
+wins for the formal connection; it remains the profile used by dry-run mode.
 If the arm reports a latched electronic emergency stop, normal startup refuses
 to move. After physically checking the arm, explicitly add
 `reset_emergency_stop_on_start:=true` to reset the controller before enabling.

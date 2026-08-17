@@ -28,6 +28,18 @@ strictly interlocked: `I` toggles impedance and `O` toggles admittance;
 entering either first exits the other, and both can never run together.
 Admittance currently supports Piper-L only.
 
+真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建只读探测
+实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
+`software_version` 选择 Nero/Piper-L 对应驱动 profile。探测实例断开后等待默认
+`0.5 s`，才创建全新的正式控制实例。
+探测阶段不会使能机械臂或发送运动命令。 / Real-hardware startup uses one
+two-stage connection for both arms. Stage one creates a read-only probe with
+the SDK `default` profile, connects, saves the complete firmware dictionary,
+and always disconnects. After a default `0.5 s` post-disconnect delay, stage
+two selects the Nero/Piper-L driver profile from the saved `software_version`
+and creates a distinct formal control instance.
+The probe never enables the arm or sends a motion command.
+
 ## 2. 心智模型 / Mental model
 
 关节阻抗把每个关节看成转动弹簧和阻尼器：
@@ -192,7 +204,8 @@ tau_raw   = ID(q, qdot, 0)
           = C(q, qdot) qdot + g(q)
 tau_model = s_model .* tau_raw
 
-tau_cmd = tau_task + tau_null + tau_model
+tau_posture = K_p (q_ref - q) + D_p (qdot_ref - qdot)
+tau_cmd = tau_task + tau_null + tau_posture + tau_model
 ```
 
 `s_model` 是 `[0,1]` 内的标量或逐关节向量，由
@@ -211,7 +224,7 @@ reference velocity and trajectory acceleration are not mixed into support.
 controller does not read the previous torque command and does not implement a
 `delta_tau`/`delta_tau_max` torque-rate limiter. The MIT adapter applies only a
 per-joint absolute limit, ±8 N·m by default, to the total that already includes
-model support.
+model support and optional joint-posture torque.
 
 ### 5.5 Nero 动力学一致零空间阻抗 / Nero dynamically consistent nullspace impedance
 
@@ -232,6 +245,17 @@ N_tau = I - J_g^T (J_g M^-1 J_g^T)^+ J_g M^-1
 tau_null = N_tau tau_0
 ```
 
+`M(q)` 使用一次复合刚体算法（CRBA）树回扫计算，不再通过每个单位关节加速度
+重复调用 RNEA。该实现与原 `modern_robotics.MassMatrix` 在 Nero/Piper-L 及附件
+模型上保持数值等价。保持关节参考不变时，controller adapter 复用参考位姿和参考
+Jacobian；实测状态的 FK、Jacobian、质量矩阵和逆动力学仍逐周期更新。 /
+`M(q)` is computed by one composite-rigid-body algorithm (CRBA) tree sweep
+instead of repeated RNEA calls for unit joint accelerations. It remains
+numerically equivalent to the former `modern_robotics.MassMatrix` path for
+Nero, Piper-L, and accessory models. While the joint reference is unchanged,
+the controller adapter reuses its reference pose and Jacobian; measured-state
+FK, Jacobian, mass matrix, and inverse dynamics still update every cycle.
+
 该投影满足 `J_g M^-1 tau_null = 0`（数值容差内），因此零空间恢复力矩局部不
 产生任务空间加速度。上标 `+` 是 Moore–Penrose 伪逆，仅用于任务惯量投影，不是
 用伪逆把 wrench 映射成任务力矩；任务项仍严格为 `J_g^T F_c`。Piper-L 为 6 轴，
@@ -243,7 +267,47 @@ is the Moore–Penrose pseudoinverse used only in the operational-inertia
 projector; it does not replace the strict task mapping `J_g^T F_c`. The term is
 disabled for six-axis Piper-L.
 
-### 5.6 与关节阻抗的局部等价 / Local joint-impedance equivalence
+### 5.6 Nero 关节选择性混合姿态阻抗 / Nero joint-selective hybrid posture impedance
+
+纯笛卡尔阻抗只保证末端位姿恢复，不保证每个关节都有独立弹簧。2026-08-17 的
+Nero 实机记录中，J4 的运动学零空间分量约为 `2e-8`，因此增加投影后的
+`cartesian_impedance_nullspace_stiffness[3]` 几乎不会产生 J4 力矩。Nero 在
+controller adapter 中额外计算一个未投影的低增益姿态项。2026-08-17 10:27 的
+实机记录与人工顺应性检查随后显示 J2/J3 略软、其他关节略硬，其中 J4 更明显：
+
+Pure Cartesian impedance restores tool pose but does not guarantee an
+independent spring at every joint. In the 2026-08-17 Nero hardware trace, the
+J4 component of the kinematic nullspace was about `2e-8`, so increasing the
+projected `cartesian_impedance_nullspace_stiffness[3]` produces essentially no
+J4 torque. The Nero controller adapter therefore adds a low-gain, unprojected
+posture term. The 2026-08-17 10:27 hardware trace and manual compliance check
+then showed J2/J3 slightly softer than desired while the other joints were
+slightly firmer, especially J4:
+
+```text
+tau_posture = K_p (q_ref - q) + D_p (qdot_ref - qdot)
+```
+
+当前 J2/J3/J4 非零：`K_p=[0,0.5,0.5,0.6,0,0,0] N·m/rad`、
+`D_p=[0,0.08,0.08,0.12,0,0,0] N·m·s/rad`。同时 Nero 各向同性旋转刚度从
+`2.0` 小步降至 `1.9 N·m/rad`，平移刚度从 `75` 降至 `70 N/m`。该项故意不乘
+`N_tau`，所以能直接平衡 J2/J3/J4 的实机手感，但也会影响末端任务；这是“笛卡尔
+阻抗 + 关节选择性姿态阻抗”的混合控制，不是严格纯笛卡尔阻抗。它仍在 100 Hz
+软件外环计算、计入同一个 ±8 N·m 总力矩限幅，并通过 `t_ff` 下发；固件 MIT
+`kp=kd=0` 不变。Piper-L 配置不启用该项。
+
+J2/J3/J4 are nonzero by default:
+`K_p=[0,0.5,0.5,0.6,0,0,0] N·m/rad` and
+`D_p=[0,0.08,0.08,0.12,0,0,0] N·m·s/rad`. Nero's isotropic rotational
+stiffness is also reduced slightly from `2.0` to `1.9 N·m/rad`, and
+translation stiffness from `75` to `70 N/m`. The posture term intentionally
+bypasses `N_tau`, directly balancing J2/J3/J4 hardware feel while also
+affecting the tool task. This is hybrid Cartesian-plus-joint-selective-posture
+impedance, not strict pure Cartesian impedance. It remains a 100 Hz software
+outer-loop term, shares the same ±8 N·m total-torque clip, and is sent through
+`t_ff`; firmware MIT `kp=kd=0` is unchanged. Piper-L does not enable it.
+
+### 5.7 与关节阻抗的局部等价 / Local joint-impedance equivalence
 
 在一个姿态附近，若 `delta_x ≈ Jg delta_q`：
 
@@ -279,7 +343,7 @@ unique task gain. The strict interface rejects both non-unique cases rather
 than silently introducing pseudoinverse assumptions. The actual control law
 still uses `tau=Jg^T F` directly and does not need to recover Kx.
 
-### 5.7 广义动量观测器 / Generalized momentum observer
+### 5.8 广义动量观测器 / Generalized momentum observer
 
 ```text
 M(q) qddot + C(q,qdot) qdot + g(q) = tau_motor + tau_ext
@@ -364,6 +428,18 @@ formula.
 
 ## 7. 数据流 / Data flow
 
+进入以下控制周期前，硬件 adapter 先执行：`DEFAULT 探测连接 -> 保存设备信息 ->
+断开 -> 等待 0.5 s -> 按检测 profile 正式连接`。Nero 的边界为
+`1.11/1.12/1.20`；Piper-L 的
+边界为 `S-V1.8-3/8/9`，与当前 pyAgxArm profile 定义一致。无法取得或解析
+`software_version` 时启动失败，不会用猜测 profile 建立控制连接。 / Before the
+following cyclic flow, the hardware adapter runs `DEFAULT probe connection ->
+save device data -> disconnect -> wait 0.5 s -> formal connection with the
+detected profile`. Nero boundaries are `1.11/1.12/1.20`; Piper-L boundaries are
+`S-V1.8-3/8/9`, matching the current pyAgxArm profile definitions. Startup
+fails if `software_version` cannot be obtained or parsed; no guessed control
+profile is used.
+
 1. 输入实测 `q`、`qdot`。 / Receive measured `q`, `qdot`.
 2. PoE FK 得到 `T=[R,p]`。 / PoE FK produces `T=[R,p]`.
 3. 将 `J_s` 转为工具原点 `J_g`。 / Convert `J_s` to tool-origin `J_g`.
@@ -374,22 +450,24 @@ formula.
 7. Nero 使用 `M(q)` 投影低增益关节参考，得到 `tau_null`；Piper 为零。 /
    Nero projects its low-gain joint reference using `M(q)` to obtain
    `tau_null`; Piper uses zero.
-8. 使用 URDF 逆动力学得到 `tau_model`。 / Evaluate `tau_model` from URDF
+8. Nero 计算未投影的 J2/J3/J4 `tau_posture`；Piper 为零。 / Nero evaluates
+   the unprojected J2/J3/J4 `tau_posture`; Piper uses zero.
+9. 使用 URDF 逆动力学得到 `tau_model`。 / Evaluate `tau_model` from URDF
    inverse dynamics.
-9. 合成为 `tau_cmd`。 / Compose `tau_cmd`.
-10. 对总力矩实施逐关节绝对上限。 / Apply the per-joint absolute limit to the
+10. 合成为 `tau_cmd`。 / Compose `tau_cmd`.
+11. 对总力矩实施逐关节绝对上限。 / Apply the per-joint absolute limit to the
    total torque.
-11. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
+12. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
     `move_mit(kp=0,kd=0,t_ff=tau_cmd)`.
-12. 控制器每个 100 Hz 周期读取一次 SDK 缓存的 `q/qdot/tau_motor`，并发布
+13. 控制器每个 100 Hz 周期读取一次 SDK 缓存的 `q/qdot/tau_motor`，并发布
     `/arm_dynamics_state`；该流在 planned、阻抗和导纳模式都存在。 / Once per
     100 Hz cycle, the controller reads cached SDK `q/qdot/tau_motor` and
     publishes `/arm_dynamics_state`; the stream exists in planned, impedance,
     and admittance modes.
-13. 独立观测器进程只订阅该 topic；它不连接 CAN，也不再次读取机械臂。 / The
+14. 独立观测器进程只订阅该 topic；它不连接 CAN，也不再次读取机械臂。 / The
     separate observer process only subscribes to that topic; it neither
     connects to CAN nor reads the arm again.
-14. 观测器按消息时间戳逐帧积分；区间 `[t_{k-1},t_k]` 使用上一周期的实测
+15. 观测器按消息时间戳逐帧积分；区间 `[t_{k-1},t_k]` 使用上一周期的实测
     `tau_motor[k-1]`，ROS 调度延迟不参与 `dt`。 / The observer integrates every
     timestamped sample; interval `[t_{k-1},t_k]` uses the preceding cycle's
     measured `tau_motor[k-1]`, so ROS scheduling delay does not enter `dt`.
@@ -426,18 +504,19 @@ formula.
 | `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、坐标验证和完整双向等价关系（仅逆关系唯一时） / Pure impedance formula, frame validation, and full bidirectional equivalence only when the inverse is unique |
 | `armbycontroller/impedance/admittance.py` | 纯导纳虚拟动力学和 `tau_ext -> F_ext` 阻尼最小二乘 / Pure admittance virtual dynamics and damped least-squares `tau_ext -> F_ext` mapping |
 | `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
-| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗、当前位姿导纳三个无 ROS/CAN controller adapter / Three ROS/CAN-free adapters: joint MIT, Cartesian impedance, and current pose admittance |
+| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗、当前位姿导纳三个无 ROS/CAN controller adapter；阻抗参考运动学按参考位置缓存 / Three ROS/CAN-free adapters: joint MIT, Cartesian impedance, and current pose admittance; impedance reference kinematics are cached by reference position |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
+| `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射、断开和 profile 化正式重连 / Shared DEFAULT probe, version mapping, disconnect, and profile-specific formal reconnect for Nero/Piper-L |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
-| `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学 / URDF PoE FK, space Jacobian, RNEA inverse dynamics |
+| `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
 | `armbycontroller/ik/screw.py` | 使用完整 SE(3) 空间误差和 PoE 空间雅可比的数值 IK / Numerical IK using a full SE(3) space error and PoE space Jacobian |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
 | `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
 | `armbycontroller/modeling/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
-| `config/common.yaml` | 两种机械臂确实共用的周期和默认 backend / Rates and default backend genuinely shared by both arms |
-| `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴增益/比例/限制和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis tuning, limits, and observer parameters |
+| `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
+| `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴零空间、J2/J3/J4 混合姿态增益、限制和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis nullspace, J2/J3/J4 hybrid-posture gains, limits, and observer parameters |
 | `config/piper_l.yaml` | Piper-L 独立固件、夹爪、6 轴增益/比例/限制、导纳和观测器参数 / Piper-L-only firmware, gripper, six-axis tuning, limits, admittance, and observer parameters |
 | `test/test_cartesian_impedance.py` | 坐标、符号、耦合、功率与模型支撑契约 / Frame, sign, coupling, power, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
@@ -445,11 +524,12 @@ formula.
 | `test/test_cartesian_admittance.py` | wrench 估计、虚拟平衡、旋转向量、边界和重置契约 / Wrench-estimation, virtual-equilibrium, rotation-vector, bound, and reset contracts |
 | `test/test_control_interface.py` | 三个 controller adapter 的共用 interface、命令和 sample schema 契约 / Shared interface, command, and sample-schema contracts for three adapters |
 | `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
+| `test/test_hardware_connection.py` | 两次连接顺序、探测数据保存、版本到 profile 映射和失败断开契约 / Two-connection ordering, saved probe data, version-to-profile mapping, and failure-disconnect contracts |
 
 用户要求排除 `ros/`、`ik/`、`impedance/` 后的详细文件分类，见
-`docs/file_map/README_ZH_EN.md` 及其四个分类子文档。 / For the requested
+`docs/file_map/README_ZH_EN.md` 及其五个分类子文档。 / For the requested
 detailed classification outside `ros/`, `ik/`, and `impedance/`, see
-`docs/file_map/README_ZH_EN.md` and its four category documents.
+`docs/file_map/README_ZH_EN.md` and its five category documents.
 
 模型调用方直接依赖 `UrdfScrewModel` 和 `project_gravity_vector`；项目不再提供
 `UrdfGravityModel`、`nero_mount_gravity` 或 `create_tracik_solver` 浅兼容名称。
@@ -465,14 +545,20 @@ implementation.
 
 | 量 / Quantity | 形状 / Shape | 单位 / Units | 当前默认 / Current default |
 | --- | --- | --- | --- |
+| `firmware` | string | — | `auto`；实机检测结果优先，显式值仅作配置检查与干跑 profile / detected hardware wins; explicit value is a configuration check and dry-run profile |
+| `firmware_probe_timeout` | scalar | s | `5.0`；第一阶段取得固件数据的总时限 / total stage-one firmware-data deadline |
+| `firmware_probe_poll_period` | scalar | s | `0.1`；无数据时的查询间隔 / retry interval while data is absent |
+| `firmware_reconnect_delay` | scalar | s | `0.5`；探测连接断开与正式连接创建之间的等待 / delay between probe disconnect and formal-connection creation |
 | `impedance_backend` | string | — | `cartesian` (`joint` 可对照 / for comparison) |
-| `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | `0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
-| `cartesian_impedance_base_z_rotation_stiffness` | scalar | N·m/rad | `4.0`，基座 Z 旋转 / base-frame Z rotation |
-| `cartesian_impedance_translation_stiffness` | scalar | N/m | `10.0` |
-| `cartesian_impedance_rotation_damping` | scalar | N·m·s/rad | `0.08` |
-| `cartesian_impedance_translation_damping` | scalar | N·s/m | `0.8` |
+| `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
+| `cartesian_impedance_base_z_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`（无补强 / isotropic）；Piper-L=`4.0`（基座 Z 补强 / reinforced） |
+| `cartesian_impedance_translation_stiffness` | scalar | N/m | Nero=`70.0`; Piper-L=`10.0` |
+| `cartesian_impedance_rotation_damping` | scalar | N·m·s/rad | Nero=`0.24`; Piper-L=`0.08` |
+| `cartesian_impedance_translation_damping` | scalar | N·s/m | Nero=`1.4`; Piper-L=`0.8` |
 | `cartesian_impedance_nullspace_stiffness` | 1 or n | N·m/rad | `0.4`，仅 Nero / Nero only |
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
+| `cartesian_impedance_joint_posture_stiffness` | 1 or n | N·m/rad | Nero=`[0,0.5,0.5,0.6,0,0,0]`; Piper-L=`0` |
+| `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_torque_limit` | 1 or n | N·m | `8.0` per joint |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
 | `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
@@ -522,28 +608,44 @@ backend always sends `kp=kd=0`, preventing native joint PD from double-counting
 `J^T F`.
 
 上述控制整定值先读取 `config/common.yaml`，再按 `robot_model` 读取
-`config/nero.yaml` 或 `config/piper_l.yaml`。同名 launch 参数显式传值时优先于
-两层 YAML。`can_interface`、`execute_motion`、话题和进程开关仍由 launch 管理。
+`config/nero.yaml` 或 `config/piper_l.yaml`。固件探测时序来自 common；同名
+launch 参数显式传值时优先于两层 YAML。`can_interface`、`execute_motion`、话题
+和进程开关仍由 launch 管理。
 / These values load from `config/common.yaml` and then the `nero.yaml` or
-`piper_l.yaml` selected by `robot_model`. Explicit same-name launch values take
-precedence over both YAML layers. `can_interface`, `execute_motion`, topics,
-and process switches remain launch-managed.
+`piper_l.yaml` selected by `robot_model`. Firmware-probe timing comes from
+common. Explicit same-name launch values take precedence over both YAML
+layers. `can_interface`, `execute_motion`, topics, and process switches remain
+launch-managed.
 
 旋转刚度向量按基座坐标系组成
-`[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`。独立提高 `K_base_z`
-可增强主要由 J1 产生的基座 Z 旋转回正，而不同时提高腕部 X/Y 旋转刚度。它仍是
-任务空间刚度，不是 J1 的直接关节 `Kp`；实际 J1 等效刚度仍由
+`[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`。Piper-L 独立提高
+`K_base_z`，以增强基座 Z 旋转回正，而不同时提高腕部 X/Y 旋转刚度。
+Nero 不使用这个 Piper-L 专用补强，配置为 `[1.9, 1.9, 1.9]`。这些都是
+任务空间刚度，不是直接关节 `Kp`；实际等效关节刚度仍由
 `Kq=Jg^T Kx Jg` 和当前姿态决定。
 
 The base-frame rotational stiffness vector is
-`[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`. Raising `K_base_z`
-strengthens the base-Z return direction produced mainly by J1 without also
-raising wrist X/Y rotational stiffness. It remains a task-space stiffness,
-not a direct J1 joint `Kp`; the actual equivalent J1 stiffness still depends
-on the current pose through `Kq=Jg^T Kx Jg`.
+`[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`. Piper-L raises
+`K_base_z` independently to strengthen base-Z return without also raising
+wrist X/Y rotational stiffness. Nero does not use this Piper-L-specific
+reinforcement and is configured as `[1.9, 1.9, 1.9]`. These remain task-space
+stiffnesses rather than direct joint `Kp` values; equivalent joint stiffness
+still depends on the current pose through `Kq=Jg^T Kx Jg`. Nero's separately
+listed J2/J3/J4 posture gains are the deliberate exception and act directly
+in joint space before the total torque clip.
 
 ## 10. 安全边界 / Safety boundaries
 
+- 固件探测实例只连接和调用 `get_firmware()`，不调用 `enable()`、模式切换或运动
+  API；探测实例成功断开并等待 `firmware_reconnect_delay` 后，才创建正式控制
+  实例。 / The firmware probe only
+  connects and calls `get_firmware()`; it never calls `enable()`, changes mode,
+  or invokes motion APIs. The formal control instance is created only after
+  the probe disconnects successfully and `firmware_reconnect_delay` elapses.
+- 固件数据缺失、`software_version` 无法解析或检测 profile 不受当前 SDK 支持时，
+  实机启动直接失败。 / Hardware startup fails closed when firmware data is
+  absent, `software_version` cannot be parsed, or the detected profile is not
+  supported by the installed SDK.
 - 数学函数不做饱和；MIT adapter 对包含重力补偿的总力矩实施默认 ±8 N·m 绝对
   上限，不实施力矩变化率限制。 / The math function is unsaturated; the MIT
   adapter applies a default ±8 N·m absolute limit to total torque including
@@ -554,6 +656,10 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 - Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
   Nero nullspace gains must be nonnegative, and nullspace torque shares the
   same ±8 N·m total-torque envelope.
+- 关节选择性姿态增益必须非负；该项未经零空间投影，会改变末端任务，但仍与任务、
+  零空间和模型力矩一起进入同一个 ±8 N·m 总限幅。 / Joint-selective posture
+  gains must be nonnegative. This unprojected term changes the tool task but
+  shares the same ±8 N·m total clip with task, nullspace, and model torque.
 - `cartesian_impedance_model_scale` 只能减小模型项，不能超过 `1.0`；它不是自动
   标定。修改 J4 前必须支撑机械臂并在多个静态姿态比较实测保持力矩。 /
   `cartesian_impedance_model_scale` can only reduce model support and cannot
@@ -597,6 +703,11 @@ on the current pose through `Kq=Jg^T Kx Jg`.
 
 ## 11. 已知风险 / Known risks
 
+- `firmware_probe_timeout` 过短或 CAN 负载过高会导致安全的启动超时；增加时限只
+  延长探测等待，不改变正式驱动 profile。 / A short
+  `firmware_probe_timeout` or heavy CAN load can cause a safe startup timeout;
+  increasing it only extends discovery and does not alter the selected formal
+  driver profile.
 - SO(3)/SE(3) 对数映射在接近 180° 旋转时数值条件变差。 / SO(3)/SE(3)
   logarithms become ill-conditioned near 180-degree rotation.
 - `J^T` 不需要求逆，但奇异位形仍会失去某些可控 wrench 方向。 / `J^T`
@@ -607,6 +718,11 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   projector depends on the URDF mass matrix; incorrect mass/inertia reduces
   dynamic decoupling accuracy. Task-rank loss increases nullspace dimension,
   so low gains and the absolute torque bound remain necessary.
+- Nero J2/J3/J4 姿态力矩未经零空间投影，因此增大其增益会直接改变末端顺应性并
+  可能与 `J_g^T F_c` 竞争；它不能被解释为不影响任务的冗余姿态控制。 / Nero's
+  J2/J3/J4 posture torque bypasses the nullspace projector, so larger gains
+  directly change tool compliance and can compete with `J_g^T F_c`; it is not
+  task-invariant redundant-posture control.
 - URDF 不包含摩擦、线缆力、齿隙、未知负载和驱动延迟。 / URDF omits
   friction, cable forces, backlash, unknown payload, and drive delay.
 - 因此观测残差包含接触、摩擦、齿隙、负载误差、力矩跟踪误差和编码器噪声；未
@@ -631,8 +747,13 @@ on the current pose through `Kq=Jg^T Kx Jg`.
   parser cache. `get_joint_angles()` and per-joint `get_motor_states()` are
   different feedback messages, so one loop still does not form a
   hardware-atomic snapshot. The observer never calls them again.
-- 100 Hz Python/ROS 循环不是硬实时。 / A 100 Hz Python/ROS loop is not
-  hard real time.
+- 100 Hz Python/ROS 循环不是硬实时。CRBA 与参考运动学缓存把 1218 帧 Nero
+  实机 trace 的离线纯控制计算从约 `9.72 ms` 降到约 `2.4 ms/周期`，但实际周期
+  仍包含 SDK/CAN 读写和 ROS 调度，必须由新实机记录验证。 / A 100 Hz
+  Python/ROS loop is not hard real time. CRBA and reference-kinematics caching
+  reduced offline pure-control replay of the 1,218-sample Nero hardware trace
+  from about `9.72 ms` to about `2.4 ms/cycle`; actual periods still include
+  SDK/CAN I/O and ROS scheduling and require a fresh hardware recording.
 - 由关节残差反解 Cartesian wrench 在奇异位形附近病态；DLS 只能正则化，不能
   恢复不可观方向。 / Joint-residual-to-Cartesian-wrench inversion is
   ill-conditioned near singularities; DLS regularizes it but cannot recover
@@ -692,28 +813,32 @@ source install/setup.bash
 ### 配置文件 / Configuration file
 
 launch 先加载 `config/common.yaml`，再根据 `robot_model` 只加载
-`config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期和默认 backend；
-固件、工具、重力/模型比例、逐关节增益与限制、轨迹和观测器参数全部按机器人
-分开，导纳仅在 Piper-L 文件，Nero 速度估计和零空间仅在 Nero 文件。显式 launch
-参数仍有最高优先级。`common_config:=/path/common.yaml` 可替换共用层，
+`config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期、默认 backend
+和固件探测时序；固件配置检查、工具、重力/模型比例、逐关节增益与限制、轨迹和
+观测器参数全部按机器人分开，导纳仅在 Piper-L 文件，Nero 速度估计、零空间和
+J2/J3/J4 混合姿态增益仅在 Nero 文件。显式 launch 参数仍有最高优先级。
+`common_config:=/path/common.yaml`
+可替换共用层，
 `controller_config:=/path/robot.yaml` 可替换机器人层。 / Launch first loads
 `config/common.yaml`, then only `config/nero.yaml` or `config/piper_l.yaml`
-according to `robot_model`. Common holds only shared rates/default backend;
-firmware, tool, gravity/model scales, joint gains/limits, trajectories, and
-observer tuning are robot-specific. Admittance exists only in Piper-L, while
-Nero velocity estimation and nullspace tuning exist only in Nero. Explicit
-launch arguments have highest priority. `common_config` and
+according to `robot_model`. Common holds only shared rates/default backend and
+firmware-probe timing; firmware configuration checks, tool, gravity/model
+scales, joint gains/limits, trajectories, and observer tuning are
+robot-specific. Admittance exists only in Piper-L, while Nero velocity
+estimation, nullspace tuning, and J2/J3/J4 hybrid-posture gains exist only in
+Nero.
+Explicit launch arguments have highest priority. `common_config` and
 `controller_config` can replace the respective layers.
 
 Nero 文件对应当前侧装、无手机械臂，显式设置 `tool_configuration=none`；
-Piper-L 文件独立设置 `tool_configuration=gripper`。最近实机日志报告软件 `1.11`，
-但 Nero 的 `firmware=auto` 仍选择项目
-原来验证的 `v112` profile；实机再次查询确认后，若确为 1.11，再把 YAML 改为
-`v111`。 / Nero explicitly uses `tool_configuration=none`; Piper-L independently
-uses `tool_configuration=gripper`. The latest Nero log reported software
-`1.11`, while its `firmware=auto` still selects the previously verified `v112`
-profile. Query the hardware again and change Nero YAML to `v111` only if 1.11
-is confirmed.
+Piper-L 文件独立设置 `tool_configuration=gripper`。实机启动时，两种机械臂都会先
+用 `default` profile 探测并保存数据、断开，再以检测 profile 正式重连；例如 Nero
+`1.11 -> v111`、Piper-L `S-V1.8-8 -> v188`。`firmware=auto` 不再使用静态版本
+猜测。 / Nero explicitly uses `tool_configuration=none`; Piper-L independently
+uses `tool_configuration=gripper`. On hardware, both arms first probe with the
+`default` profile, save the returned data, disconnect, and formally reconnect
+with the detected profile; examples are Nero `1.11 -> v111` and Piper-L
+`S-V1.8-8 -> v188`. `firmware=auto` no longer guesses a static version.
 
 `cartesian_impedance_model_scale` 对 Nero 可写 7 个值，顺序为 J1…J7，J4 是第
 4 个。当前保持 `[1.0]`。旧日志中的侧装 Revo2 模型给 J4 约 `3.55 N·m`；改为
@@ -814,10 +939,15 @@ ros2 launch armbycontroller keyboard_control.launch.py \
 
 YAML 默认 `nero_mount=side`。若实际平置，必须显式传
 `nero_mount:=horizontal` 或修改 YAML。启动后保持机械臂被支撑，按 `I` 同时
-捕获当前末端位姿和 7 轴零空间姿态，再进入 Cartesian MIT。 / YAML defaults
+捕获当前末端位姿、7 轴零空间姿态和 J2/J3/J4 姿态参考，再进入 Cartesian MIT。
+Nero 的旋转刚度为 `[1.9,1.9,1.9]`，不使用 Piper-L 的基座 Z 补强；J2/J3/J4
+另有未经零空间投影的 `[0.5,0.5,0.6] N·m/rad` 外环姿态弹簧。 / YAML defaults
 to `nero_mount=side`. For a horizontal base, pass
 `nero_mount:=horizontal` or change YAML. With the arm physically supported,
-press `I` to capture both tool pose and nullspace posture before Cartesian MIT.
+press `I` to capture tool pose, nullspace posture, and the J2/J3/J4 posture
+reference before Cartesian MIT. Nero uses `[1.9,1.9,1.9]` rotational stiffness
+without Piper-L's base-Z reinforcement and adds unprojected outer-loop
+`[0.5,0.5,0.6] N·m/rad` posture springs on J2/J3/J4.
 
 ### Piper-L 实机接线 / Piper-L hardware wiring
 
@@ -886,12 +1016,15 @@ The formula layer should be diagnosed in this order:
    `ID(q,qdot,0)` contain only Coriolis/centrifugal and gravity support?
 8. Nero 是否满足 `J_g M^-1 tau_null≈0`。 / Does Nero satisfy
    `J_g M^-1 tau_null≈0`?
-9. 日志中的 `task`、`null`、`model` 三项相加后是否等于限幅前 `total`。 /
-   Do logged `task`, `null`, and `model` sum to the pre-clip `total`?
-10. `/arm_dynamics_state` 是否约为 100 Hz；Nero v111/v112 的 `velocity` 是否
-    为位置差分估计，其余 profile 是否来自 SDK。 / Is
+9. 日志中的 `task`、`null`、`joint_posture`、`model` 四项相加后是否等于限幅前
+   `total`。 / Do logged `task`, `null`, `joint_posture`, and `model` sum to
+   the pre-clip `total`?
+10. `/arm_dynamics_state` 是否约为 100 Hz，实验 `summary.period.mean` 是否接近
+    `0.01 s`；Nero v111/v112 的 `velocity` 是否为位置差分估计，其余 profile
+    是否来自 SDK。 / Is
     `/arm_dynamics_state` near 100 Hz, with finite-difference `velocity` for
-    Nero v111/v112 and SDK velocity for other profiles?
+    Nero v111/v112 and SDK velocity for other profiles, and is experiment
+    `summary.period.mean` near `0.01 s`?
 11. 静止无接触时，残差是否稳定但可能存在摩擦/模型偏置；接触时符号是否符合关节
     正方向。 / At rest without contact, is the residual stable despite possible
     friction/model bias, and does contact follow the positive joint sign?

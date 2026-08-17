@@ -106,6 +106,99 @@ def test_cartesian_adapter_applies_configured_model_scale():
     )
 
 
+def test_cartesian_adapter_adds_unprojected_joint_posture_impedance():
+    controller = CartesianImpedanceController(
+        IdentityModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        joint_posture_stiffness=[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        joint_posture_damping=[0.0, 0.0, 0.0, 0.2, 0.0, 0.0],
+    )
+    control_input = ControlInput(
+        12.5,
+        0.01,
+        ControlState(
+            [0.0, 0.0, 0.0, 0.4, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+            np.zeros(6),
+        ),
+        ControlReference.hold(np.zeros(6)),
+    )
+
+    result = controller.step(control_input)
+
+    assert result.signals["task_torque"] == pytest.approx(np.zeros(6))
+    assert result.signals["joint_posture_torque"] == pytest.approx(
+        [0.0, 0.0, 0.0, -0.5, 0.0, 0.0]
+    )
+    assert result.signals["raw_command_torque"] == pytest.approx(
+        [1.0, 2.0, 3.0, 3.5, 5.0, 6.0]
+    )
+    assert result.command.feedforward == pytest.approx(
+        [1.0, 2.0, 3.0, 3.5, 5.0, 6.0]
+    )
+    assert result.command.kp == pytest.approx(np.zeros(6))
+    assert result.command.kd == pytest.approx(np.zeros(6))
+
+
+def test_cartesian_adapter_limits_joint_posture_with_total_torque():
+    controller = CartesianImpedanceController(
+        IdentityModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        joint_posture_stiffness=[0.0, 0.0, 0.0, 100.0, 0.0, 0.0],
+    )
+
+    result = controller.step(
+        sample(position=[0.0, 0.0, 0.0, 0.4, 0.0, 0.0])
+    )
+
+    assert result.signals["joint_posture_torque"][3] == pytest.approx(-40.0)
+    assert result.signals["raw_command_torque"][3] == pytest.approx(-36.0)
+    assert result.command.feedforward[3] == pytest.approx(-8.0)
+    assert result.signals["torque_clipped"]
+
+
+def test_cartesian_adapter_reuses_unchanged_reference_kinematics():
+    class CountingModel(IdentityModel):
+        def __init__(self):
+            self.fk_calls = 0
+            self.jacobian_calls = 0
+
+        def forward_kinematics(self, joints):
+            self.fk_calls += 1
+            return super().forward_kinematics(joints)
+
+        def space_jacobian(self, joints):
+            self.jacobian_calls += 1
+            return super().space_jacobian(joints)
+
+    model = CountingModel()
+    controller = CartesianImpedanceController(
+        model,
+        stiffness=np.ones(6),
+        damping=np.ones(6),
+        torque_limit=np.ones(6) * 8.0,
+    )
+    held = sample(target=[0, 0, 0, 0.2, 0, 0])
+
+    first = controller.step(held)
+    second = controller.step(held)
+
+    assert second.command.feedforward == pytest.approx(
+        first.command.feedforward
+    )
+    assert model.fk_calls == 3
+    assert model.jacobian_calls == 3
+
+    controller.step(sample(target=[0, 0, 0, 0.3, 0, 0]))
+
+    assert model.fk_calls == 5
+    assert model.jacobian_calls == 5
+
+
 def test_admittance_adapter_produces_checked_position_command():
     class FakeAdmittance:
         def reset(self, pose):

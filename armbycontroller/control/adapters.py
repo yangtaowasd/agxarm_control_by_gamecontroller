@@ -171,7 +171,7 @@ class JointMitController:
 
 
 class CartesianImpedanceController:
-    """Strict Cartesian impedance producing a zero-gain MIT torque batch."""
+    """Cartesian impedance with optional joint-posture torque via MIT."""
 
     name = "cartesian_impedance"
 
@@ -185,6 +185,8 @@ class CartesianImpedanceController:
         nullspace_stiffness=None,
         nullspace_damping=None,
         nullspace_enabled=False,
+        joint_posture_stiffness=None,
+        joint_posture_damping=None,
         model_scale=1.0,
     ):
         self.model = model
@@ -215,10 +217,37 @@ class CartesianImpedanceController:
             self.joint_count,
             "nullspace_damping",
         )
+        self.joint_posture_stiffness = _joint_vector(
+            np.zeros(self.joint_count)
+            if joint_posture_stiffness is None
+            else joint_posture_stiffness,
+            self.joint_count,
+            "joint_posture_stiffness",
+        )
+        self.joint_posture_damping = _joint_vector(
+            np.zeros(self.joint_count)
+            if joint_posture_damping is None
+            else joint_posture_damping,
+            self.joint_count,
+            "joint_posture_damping",
+        )
+        if (
+            np.any(self.nullspace_stiffness < 0.0)
+            or np.any(self.nullspace_damping < 0.0)
+            or np.any(self.joint_posture_stiffness < 0.0)
+            or np.any(self.joint_posture_damping < 0.0)
+        ):
+            raise ValueError("Cartesian joint gains must be nonnegative")
+        self._reference_position = None
+        self._reference_pose = None
+        self._reference_jacobian = None
 
     def reset(self, state):
         if state.joint_count != self.joint_count:
             raise ValueError("Cartesian controller reset size mismatch")
+        self._reference_position = None
+        self._reference_pose = None
+        self._reference_jacobian = None
 
     def step(self, sample):
         state = sample.state
@@ -227,10 +256,22 @@ class CartesianImpedanceController:
             raise ControlSafetyError(
                 "Cartesian impedance requires complete q/dq feedback"
             )
-        desired_pose = self.model.forward_kinematics(reference.position)
-        reference_jacobian, _ = geometric_jacobian(
-            self.model, reference.position
-        )
+        reference_position = np.asarray(reference.position, dtype=float)
+        if (
+            self._reference_position is None
+            or not np.array_equal(
+                reference_position, self._reference_position
+            )
+        ):
+            reference_jacobian, desired_pose = geometric_jacobian(
+                self.model, reference_position
+            )
+            self._reference_position = reference_position.copy()
+            self._reference_pose = desired_pose
+            self._reference_jacobian = reference_jacobian
+        else:
+            desired_pose = self._reference_pose
+            reference_jacobian = self._reference_jacobian
         desired_twist = reference_jacobian @ reference.velocity
         nullspace = {}
         if self.nullspace_enabled:
@@ -252,8 +293,15 @@ class CartesianImpedanceController:
             model_scale=self.model_scale,
             **nullspace,
         )
+        joint_posture_torque = (
+            self.joint_posture_stiffness
+            * (reference.position - state.position)
+            + self.joint_posture_damping
+            * (reference.velocity - state.velocity)
+        )
+        raw_command_torque = raw.command_torque + joint_posture_torque
         torque = np.clip(
-            raw.command_torque, -self.torque_limit, self.torque_limit
+            raw_command_torque, -self.torque_limit, self.torque_limit
         )
         zeros = np.zeros(self.joint_count)
         command = MitCommand(
@@ -274,10 +322,11 @@ class CartesianImpedanceController:
                 "commanded_wrench": raw.commanded_wrench,
                 "task_torque": raw.task_torque,
                 "nullspace_torque": raw.nullspace_torque,
+                "joint_posture_torque": joint_posture_torque,
                 "model_torque": raw.model_torque,
-                "raw_command_torque": raw.command_torque,
+                "raw_command_torque": raw_command_torque,
                 "torque_limit": self.torque_limit,
-                "torque_clipped": bool(np.any(raw.command_torque != torque)),
+                "torque_clipped": bool(np.any(raw_command_torque != torque)),
             },
             raw=raw,
         )
