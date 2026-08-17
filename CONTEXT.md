@@ -24,6 +24,21 @@ specific control algorithm implementing `ControlInput -> ControlResult`
 without ROS or CAN access.
 _Avoid_: controller backend, control plugin
 
+**笛卡尔任务几何 / Cartesian Task Geometry**:
+阻抗与导纳共用的基坐标系 `[角; 线]` 顺序、tool-origin 几何雅可比、SE(3) 校验和
+`tau=Jg.T F` 虚功映射；不包含任一控制律的 K/D/M。 / The base-frame
+`[angular; linear]` convention, tool-origin geometric Jacobian, SE(3)
+validation, and `tau=Jg.T F` virtual-work mapping shared by impedance and
+admittance; it contains no K/D/M from either control law.
+_Avoid_: impedance geometry, admittance Jacobian helper
+
+**柔顺零力 / Soft Zero Force**:
+Nero 优先的导纳手感；目标外力接近零，但用弱保持、速度阻尼和有限粘/滑阻力抑制
+观测偏置、摩擦和积分漂移。 / The Nero-first admittance feel: desired wrench
+is near zero, while weak holding, velocity damping, and bounded stick/slip
+resistance suppress observer bias, friction, and integration drift.
+_Avoid_: ideal zero force, free integrator
+
 **控制样本 / Control Sample**:
 控制输入与控制结果按稳定 JSON schema 合并后的单周期证据。 / One cycle of
 evidence combining a Control Input and Control Result under the stable JSON

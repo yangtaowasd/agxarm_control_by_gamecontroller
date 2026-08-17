@@ -1,1 +1,1 @@
-"""Cartesian impedance and admittance control mathematics."""
+"""Joint and Cartesian impedance equations and controller adapters."""

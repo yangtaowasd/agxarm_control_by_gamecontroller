@@ -5,17 +5,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from armbycontroller.control import CartesianAdmittanceController
-from armbycontroller.control import CartesianImpedanceController
+from armbycontroller.admittance.controller import CartesianAdmittanceController
 from armbycontroller.control import ControlEngine
 from armbycontroller.control import ControlInput
 from armbycontroller.control import ControlReference
 from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import ControlState
-from armbycontroller.control import JointMitController
 from armbycontroller.control import MitCommand
 from armbycontroller.control import PositionCommand
 from armbycontroller.control import control_sample
+from armbycontroller.impedance.controllers import CartesianImpedanceController
+from armbycontroller.impedance.controllers import JointMitController
 
 
 class IdentityModel:
@@ -208,10 +208,12 @@ def test_admittance_adapter_produces_checked_position_command():
             pose = np.eye(4)
             pose[0, 3] = float(wrench[3]) * period
             return SimpleNamespace(
+                mode="zero_force",
                 offset=np.asarray([0, 0, 0, pose[0, 3], 0, 0]),
                 velocity=np.zeros(6),
                 acceleration=np.zeros(6),
                 applied_wrench=np.asarray(wrench),
+                resisting_wrench=np.asarray(wrench) * 0.25,
                 desired_pose=pose,
                 desired_twist=np.zeros(6),
             )
@@ -234,6 +236,10 @@ def test_admittance_adapter_produces_checked_position_command():
     assert result.command.position[0] == pytest.approx(0.02)
     assert result.signals["applied_wrench"] == pytest.approx(
         [0, 0, 0, 2, 0, 0]
+    )
+    assert result.signals["admittance_mode"] == "zero_force"
+    assert result.signals["resisting_wrench"] == pytest.approx(
+        [0, 0, 0, 0.5, 0, 0]
     )
 
 

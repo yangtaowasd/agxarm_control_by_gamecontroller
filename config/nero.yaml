@@ -36,6 +36,26 @@ arm_keyboard_controller:
     # Keep 1.0 until bare-arm static torque calibration is available.
     cartesian_impedance_model_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
+    # Nero bare-arm admittance, independent from Piper-L tuning. Spatial
+    # vectors use [Mx, My, Mz, Fx, Fy, Fz]. "Zero force" is intentionally
+    # soft rather than ideal: weak hold + damping + stick/slip resistance
+    # reject observer bias and friction without making the arm rigid.
+    admittance_mode: zero_force
+    admittance_virtual_mass: [0.2, 0.2, 0.2, 2.0, 2.0, 2.0]
+    admittance_zero_force_damping: [2.0, 2.0, 2.0, 18.0, 18.0, 18.0]
+    admittance_zero_force_holding_stiffness: [0.25, 0.25, 0.25, 5.0, 5.0, 5.0]
+    admittance_zero_force_friction: [0.03, 0.03, 0.03, 0.35, 0.35, 0.35]
+    admittance_zero_force_stiction_velocity: [0.015, 0.015, 0.015, 0.005, 0.005, 0.005]
+    admittance_resistive_damping: [2.5, 2.5, 2.5, 25.0, 25.0, 25.0]
+    admittance_resistive_stiffness: [0.8, 0.8, 0.8, 12.0, 12.0, 12.0]
+    admittance_wrench_deadband: [0.05, 0.05, 0.05, 0.25, 0.25, 0.25]
+    admittance_wrench_limit: [1.5, 1.5, 1.5, 6.0, 6.0, 6.0]
+    admittance_offset_limit: [0.25, 0.25, 0.25, 0.08, 0.08, 0.08]
+    admittance_velocity_limit: [0.35, 0.35, 0.35, 0.10, 0.10, 0.10]
+    admittance_wrench_filter_hz: 5.0
+    admittance_wrench_dls_damping: 0.05
+    admittance_wrench_timeout: 0.10  # s
+
     mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]

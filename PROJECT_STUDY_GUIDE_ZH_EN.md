@@ -5,13 +5,14 @@
 本项目通过 ROS 2、键盘输入和 AGX SDK 控制 Nero 与 Piper-L。当前分支
 `feature/cartesian-impedance-step-by-step` 的目标，是从已经存在的关节 MIT
 阻抗出发，逐层建立公式清楚、坐标一致、可测试的空间笛卡尔阻抗，并为
-Piper-L 增加由动量观测外力驱动的笛卡尔导纳模式。
+Nero/Piper-L 增加由动量观测外力驱动、分为零力和阻力两种的笛卡尔导纳模式。
 
 This project controls Nero and Piper-L through ROS 2, keyboard input, and the
 AGX SDK. The goal of `feature/cartesian-impedance-step-by-step` is to start
 from the existing joint MIT impedance and build a formula-explicit,
-frame-consistent, testable Cartesian impedance controller in stages, plus a
-Piper-L Cartesian-admittance mode driven by momentum-observer external torque.
+frame-consistent, testable Cartesian impedance controller in stages, plus
+zero-force and resistive Cartesian-admittance modes for Nero and Piper-L,
+driven by momentum-observer external torque.
 
 当前阶段已把纯数学核心接入 `mit_tick()` 和 AGX MIT/CAN。默认
 `impedance_backend:=cartesian`；设为 `joint` 可以保留旧关节 MIT 作为对照。
@@ -23,10 +24,11 @@ joint MIT backend for comparison. Passing software integration tests does not
 establish physical stability on real hardware.
 
 交互后端严格互锁：`I` 切换阻抗，`O` 切换导纳；进入一个模式会先退出另一个，
-两者绝不同时运行。导纳目前只支持 Piper-L。 / Interaction backends are
+两者绝不同时运行。两种机械臂均支持导纳，但参数分别位于各自 YAML。 /
+Interaction backends are
 strictly interlocked: `I` toggles impedance and `O` toggles admittance;
 entering either first exits the other, and both can never run together.
-Admittance currently supports Piper-L only.
+Both arms support admittance, with independent robot-specific YAML tuning.
 
 真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建只读探测
 实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
@@ -60,6 +62,18 @@ work:
 ```text
 F_c   = Kx e_x + Dx (xdot_d - xdot)
 tau_x = Jg(q)^T F_c
+```
+
+Nero 默认的“零力”是柔顺零力，不是自由积分器。它用弱保持、速度阻尼与有限
+粘/滑阻力抑制动量观测偏置和摩擦；Piper-L 默认的 `resistive` 使用更明确的
+阻尼与回中弹簧： / Nero's default zero-force feel is soft zero force, not a
+free integrator. Weak holding, velocity damping, and bounded stick/slip
+resistance suppress momentum-observer bias and friction; Piper-L's default
+`resistive` mode uses explicit damping and a restoring spring:
+
+```text
+soft zero: M xdd + D0 xd + Kh x + Fstick/slip = Fext
+resistive: M xdd + Dr xd + Kr x               = Fext
 ```
 
 核心关系不是 `J^-1`，而是 `J^T`。速度通过 `J` 从关节空间映射到任务空间，
@@ -417,6 +431,16 @@ ROS, disk, or CAN; the ROS node retains interlocks, acquisition, safety checks,
 and hardware transmission. The old joint MIT path remains selectable with
 `impedance_backend:=joint` for comparison on the same arm.
 
+阻抗和导纳只在 `cartesian/spatial.py` 的笛卡尔任务几何 interface 相交。删除该
+module 会迫使两边各自重复坐标、SE(3)、Jacobian 和虚功映射；而 K/D/M、零空间、
+摩擦/保持、MIT/planned 命令都分别保持在 `impedance/` 与 `admittance/`，因此改变
+一种手感不需要编辑另一种控制律。 / Impedance and admittance meet only at the
+Cartesian Task Geometry interface in `cartesian/spatial.py`. Deleting it would
+duplicate ordering, SE(3), Jacobian, and virtual-work rules in both callers.
+K/D/M laws, nullspace, friction/holding, and MIT/planned commands remain local
+to `impedance/` and `admittance/`, so changing one feel does not edit the other
+control law.
+
 工作区另有 `piper_l_admittance_mit` 和 `nero_admittance_mit`：它们使用速度导纳、
 有界加权 DLS 和 MIT 参考。本仓库当前导纳仍是位姿偏置、旋量 IK 和 planned
 `move_j`；两者是待比较的独立 controller adapter，而不是同一公式的重复副本。 /
@@ -474,12 +498,15 @@ profile is used.
 15. 观测器发布 `/arm_external_joint_torque`；`JointState.effort` 是 `r`，单位
     N·m。 / The observer publishes `/arm_external_joint_torque`; its
     `JointState.effort` is `r` in N·m.
-16. Piper-L 导纳开启时，使用 `tau_ext=J_g^T F_ext` 的阻尼最小二乘解估计
-    `F_ext`，积分虚拟质量-阻尼-弹簧方程，并以旋转向量指数映射生成连续 SE(3)
-    目标。 / With Piper-L admittance active, a damped least-squares solution of
-    `tau_ext=J_g^T F_ext` estimates `F_ext`; the virtual mass-damper-spring
-    equation is integrated and a rotation-vector exponential generates a
-    continuous SE(3) target.
+16. 任一机械臂导纳开启时，共享笛卡尔任务几何使用
+    `tau_ext=J_g^T F_ext` 的阻尼最小二乘解估计 `F_ext`。`zero_force` 积分
+    `M*xdd+D0*xd+Kh*x+Fstick/slip=F_ext`，`resistive` 积分
+    `M*xdd+Dr*xd+Kr*x=F_ext`；两者都以旋转向量指数映射生成连续 SE(3) 目标。 /
+    With admittance active on either arm, a damped-least-squares solution of
+    `tau_ext=J_g^T F_ext` estimates `F_ext`. `zero_force` integrates
+    `M*xdd+D0*xd+Kh*x+Fstick/slip=F_ext`, while `resistive` integrates
+    `M*xdd+Dr*xd+Kr*x=F_ext`; both generate a continuous SE(3) target through
+    the rotation-vector exponential.
 17. 旋量 IK 将目标转换为关节位置，并由 planned `move_j` 后端发送；该路径不
     调用 MIT。 / Screw IK converts the target to joint position and the planned
     `move_j` backend sends it; this path does not use MIT.
@@ -501,10 +528,14 @@ profile is used.
 
 | 模块 / Module | 责任 / Responsibility |
 | --- | --- |
-| `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、坐标验证和完整双向等价关系（仅逆关系唯一时） / Pure impedance formula, frame validation, and full bidirectional equivalence only when the inverse is unique |
-| `armbycontroller/impedance/admittance.py` | 纯导纳虚拟动力学和 `tau_ext -> F_ext` 阻尼最小二乘 / Pure admittance virtual dynamics and damped least-squares `tau_ext -> F_ext` mapping |
+| `armbycontroller/cartesian/spatial.py` | 阻抗/导纳唯一共用的笛卡尔任务几何：`[角;线]`、SE(3)、tool-origin Jacobian 和虚功双向映射；不含 K/D/M / Sole Cartesian Task Geometry shared by impedance/admittance: ordering, SE(3), tool-origin Jacobian, and bidirectional virtual-work mappings, without K/D/M |
+| `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、误差、增益等价和 Nero 动力学一致零空间 / Pure impedance law, error, gain equivalence, and Nero dynamically consistent nullspace |
+| `armbycontroller/impedance/controllers.py` | 关节 MIT 与笛卡尔阻抗 controller adapter、J2/J3/J4 姿态项和力矩限幅 / Joint MIT and Cartesian-impedance controller adapters, J2/J3/J4 posture term, and torque limiting |
+| `armbycontroller/admittance/core.py` | 两种导纳内部共用的输入整形、二阶积分、SE(3) 目标和安全边界 / Input conditioning, second-order integration, SE(3) target, and safety bounds shared internally by admittance modes |
+| `armbycontroller/admittance/zero_force.py` | Nero 优先的弱保持、阻尼、粘/滑抗漂移柔顺零力 / Nero-first anti-drift soft zero force with weak holding, damping, and stick/slip resistance |
+| `armbycontroller/admittance/resistive.py` | 正阻尼和正回中刚度的阻力导纳 / Resistive admittance with positive damping and restoring stiffness |
+| `armbycontroller/admittance/controller.py` | 导纳 SE(3) 到旋量 IK/planned-position 的 controller adapter / Controller adapter from admittance SE(3) to screw-IK planned position |
 | `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
-| `armbycontroller/control/adapters.py` | 关节 MIT、笛卡尔阻抗、当前位姿导纳三个无 ROS/CAN controller adapter；阻抗参考运动学按参考位置缓存 / Three ROS/CAN-free adapters: joint MIT, Cartesian impedance, and current pose admittance; impedance reference kinematics are cached by reference position |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射、断开和 profile 化正式重连 / Shared DEFAULT probe, version mapping, disconnect, and profile-specific formal reconnect for Nero/Piper-L |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
@@ -516,12 +547,13 @@ profile is used.
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
 | `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
-| `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴零空间、J2/J3/J4 混合姿态增益、限制和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis nullspace, J2/J3/J4 hybrid-posture gains, limits, and observer parameters |
-| `config/piper_l.yaml` | Piper-L 独立固件、夹爪、6 轴增益/比例/限制、导纳和观测器参数 / Piper-L-only firmware, gripper, six-axis tuning, limits, admittance, and observer parameters |
-| `test/test_cartesian_impedance.py` | 坐标、符号、耦合、功率与模型支撑契约 / Frame, sign, coupling, power, and model-support contracts |
+| `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴零空间、J2/J3/J4 混合姿态、两种导纳和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis nullspace, J2/J3/J4 hybrid posture, both admittance modes, and observer parameters |
+| `config/piper_l.yaml` | Piper-L 独立固件、夹爪、6 轴增益/比例/限制、两种导纳和观测器参数 / Piper-L-only firmware, gripper, six-axis tuning and limits, both admittance modes, and observer parameters |
+| `test/test_cartesian_common.py` | 共享 Jacobian、SE(3) 和虚功映射契约 / Shared Jacobian, SE(3), and virtual-work contracts |
+| `test/test_cartesian_impedance.py` | 阻抗符号、耦合、零空间与模型支撑契约 / Impedance sign, coupling, nullspace, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
 | `test/test_momentum_observer.py` | 空间动量、动能梯度、残差收敛、离散稳定性及禁止 SDK/CAN 访问 / Spatial momentum, kinetic gradient, residual convergence, discrete stability, and forbidden SDK/CAN-access contracts |
-| `test/test_cartesian_admittance.py` | wrench 估计、虚拟平衡、旋转向量、边界和重置契约 / Wrench-estimation, virtual-equilibrium, rotation-vector, bound, and reset contracts |
+| `test/test_cartesian_admittance.py` | 抗漂移柔顺零力、阻力平衡、旋转向量、边界和重置契约 / Anti-drift soft-zero-force, resistive-equilibrium, rotation-vector, bound, and reset contracts |
 | `test/test_control_interface.py` | 三个 controller adapter 的共用 interface、命令和 sample schema 契约 / Shared interface, command, and sample-schema contracts for three adapters |
 | `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
 | `test/test_hardware_connection.py` | 两次连接顺序、探测数据保存、版本到 profile 映射和失败断开契约 / Two-connection ordering, saved probe data, version-to-profile mapping, and failure-disconnect contracts |
@@ -572,13 +604,18 @@ implementation.
 | `momentum_observer_gain` | 1 or n | 1/s | `10.0` |
 | `momentum_observer_max_period` | scalar | s | `0.05`；较大数据间隙时重置 / reset after a larger stream gap |
 | `external_torque_topic` | string | — | `/arm_external_joint_torque`；`effort` 为 N·m / `effort` is N·m |
-| `admittance_virtual_mass` | 6 | N·m·s²/rad, kg | `[0.12,0.12,0.12,1.5,1.5,1.5]` |
-| `admittance_damping` | 6 | N·m·s/rad, N·s/m | `[0.8,0.8,0.8,8,8,8]` |
-| `admittance_stiffness` | 6 | N·m/rad, N/m | `[0.8,0.8,0.8,8,8,8]` |
-| `admittance_wrench_deadband` | 6 | N·m, N | `[0.03,0.03,0.03,0.15,0.15,0.15]` |
-| `admittance_wrench_limit` | 6 | N·m, N | `[2,2,2,8,8,8]` |
-| `admittance_offset_limit` | 6 | rad, m | `[0.35,0.35,0.35,0.10,0.10,0.10]` |
-| `admittance_velocity_limit` | 6 | rad/s, m/s | `[0.5,0.5,0.5,0.15,0.15,0.15]` |
+| `admittance_mode` | string | — | Nero=`zero_force`; Piper-L=`resistive` |
+| `admittance_virtual_mass` | 6 | N·m·s²/rad, kg | Nero=`[0.2,0.2,0.2,2,2,2]`; Piper-L=`[0.12,0.12,0.12,1.5,1.5,1.5]` |
+| `admittance_zero_force_damping` | 6 | N·m·s/rad, N·s/m | Nero=`[2,2,2,18,18,18]`; Piper-L=`[0.8,0.8,0.8,8,8,8]` |
+| `admittance_zero_force_holding_stiffness` | 6 | N·m/rad, N/m | Nero=`[0.25,0.25,0.25,5,5,5]`; Piper-L=`[0.1,0.1,0.1,2,2,2]` |
+| `admittance_zero_force_friction` | 6 | N·m, N | Nero=`[0.03,0.03,0.03,0.35,0.35,0.35]`; Piper-L=`[0.02,0.02,0.02,0.25,0.25,0.25]` |
+| `admittance_zero_force_stiction_velocity` | 6 | rad/s, m/s | Both=`[0.015,0.015,0.015,0.005,0.005,0.005]` |
+| `admittance_resistive_damping` | 6 | N·m·s/rad, N·s/m | Nero=`[2.5,2.5,2.5,25,25,25]`; Piper-L=`[0.8,0.8,0.8,8,8,8]` |
+| `admittance_resistive_stiffness` | 6 | N·m/rad, N/m | Nero=`[0.8,0.8,0.8,12,12,12]`; Piper-L=`[0.8,0.8,0.8,8,8,8]` |
+| `admittance_wrench_deadband` | 6 | N·m, N | Nero=`[0.05,0.05,0.05,0.25,0.25,0.25]`; Piper-L=`[0.03,0.03,0.03,0.15,0.15,0.15]` |
+| `admittance_wrench_limit` | 6 | N·m, N | Nero=`[1.5,1.5,1.5,6,6,6]`; Piper-L=`[2,2,2,8,8,8]` |
+| `admittance_offset_limit` | 6 | rad, m | Nero=`[0.25,0.25,0.25,0.08,0.08,0.08]`; Piper-L=`[0.35,0.35,0.35,0.10,0.10,0.10]` |
+| `admittance_velocity_limit` | 6 | rad/s, m/s | Nero=`[0.35,0.35,0.35,0.10,0.10,0.10]`; Piper-L=`[0.5,0.5,0.5,0.15,0.15,0.15]` |
 | `admittance_wrench_filter_hz` | scalar | Hz | `5.0` |
 | `admittance_wrench_dls_damping` | scalar | — | `0.05` |
 | `admittance_wrench_timeout` | scalar | s | `0.10`; stale wrench becomes zero |
@@ -687,6 +724,12 @@ in joint space before the total torque clip.
   Admittance is not protected by the ±8 N·m MIT command clip; drive torque in
   planned-position mode is determined by firmware. Software only bounds the
   wrench, virtual velocity/offset, and per-cycle IK joint step.
+- Nero 的 `zero_force` 是柔顺零力，不是数学零抵抗：弱 `Kh`、正 `D0`、输入
+  deadband 与有限 `Fstick/slip` 共同阻止静态残差积成漂移。只有超过阈值的接触
+  才开始移动。 / Nero's `zero_force` is soft zero force, not mathematically
+  zero resistance: weak `Kh`, positive `D0`, input deadband, and bounded
+  `Fstick/slip` prevent static residual from integrating into drift. Motion
+  begins only after contact exceeds the configured threshold.
 - 离散实现要求 `momentum_observer_gain * momentum_observer_max_period < 2`；
   不稳定组合在启动时拒绝。 / The discrete implementation requires
   `momentum_observer_gain * momentum_observer_max_period < 2`; unstable
@@ -815,18 +858,17 @@ source install/setup.bash
 launch 先加载 `config/common.yaml`，再根据 `robot_model` 只加载
 `config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期、默认 backend
 和固件探测时序；固件配置检查、工具、重力/模型比例、逐关节增益与限制、轨迹和
-观测器参数全部按机器人分开，导纳仅在 Piper-L 文件，Nero 速度估计、零空间和
-J2/J3/J4 混合姿态增益仅在 Nero 文件。显式 launch 参数仍有最高优先级。
+观测器参数和两种导纳的整套参数全部按机器人分开；Nero 速度估计、零空间和
+J2/J3/J4 混合姿态增益仍只在 Nero 文件。显式 launch 参数仍有最高优先级。
 `common_config:=/path/common.yaml`
 可替换共用层，
 `controller_config:=/path/robot.yaml` 可替换机器人层。 / Launch first loads
 `config/common.yaml`, then only `config/nero.yaml` or `config/piper_l.yaml`
 according to `robot_model`. Common holds only shared rates/default backend and
 firmware-probe timing; firmware configuration checks, tool, gravity/model
-scales, joint gains/limits, trajectories, and observer tuning are
-robot-specific. Admittance exists only in Piper-L, while Nero velocity
-estimation, nullspace tuning, and J2/J3/J4 hybrid-posture gains exist only in
-Nero.
+scales, joint gains/limits, trajectories, observer tuning, and both admittance
+modes are robot-specific. Velocity estimation, nullspace tuning, and
+J2/J3/J4 hybrid-posture gains exist only in Nero.
 Explicit launch arguments have highest priority. `common_config` and
 `controller_config` can replace the respective layers.
 
@@ -949,6 +991,19 @@ reference before Cartesian MIT. Nero uses `[1.9,1.9,1.9]` rotational stiffness
 without Piper-L's base-Z reinforcement and adds unprojected outer-loop
 `[0.5,0.5,0.6] N·m/rad` posture springs on J2/J3/J4.
 
+Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
+`/arm_external_joint_torque` 新鲜后按 `O` 捕获锚定位姿并进入抗漂移柔顺零力；
+默认平移 deadband 与虚拟摩擦分别为 `0.25 N`、`0.35 N`，且有 `5 N/m` 弱保持，
+因此约小于 `0.6 N` 的静态模型残差不会开始移动；
+若要验证带阻力且松手回中的版本，在启动命令末尾追加
+`admittance_mode:=resistive`。 / Nero defaults to
+`admittance_mode=zero_force`. With the arm supported and a fresh
+`/arm_external_joint_torque`, press `O` to capture the anchor and enter
+anti-drift soft zero force. The default translational deadband and virtual
+friction are `0.25 N` and `0.35 N`, with weak `5 N/m` holding; a static model
+residual below roughly `0.6 N` therefore does not initiate motion. Append
+`admittance_mode:=resistive` to test the strongly returning variant.
+
 ### Piper-L 实机接线 / Piper-L hardware wiring
 
 ```bash
@@ -970,10 +1025,12 @@ current pose so the first task error is zero; press `P` to update references
 through screw IK. First hardware trials require physical arm support, an
 accessible emergency stop, and a clear workspace.
 
-Piper-L 导纳使用同一启动命令。保持 `impedance_enabled:=false`，启动后按 `O`
-捕获当前位姿并进入导纳；再次按 `O` 退出。若阻抗已开启，`O` 会先退出阻抗；若
-导纳已开启，`I` 会先退出导纳。导纳中 `P`、手动 jog 和 home 被锁住。 /
-Piper-L admittance uses the same launch command. Keep
+Piper-L 默认使用带阻尼和回中刚度的 `resistive` 导纳；追加
+`admittance_mode:=zero_force` 可选择零力版本。保持 `impedance_enabled:=false`，
+启动后按 `O` 捕获当前位姿并进入导纳；再次按 `O` 退出。若阻抗已开启，`O` 会先
+退出阻抗；若导纳已开启，`I` 会先退出导纳。导纳中 `P`、手动 jog 和 home 被
+锁住。 / Piper-L defaults to damped and restoring `resistive` admittance;
+append `admittance_mode:=zero_force` to select the zero-force variant. Keep
 `impedance_enabled:=false`, then press `O` to capture the current pose and
 enter admittance; press `O` again to leave. If impedance is active, `O` exits
 it first; if admittance is active, `I` exits it first. `P`, manual jog, and
@@ -1032,11 +1089,16 @@ The formula layer should be diagnosed in this order:
     planned 导纳再进入 MIT 阻抗。 / After `O`, is admittance true and
     impedance false; after `I`, does planned admittance exit before MIT
     impedance enters?
-13. `ros2 topic echo /arm_control_sample` 是否显示所选 controller、相同周期的
+13. `/arm_control_sample` 的 `interaction_mode` 是否明确为
+    `admittance_zero_force` 或 `admittance_resistive`；前者松手后是否停止在新
+    偏置，后者是否回到锚点。 / Does `/arm_control_sample` identify
+    `admittance_zero_force` or `admittance_resistive`; does the former settle
+    at its new offset while the latter returns to the anchor?
+14. `ros2 topic echo /arm_control_sample` 是否显示所选 controller、相同周期的
     state/reference/command 和 `schema_version: 1`。 / Does
     `/arm_control_sample` show the selected controller, same-cycle
     state/reference/command, and `schema_version: 1`?
-14. recorder status 是否给出唯一 run directory；正常收尾后四个文件是否存在，
+15. recorder status 是否给出唯一 run directory；正常收尾后四个文件是否存在，
     `summary.sample_count` 是否等于 `samples.jsonl` 行数。 / Does recorder
     status expose a unique run directory, do all four files exist after a
     normal close, and does `summary.sample_count` equal the number of JSONL
@@ -1067,11 +1129,15 @@ The formula layer should be diagnosed in this order:
    100 Hz topic seam, separate process, O(n) momentum recursion, and residual
    publication are done; friction identification and collision-threshold
    validation remain undone.
-8. **Piper-L 导纳 / Piper-L admittance**：已完成 `O` 键、I/O 互锁、DLS wrench、
-   虚拟动力学、旋量 IK 和 planned adapter；实机手感与残差质量仍需低速验证。 /
-   The `O` key, I/O interlock, DLS wrench, virtual dynamics, screw IK, and
-   planned adapter are implemented; hardware feel and residual quality still
-   require low-speed validation.
+8. **Nero/Piper-L 导纳 / Nero/Piper-L admittance**：已完成独立
+   `cartesian/` 共用任务几何、完全分开的 `impedance/`/`admittance/` adapter、
+   Nero 抗漂移柔顺零力、`resistive`、机器人独立参数、`O` 键、I/O 互锁、7/6 轴
+   DLS wrench、旋量 IK 和 planned adapter；实机阈值与手感仍需低速验证。 /
+   Shared `cartesian/` task geometry, separated `impedance/` and `admittance/`
+   adapters, Nero anti-drift soft zero force, `resistive` dynamics,
+   robot-specific tuning, the `O` key, I/O interlock, seven/six-axis DLS
+   wrench mapping, screw IK, and planned adapter are implemented; hardware
+   thresholds and feel still require low-speed validation.
 9. **统一 controller seam / Unified controller seam**：已完成三个 adapter 的
    `ControlInput -> ControlResult`、统一命令类型、JSON sample 和共用测试面。 /
    The three adapters now share `ControlInput -> ControlResult`, normalized
@@ -1121,6 +1187,8 @@ The formula layer should be diagnosed in this order:
 | 关节阻抗 | Joint impedance | Joint-space spring-damper torque law |
 | 笛卡尔阻抗 | Cartesian impedance | Tool-space wrench spring-damper law |
 | 笛卡尔导纳 | Cartesian admittance | External wrench drives a virtual mass-damper-spring pose |
+| 柔顺零力 | Soft zero force | Near-zero desired wrench with weak holding, damping, and stick/slip anti-drift resistance |
+| 阻力导纳 | Resistive admittance | Positive damping and stiffness resist motion and restore the anchor |
 | 互锁 | Interlock | Entering impedance exits admittance and vice versa |
 | 空间雅可比 | Space Jacobian | PoE space-twist Jacobian `[omega; v]` |
 | 几何雅可比 | Geometric Jacobian | Tool-origin velocity Jacobian `[omega; p_dot]` |
@@ -1177,9 +1245,11 @@ The formula layer should be diagnosed in this order:
   AGX MIT/planned adapter 与互锁基线。 / This repository's
   `armbycontroller/ros/keyboard_controller_node.py`: the current ROS state
   machine, AGX MIT/planned adapters, and interlock baseline.
-- 本仓库 `armbycontroller/control/core.py` 与 `control/adapters.py`：统一 controller
-  interface、命令 schema 和三个实际 adapter。 / This repository's controller
-  interface, command schema, and three concrete adapters.
+- 本仓库 `armbycontroller/control/core.py`、`cartesian/spatial.py`、
+  `impedance/controllers.py` 与 `admittance/controller.py`：统一 controller
+  interface、共用任务几何、命令 schema 和解耦 adapter。 / This repository's
+  controller interface, shared task geometry, command schema, and decoupled
+  adapters.
 - 本仓库 `armbycontroller/experiment/core.py`：实验 manifest、证据流、sink seam
   和汇总指标的实际定义。 / This repository's implemented experiment manifest,
   evidence streams, sink seam, and summary metrics.

@@ -4,7 +4,7 @@
 
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
-| `CMakeLists.txt` | C++/Python 安装、节点安装、资源安装和七组 pytest 注册 / C++/Python install, node/resource install, and seven pytest registrations |
+| `CMakeLists.txt` | C++/Python 安装、节点安装、资源安装和八组 pytest 注册 / C++/Python install, node/resource install, and eight pytest registrations |
 | `package.xml` | ROS 2 build/runtime/test 依赖；实验 recorder 需要 `std_srvs` / ROS 2 dependencies, including `std_srvs` for experiment recording |
 | `resource/armbycontroller` | ament Python package 索引 marker / ament Python-package index marker |
 | `README.md` | 快速构建与运行入口 / quick build and run entry point |
@@ -25,8 +25,8 @@
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
 | `config/common.yaml` | 两种机械臂共用的控制/观测周期、默认 backend 和固件探测时序 / shared control/observer rates, default backend, and firmware-probe timing |
-| `config/nero.yaml` | Nero 独立侧装裸臂、7 轴补偿/阻抗/轨迹、J2/J3/J4 混合姿态与速度估计参数 / Nero-only side-mounted bare-arm, seven-axis compensation/impedance/trajectory, hybrid J2/J3/J4-posture, and velocity-estimation parameters |
-| `config/piper_l.yaml` | Piper-L 独立夹爪、6 轴补偿/阻抗/轨迹与导纳参数 / Piper-L-only gripper, six-axis compensation/impedance/trajectory, and admittance parameters |
+| `config/nero.yaml` | Nero 独立侧装裸臂、7 轴补偿/阻抗/轨迹、两种导纳、J2/J3/J4 混合姿态与速度估计参数 / Nero-only side-mounted bare-arm, seven-axis compensation/impedance/trajectory, both admittance modes, hybrid J2/J3/J4-posture, and velocity-estimation parameters |
+| `config/piper_l.yaml` | Piper-L 独立夹爪、6 轴补偿/阻抗/轨迹与两种导纳参数 / Piper-L-only gripper, six-axis compensation/impedance/trajectory, and both admittance modes |
 
 ## 机器人资源 / Robot assets
 
@@ -44,10 +44,12 @@
 | `test/test_arm_control.py` | 状态机、轨迹、AGX adapter、安全启动和模式互锁集成回归 / state machine, trajectory, AGX adapter, startup safety, and interlock regression |
 | `test/test_momentum_observer.py` | 观测器公式、时间戳与 ROS 隔离 / observer formula, timestamp, and ROS isolation |
 | `test/test_control_interface.py` | 统一控制器 interface 与三个 adapter / common controller interface and three adapters |
+| `test/test_cartesian_common.py` | 阻抗/导纳共用笛卡尔任务几何的独立契约 / independent contracts for shared Cartesian Task Geometry |
 | `test/test_experiment.py` | 实验生命周期、sink 与指标 / experiment lifecycle, sinks, and metrics |
 | `test/test_hardware_connection.py` | 两阶段连接、版本映射和失败清理；详细语义见硬件连接分类 / two-stage connection, version mapping, and failure cleanup; see the hardware-connection category for semantics |
 
-`test/test_cartesian_impedance.py` 和 `test/test_cartesian_admittance.py` 属于用户指定
-排除的 `impedance` 主题，不在本分类重复解释。 / `test_cartesian_impedance.py`
-and `test_cartesian_admittance.py` belong to the explicitly excluded impedance
-topic and are not re-explained here.
+`test/test_cartesian_impedance.py` 属于用户指定排除的 `impedance` 主题；
+`test/test_cartesian_admittance.py` 验证独立导纳目录的两种公式、模式工厂和安全
+边界。 / `test/test_cartesian_impedance.py` belongs to the explicitly excluded
+impedance topic; `test/test_cartesian_admittance.py` verifies both formulas,
+the mode factory, and safety bounds in the separate admittance package.

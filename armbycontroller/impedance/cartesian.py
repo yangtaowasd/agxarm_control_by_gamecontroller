@@ -4,8 +4,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from armbycontroller.cartesian import geometric_jacobian
+from armbycontroller.cartesian import joint_torque_from_wrench
+from armbycontroller.cartesian import spatial_vector
+from armbycontroller.cartesian import transform_matrix
 from armbycontroller.modeling.lie import rotation_vector
-from armbycontroller.modeling.lie import skew
 
 
 @dataclass(frozen=True)
@@ -67,21 +70,6 @@ def _nonnegative_joint_gain(values, size, name):
     return result
 
 
-def _transform(values, name):
-    result = np.asarray(values, dtype=float)
-    if (
-        result.shape != (4, 4)
-        or not np.all(np.isfinite(result))
-        or not np.allclose(result[3], [0.0, 0.0, 0.0, 1.0], atol=1e-9)
-        or not np.allclose(
-            result[:3, :3].T @ result[:3, :3], np.eye(3), atol=1e-7
-        )
-        or not np.isclose(np.linalg.det(result[:3, :3]), 1.0, atol=1e-7)
-    ):
-        raise ValueError(f"{name} must be a finite SE(3) transform")
-    return result
-
-
 def _symmetric_psd_matrix(values, size, name):
     result = np.asarray(values, dtype=float)
     if result.shape == (size,):
@@ -108,30 +96,10 @@ def _impedance_matrix(values, name):
     return _symmetric_psd_matrix(values, 6, name)
 
 
-def geometric_jacobian(model, joint_positions):
-    """Return the base-frame tool-origin Jacobian in ``[angular; linear]``."""
-    joints = np.asarray(joint_positions, dtype=float)
-    if joints.ndim != 1 or joints.size < 1 or not np.all(np.isfinite(joints)):
-        raise ValueError("joint_positions must be a finite vector")
-    pose = _transform(model.forward_kinematics(joints), "current_pose")
-    space = np.asarray(model.space_jacobian(joints), dtype=float)
-    if space.shape != (6, joints.size) or not np.all(np.isfinite(space)):
-        raise ValueError("model must return a finite 6xn space Jacobian")
-
-    # A Modern Robotics space twist is [omega; v], where the velocity of the
-    # tool origin is p_dot = v + omega x p.  Cartesian impedance acts at that
-    # origin, so convert it before using wrench/velocity power duality.
-    jacobian = np.vstack((
-        space[:3],
-        space[3:] - skew(pose[:3, 3]) @ space[:3],
-    ))
-    return jacobian, pose
-
-
 def cartesian_pose_error(current_pose, desired_pose):
     """Return tool-origin error ``[SO(3) rotation vector; position]``."""
-    current = _transform(current_pose, "current_pose")
-    desired = _transform(desired_pose, "desired_pose")
+    current = transform_matrix(current_pose, "current_pose")
+    desired = transform_matrix(desired_pose, "desired_pose")
     rotation_error = rotation_vector(
         desired[:3, :3] @ current[:3, :3].T
     )
@@ -241,8 +209,8 @@ def cartesian_impedance_command(
     )
     if not np.all(np.isfinite(positions)):
         raise ValueError("joint_positions must be a finite vector")
-    target = _transform(desired_pose, "desired_pose")
-    target_twist = _finite_vector(desired_twist, 6, "desired_twist")
+    target = transform_matrix(desired_pose, "desired_pose")
+    target_twist = spatial_vector(desired_twist, "desired_twist")
     stiffness = _impedance_matrix(cartesian_stiffness, "stiffness")
     damping = _impedance_matrix(cartesian_damping, "damping")
 
@@ -255,7 +223,7 @@ def cartesian_impedance_command(
         stiffness @ pose_error
         + damping @ (target_twist - measured_twist)
     )
-    task_torque = jacobian.T @ wrench
+    task_torque = joint_torque_from_wrench(jacobian, wrench)
 
     nullspace_torque = np.zeros(positions.size, dtype=float)
     if nullspace_reference is not None:

@@ -111,6 +111,25 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert "firmware_probe_timeout" in module.CONFIGURED_PARAMETERS
     assert "firmware_probe_poll_period" in module.CONFIGURED_PARAMETERS
     assert "firmware_reconnect_delay" in module.CONFIGURED_PARAMETERS
+    assert "admittance_mode" in module.CONFIGURED_PARAMETERS
+    assert "admittance_zero_force_damping" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "admittance_zero_force_holding_stiffness" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "admittance_zero_force_friction" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "admittance_zero_force_stiction_velocity" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "admittance_resistive_damping" in (
+        module.CONFIGURED_PARAMETERS
+    )
+    assert "admittance_resistive_stiffness" in (
+        module.CONFIGURED_PARAMETERS
+    )
 
 
 def test_robot_configs_separate_nero_and_piper_parameters():
@@ -127,7 +146,12 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "nero_mount: side" in nero
     assert "tool_configuration: none" in nero
     assert "nero_velocity_estimation_enabled: true" in nero
-    assert "admittance_virtual_mass" not in nero
+    assert "admittance_mode: zero_force" in nero
+    assert "admittance_virtual_mass" in nero
+    assert "admittance_zero_force_damping" in nero
+    assert "admittance_zero_force_holding_stiffness" in nero
+    assert "admittance_zero_force_friction" in nero
+    assert "admittance_resistive_stiffness" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
     assert "cartesian_impedance_base_z_rotation_stiffness: 1.9" in nero
     assert "cartesian_impedance_translation_stiffness: 70.0" in nero
@@ -140,7 +164,12 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "tool_configuration: gripper" in piper
     assert "nero_mount" not in piper
     assert "nero_velocity_estimation_enabled" not in piper
+    assert "admittance_mode: resistive" in piper
     assert "admittance_virtual_mass" in piper
+    assert "admittance_zero_force_damping" in piper
+    assert "admittance_zero_force_holding_stiffness" in piper
+    assert "admittance_zero_force_friction" in piper
+    assert "admittance_resistive_stiffness" in piper
     assert "cartesian_impedance_rotation_stiffness: 0.4" in piper
     assert "cartesian_impedance_base_z_rotation_stiffness: 4.0" in piper
     assert "cartesian_impedance_joint_posture_stiffness" not in piper
@@ -1009,6 +1038,48 @@ def test_external_torque_callback_uses_urdf_jacobian_without_sdk(
     sample = JointState()
     sample.position = [0.0] * 6
     sample.effort = [1.0] * 6
+
+    controller.external_torque_callback(sample)
+
+    assert controller.latest_external_wrench == pytest.approx(
+        np.ones(6) / 1.01
+    )
+    assert controller.latest_external_wrench_received_at == 12.5
+
+
+def test_nero_external_torque_callback_maps_seven_joints_to_six_axis_wrench(
+    monkeypatch,
+):
+    class FakeModel:
+        def forward_kinematics(self, joints):
+            del joints
+            return np.eye(4)
+
+        def space_jacobian(self, joints):
+            del joints
+            return np.column_stack((np.eye(6), np.zeros(6)))
+
+    class FakeLogger:
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.robot_model = "nero"
+    controller.joint_count = 7
+    controller.gravity_model = FakeModel()
+    controller.admittance_wrench_dls_damping = 0.1
+    controller.latest_external_wrench = np.zeros(6)
+    controller.latest_external_wrench_received_at = -math.inf
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        lambda: 12.5,
+    )
+    sample = JointState()
+    sample.position = [0.0] * 7
+    sample.effort = [1.0] * 6 + [0.0]
 
     controller.external_torque_callback(sample)
 

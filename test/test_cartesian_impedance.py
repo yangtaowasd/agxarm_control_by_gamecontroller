@@ -6,12 +6,12 @@ import modern_robotics as mr
 import numpy as np
 import pytest
 
+from armbycontroller.cartesian import geometric_jacobian
 from armbycontroller.impedance.cartesian import cartesian_impedance_command
 from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
 from armbycontroller.impedance.cartesian import cartesian_pose_error
 from armbycontroller.impedance.cartesian import equivalent_cartesian_impedance
 from armbycontroller.impedance.cartesian import equivalent_joint_impedance
-from armbycontroller.impedance.cartesian import geometric_jacobian
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 
 

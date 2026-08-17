@@ -23,23 +23,28 @@ from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
 from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
-from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
-from armbycontroller.impedance.cartesian import geometric_jacobian
-from armbycontroller.impedance.admittance import CartesianAdmittance
-from armbycontroller.impedance.admittance import estimate_cartesian_wrench
-from armbycontroller.control import CartesianAdmittanceController
-from armbycontroller.control import CartesianImpedanceController
+from armbycontroller.admittance import ADMITTANCE_MODES
+from armbycontroller.admittance import create_cartesian_admittance
+from armbycontroller.admittance.controller import CartesianAdmittanceController
+from armbycontroller.cartesian import geometric_jacobian
+from armbycontroller.cartesian import wrench_from_joint_torque
 from armbycontroller.control import ControlEngine
 from armbycontroller.control import ControlInput
 from armbycontroller.control import ControlReference
 from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import ControlState
-from armbycontroller.control import JointMitController
 from armbycontroller.control import MitCommand
 from armbycontroller.control import PositionCommand
-from armbycontroller.control import bounded_model_feedforward as _bounded_model
 from armbycontroller.control import control_sample
-from armbycontroller.control import limit_mit_combined_torque as _limit_mit
+from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
+from armbycontroller.impedance.controllers import CartesianImpedanceController
+from armbycontroller.impedance.controllers import JointMitController
+from armbycontroller.impedance.controllers import (
+    bounded_model_feedforward as _bounded_model,
+)
+from armbycontroller.impedance.controllers import (
+    limit_mit_combined_torque as _limit_mit,
+)
 from armbycontroller.hardware import connect_arm_two_stage
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 from armbycontroller.ik.core import AgxIkEngine
@@ -534,28 +539,47 @@ class ArmKeyboardController(Node):
         )
         self.declare_parameter(
             "admittance_virtual_mass",
-            [0.12, 0.12, 0.12, 1.5, 1.5, 1.5],
+            [0.2, 0.2, 0.2, 2.0, 2.0, 2.0],
+        )
+        self.declare_parameter("admittance_mode", "zero_force")
+        self.declare_parameter(
+            "admittance_zero_force_damping",
+            [2.0, 2.0, 2.0, 18.0, 18.0, 18.0],
         )
         self.declare_parameter(
-            "admittance_damping", [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+            "admittance_zero_force_holding_stiffness",
+            [0.25, 0.25, 0.25, 5.0, 5.0, 5.0],
         )
         self.declare_parameter(
-            "admittance_stiffness", [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+            "admittance_zero_force_friction",
+            [0.03, 0.03, 0.03, 0.35, 0.35, 0.35],
+        )
+        self.declare_parameter(
+            "admittance_zero_force_stiction_velocity",
+            [0.015, 0.015, 0.015, 0.005, 0.005, 0.005],
+        )
+        self.declare_parameter(
+            "admittance_resistive_damping",
+            [2.5, 2.5, 2.5, 25.0, 25.0, 25.0],
+        )
+        self.declare_parameter(
+            "admittance_resistive_stiffness",
+            [0.8, 0.8, 0.8, 12.0, 12.0, 12.0],
         )
         self.declare_parameter(
             "admittance_wrench_deadband",
-            [0.03, 0.03, 0.03, 0.15, 0.15, 0.15],
+            [0.05, 0.05, 0.05, 0.25, 0.25, 0.25],
         )
         self.declare_parameter(
-            "admittance_wrench_limit", [2.0, 2.0, 2.0, 8.0, 8.0, 8.0]
+            "admittance_wrench_limit", [1.5, 1.5, 1.5, 6.0, 6.0, 6.0]
         )
         self.declare_parameter(
             "admittance_offset_limit",
-            [0.35, 0.35, 0.35, 0.10, 0.10, 0.10],
+            [0.25, 0.25, 0.25, 0.08, 0.08, 0.08],
         )
         self.declare_parameter(
             "admittance_velocity_limit",
-            [0.5, 0.5, 0.5, 0.15, 0.15, 0.15],
+            [0.35, 0.35, 0.35, 0.10, 0.10, 0.10],
         )
         self.declare_parameter("admittance_wrench_filter_hz", 5.0)
         self.declare_parameter("admittance_wrench_dls_damping", 0.05)
@@ -826,8 +850,12 @@ class ArmKeyboardController(Node):
         )
         task_parameter_names = (
             "admittance_virtual_mass",
-            "admittance_damping",
-            "admittance_stiffness",
+            "admittance_zero_force_damping",
+            "admittance_zero_force_holding_stiffness",
+            "admittance_zero_force_friction",
+            "admittance_zero_force_stiction_velocity",
+            "admittance_resistive_damping",
+            "admittance_resistive_stiffness",
             "admittance_wrench_deadband",
             "admittance_wrench_limit",
             "admittance_offset_limit",
@@ -839,6 +867,13 @@ class ArmKeyboardController(Node):
             )
             for name in task_parameter_names
         }
+        self.admittance_mode = str(
+            self.get_parameter("admittance_mode").value
+        ).strip().lower()
+        if self.admittance_mode not in ADMITTANCE_MODES:
+            raise ValueError(
+                "admittance_mode must be zero_force or resistive"
+            )
         self.admittance_wrench_filter_hz = float(
             self.get_parameter("admittance_wrench_filter_hz").value
         )
@@ -848,10 +883,27 @@ class ArmKeyboardController(Node):
         self.admittance_wrench_timeout = float(
             self.get_parameter("admittance_wrench_timeout").value
         )
-        self.admittance_controller = CartesianAdmittance(
+        self.admittance_controller = create_cartesian_admittance(
+            self.admittance_mode,
             virtual_mass=admittance_values["admittance_virtual_mass"],
-            damping=admittance_values["admittance_damping"],
-            stiffness=admittance_values["admittance_stiffness"],
+            zero_force_damping=admittance_values[
+                "admittance_zero_force_damping"
+            ],
+            zero_force_holding_stiffness=admittance_values[
+                "admittance_zero_force_holding_stiffness"
+            ],
+            zero_force_friction=admittance_values[
+                "admittance_zero_force_friction"
+            ],
+            zero_force_stiction_velocity=admittance_values[
+                "admittance_zero_force_stiction_velocity"
+            ],
+            resistive_damping=admittance_values[
+                "admittance_resistive_damping"
+            ],
+            resistive_stiffness=admittance_values[
+                "admittance_resistive_stiffness"
+            ],
             wrench_deadband=admittance_values[
                 "admittance_wrench_deadband"
             ],
@@ -1882,15 +1934,9 @@ class ArmKeyboardController(Node):
             )
 
     def toggle_admittance(self):
-        """Toggle Piper-L Cartesian admittance in planned joint mode."""
+        """Toggle Cartesian admittance in planned joint mode."""
         if getattr(self, "admittance_enabled", False):
             self._exit_admittance("O toggle")
-            return
-        if self.robot_model != "piper_l":
-            self.get_logger().error(
-                "Cartesian admittance is currently implemented for "
-                "piper_l only"
-            )
             return
         if self.impedance_enabled:
             self.toggle_impedance()
@@ -1973,12 +2019,20 @@ class ArmKeyboardController(Node):
         self.last_admittance_tick_time = None
         self.admittance_enabled = True
         self._check_interaction_mode_invariant()
+        selected_mode = getattr(
+            self,
+            "admittance_mode",
+            getattr(self.admittance_controller, "mode", "resistive"),
+        )
         self.get_logger().warning(
-            "backend=planned joint + control=Cartesian admittance; "
+            "backend=planned joint + control=Cartesian admittance "
+            f"({selected_mode}); "
             "I is interlocked; press O to exit"
         )
         self._publish_control_event(
-            "controller_enabled", controller="cartesian_admittance"
+            "controller_enabled",
+            controller="cartesian_admittance",
+            admittance_mode=selected_mode,
         )
 
     def _exit_admittance(self, reason):
@@ -1997,17 +2051,21 @@ class ArmKeyboardController(Node):
         self.control_mode = self.admittance_previous_control_mode
         self._check_interaction_mode_invariant()
         self.send_target(f"admittance exit hold ({reason})")
+        selected_mode = getattr(
+            self,
+            "admittance_mode",
+            getattr(self.admittance_controller, "mode", "resistive"),
+        )
         self._publish_control_event(
             "controller_disabled",
             controller="cartesian_admittance",
+            admittance_mode=selected_mode,
             reason=str(reason),
         )
         self.get_logger().info("Cartesian admittance exited")
 
     def external_torque_callback(self, message):
         """Convert observer residual torque to a base-frame wrench."""
-        if self.robot_model != "piper_l":
-            return
         model = getattr(self, "gravity_model", None)
         if model is None:
             return
@@ -2022,7 +2080,7 @@ class ArmKeyboardController(Node):
             ):
                 raise ValueError("external torque sample is incomplete")
             jacobian, _ = geometric_jacobian(model, joints)
-            wrench = estimate_cartesian_wrench(
+            wrench = wrench_from_joint_torque(
                 jacobian,
                 external_torque,
                 self.admittance_wrench_dls_damping,
@@ -2293,7 +2351,7 @@ class ArmKeyboardController(Node):
         self._publish_control_result(sample, result, "impedance")
 
     def _admittance_tick(self, feedback):
-        """Advance the Piper-L virtual dynamics and send one planned target."""
+        """Advance the selected virtual dynamics and send one target."""
         now = time.monotonic()
         nominal_period = 1.0 / self.mit_command_rate
         previous = self.last_admittance_tick_time
@@ -2350,11 +2408,22 @@ class ArmKeyboardController(Node):
             joints,
         )
         self._send_control_result(result)
-        self._publish_control_result(sample, result, "admittance")
+        selected_mode = getattr(
+            self,
+            "admittance_mode",
+            getattr(self.admittance_controller, "mode", "resistive"),
+        )
+        self._publish_control_result(
+            sample, result, f"admittance_{selected_mode}"
+        )
         self.get_logger().info(
-            "admittance wrench=%s offset=%s"
+            "admittance mode=%s wrench=%s resistance=%s offset=%s"
             % (
+                selected_mode,
                 np.round(state.applied_wrench, 3).tolist(),
+                np.round(
+                    getattr(state, "resisting_wrench", np.zeros(6)), 3
+                ).tolist(),
                 np.round(state.offset, 4).tolist(),
             ),
             throttle_duration_sec=1.0,

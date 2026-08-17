@@ -20,10 +20,15 @@ arm_keyboard_controller:
     cartesian_impedance_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
     cartesian_impedance_model_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 
-    # Piper-L-only Cartesian admittance tuning.
+    # Piper-L-only Cartesian admittance tuning, [Mx, My, Mz, Fx, Fy, Fz].
+    admittance_mode: resistive
     admittance_virtual_mass: [0.12, 0.12, 0.12, 1.5, 1.5, 1.5]
-    admittance_damping: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
-    admittance_stiffness: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+    admittance_zero_force_damping: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+    admittance_zero_force_holding_stiffness: [0.1, 0.1, 0.1, 2.0, 2.0, 2.0]
+    admittance_zero_force_friction: [0.02, 0.02, 0.02, 0.25, 0.25, 0.25]
+    admittance_zero_force_stiction_velocity: [0.015, 0.015, 0.015, 0.005, 0.005, 0.005]
+    admittance_resistive_damping: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
+    admittance_resistive_stiffness: [0.8, 0.8, 0.8, 8.0, 8.0, 8.0]
     admittance_wrench_deadband: [0.03, 0.03, 0.03, 0.15, 0.15, 0.15]
     admittance_wrench_limit: [2.0, 2.0, 2.0, 8.0, 8.0, 8.0]
     admittance_offset_limit: [0.35, 0.35, 0.35, 0.10, 0.10, 0.10]

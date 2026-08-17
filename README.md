@@ -83,7 +83,7 @@ absolute limit (±8 N·m by default, including model support and posture
 torque). It does not apply a previous-cycle torque-rate limiter (`delta_tau`
 or `delta_tau_max`).
 
-## Passive momentum observer and Piper-L admittance
+## Passive momentum observer and Cartesian admittance
 
 The launch file also starts a passive generalized-momentum observer. The
 controller reads one cached `q`, `qdot`, and motor-torque sample per 100 Hz
@@ -112,12 +112,30 @@ measured motor torque for the interval that just elapsed. The default gain is
 impedance torque and cannot trigger an emergency stop. Disable the process
 with `momentum_observer_enabled:=false`.
 
-On Piper-L, `O` toggles Cartesian admittance. The observed external joint
-torque is mapped to a base-frame wrench by damped least squares, integrated
-through `M_a*xdd + D_a*xd + K_a*x = F_ext`, then converted to planned joint
-targets by screw IK. `I` and `O` are strictly interlocked: entering impedance
-exits admittance first, and entering admittance exits impedance first. Nero
-admittance is intentionally not enabled yet.
+On both Nero and Piper-L, `O` toggles Cartesian admittance. The observed
+external joint torque is mapped to a base-frame wrench by damped least squares,
+integrated, then converted to planned joint targets by screw IK. The separate
+`armbycontroller/admittance/` package provides two explicit modes:
+
+- `zero_force` (soft zero force):
+  `M_a*xdd + D_0*xd + K_h*x + F_stick/slip = F_ext`. `K_h` is deliberately
+  weak; together with light damping and bounded virtual friction it rejects
+  observer bias and avoids drift without creating the strong return feel of
+  `resistive`.
+- `resistive`: `M_a*xdd + D_r*xd + K_r*x = F_ext`, with damping and a spring
+  back to the pose captured on entry.
+
+Nero defaults to `admittance_mode:=zero_force`; Piper-L defaults to
+`admittance_mode:=resistive`. Each robot has independent mass, damping,
+stiffness, deadband, and motion limits in its own YAML file. `I` and `O` are
+strictly interlocked: entering impedance exits admittance first, and entering
+admittance exits impedance first.
+
+Shared Cartesian task geometry now lives only in `armbycontroller/cartesian/`:
+the base-frame `[angular; linear]` convention, SE(3) validation, tool-origin
+geometric Jacobian, and `tau=Jg.T*wrench` mappings. Impedance equations and MIT
+adapters live in `impedance/`; admittance dynamics and its planned-position
+adapter live in `admittance/`.
 
 Because the URDF omits friction, backlash, cable forces, payload error, motor
 torque-tracking error, and joint elasticity, the residual is a total model
@@ -242,6 +260,7 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `P`: switch between joint mode and Cartesian IK mode
 - `I`: switch between planned position control and the selected MIT impedance
   backend (Cartesian by default)
+- `O`: toggle the selected planned-position Cartesian admittance mode
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
@@ -284,8 +303,9 @@ shared controller/observer rates, default interaction backend, and firmware
 probe timing. Firmware configuration checks, tool, gravity/model compensation,
 joint gains, Cartesian gains, torque limits, trajectory limits, and observer
 tuning are explicit in each robot file.
-Piper-L admittance parameters exist only in `piper_l.yaml`; Nero velocity,
-nullspace, and joint-selective posture parameters exist only in `nero.yaml`.
+Nero and Piper-L admittance parameters are independent in their respective
+YAML files. Nero velocity, nullspace, and joint-selective posture parameters
+remain Nero-only.
 
 The Nero profile explicitly uses `nero_mount: side` and
 `tool_configuration: none`, so it loads the bare `nero_description.urdf`.

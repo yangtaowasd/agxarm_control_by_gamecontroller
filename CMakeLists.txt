@@ -98,6 +98,10 @@ if(BUILD_TESTING)
     test/test_cartesian_admittance.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
+  ament_add_pytest_test(cartesian_common_test
+    test/test_cartesian_common.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
   ament_add_pytest_test(controller_interface_test
     test/test_control_interface.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1

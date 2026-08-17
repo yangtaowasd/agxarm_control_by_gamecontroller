@@ -19,7 +19,9 @@ external-disturbance observation mathematics.
 ## 依赖方向 / Dependency direction
 
 ```text
-modeling/lie.py <- modeling/screw_model.py <- control adapters
+modeling/lie.py <- cartesian/spatial.py <- impedance/ | admittance/
+       ^
+       +-------- modeling/screw_model.py <- controller adapters
                               \---- modeling/momentum_observer.py
 ```
 
