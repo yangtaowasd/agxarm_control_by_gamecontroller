@@ -30,17 +30,20 @@ strictly interlocked: `I` toggles impedance and `O` toggles admittance;
 entering either first exits the other, and both can never run together.
 Both arms support admittance, with independent robot-specific YAML tuning.
 
-真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建只读探测
+真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建探测
 实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
 `software_version` 选择 Nero/Piper-L 对应驱动 profile。探测实例断开后等待默认
 `0.5 s`，才创建全新的正式控制实例。
-探测阶段不会使能机械臂或发送运动命令。 / Real-hardware startup uses one
-two-stage connection for both arms. Stage one creates a read-only probe with
+Nero 和 Piper-L 探测阶段都会短暂请求使能，读取固件后立即请求失能；不会发送
+运动或固件写入命令。 /
+Real-hardware startup uses one two-stage connection for both arms. Stage one
+creates a probe with
 the SDK `default` profile, connects, saves the complete firmware dictionary,
 and always disconnects. After a default `0.5 s` post-disconnect delay, stage
 two selects the Nero/Piper-L driver profile from the saved `software_version`
 and creates a distinct formal control instance.
-The probe never enables the arm or sends a motion command.
+Both Nero and Piper-L probes briefly request enable and immediately request
+disable after the firmware read; they send no motion or firmware-write command.
 
 ## 2. 心智模型 / Mental model
 
@@ -673,12 +676,13 @@ in joint space before the total torque clip.
 
 ## 10. 安全边界 / Safety boundaries
 
-- 固件探测实例只连接和调用 `get_firmware()`，不调用 `enable()`、模式切换或运动
-  API；探测实例成功断开并等待 `firmware_reconnect_delay` 后，才创建正式控制
-  实例。 / The firmware probe only
-  connects and calls `get_firmware()`; it never calls `enable()`, changes mode,
-  or invokes motion APIs. The formal control instance is created only after
-  the probe disconnects successfully and `firmware_reconnect_delay` elapses.
+- Nero 和 Piper-L 固件探测都在 `get_firmware()` 前发送一次临时 `enable()`，并
+  在断开前发送 `disable()`；它们不切换模式、不运动、不写固件。正式控制实例只
+  在探测实例断开并等待 `firmware_reconnect_delay` 后创建。 / Both Nero and
+  Piper-L firmware probes send one temporary `enable()` before `get_firmware()`
+  and send `disable()` before disconnecting; they do not change modes, move, or
+  write firmware. The formal control instance is created only after the probe
+  disconnects and `firmware_reconnect_delay` elapses.
 - 固件数据缺失、`software_version` 无法解析或检测 profile 不受当前 SDK 支持时，
   实机启动直接失败。 / Hardware startup fails closed when firmware data is
   absent, `software_version` cannot be parsed, or the detected profile is not

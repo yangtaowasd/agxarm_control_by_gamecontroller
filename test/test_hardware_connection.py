@@ -52,6 +52,7 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
     robot_model, firmware_info, expected_profile
 ):
     events = []
+    reports = []
     created = []
     configs = []
 
@@ -67,6 +68,14 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
         def disconnect(self):
             events.append(f"disconnect:{self.name}")
             self.connected = False
+
+        def enable(self):
+            events.append(f"enable:{self.name}")
+            return False
+
+        def disable(self):
+            events.append(f"disable:{self.name}")
+            return False
 
         def get_firmware(self, timeout, min_interval):
             assert timeout > 0.0
@@ -103,20 +112,26 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
         can_interface="can-test",
         arm_factory=FakeFactory,
         config_factory=fake_config_factory,
+        report=reports.append,
         sleep=lambda duration: events.append(f"sleep:{duration}"),
     )
 
     assert len(created) == 2
     assert created[0] is not created[1]
-    assert events == [
+    expected_events = [
         "create:arm1:default",
         "connect:arm1",
+        "enable:arm1",
         "firmware:arm1",
+        "disable:arm1",
+    ]
+    expected_events.extend([
         "disconnect:arm1",
         "sleep:0.5",
         f"create:arm2:{expected_profile}",
         "connect:arm2",
-    ]
+    ])
+    assert events == expected_events
     assert not created[0].connected
     assert created[1].connected
     assert result.arm is created[1]
@@ -125,6 +140,84 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
     assert result.firmware_profile == expected_profile
     assert configs[0]["firmeware_version"] == "default"
     assert configs[1]["firmeware_version"] == expected_profile
+    expected_reports = [
+        "firmware probe connection: "
+        f"{robot_model} on can-test with default profile",
+        f"{robot_model} firmware probe: sending one temporary enable request",
+        f"{robot_model} firmware probe enable request result: False",
+        "firmware probe query 1: requesting device data "
+        "with timeout=1.000 s",
+        f"firmware probe query 1 received: {firmware_info!r}",
+        f"firmware probe data saved: {firmware_info}; "
+        f"selected profile={expected_profile}",
+        f"{robot_model} firmware probe disable request result: False",
+    ]
+    expected_reports.extend([
+        "firmware probe disconnected",
+        "waiting 0.500 s before formal connection",
+        "formal control connection: "
+        f"{robot_model} on can-test with detected profile {expected_profile}",
+    ])
+    assert reports == expected_reports
+
+
+def test_probe_reports_each_missing_firmware_response_before_timeout():
+    reports = []
+    current_time = [0.0]
+
+    class FakeArm:
+        def connect(self):
+            pass
+
+        def disconnect(self):
+            pass
+
+        def enable(self):
+            return False
+
+        def disable(self):
+            return False
+
+        def get_firmware(self, timeout, min_interval):
+            del timeout, min_interval
+            return None
+
+    class FakeFactory:
+        @staticmethod
+        def create_arm(config):
+            del config
+            return FakeArm()
+
+    def monotonic():
+        return current_time[0]
+
+    def sleep(duration):
+        current_time[0] += duration
+
+    with pytest.raises(
+        FirmwareDetectionError,
+        match=r"timed out after 0\.250 s and 3 queries",
+    ):
+        connect_arm_two_stage(
+            robot_model="nero",
+            arm_model="sdk-nero",
+            firmware_profiles={"default": "default"},
+            can_interface="can-test",
+            probe_timeout=0.25,
+            probe_poll_period=0.1,
+            arm_factory=FakeFactory,
+            config_factory=lambda **values: values,
+            report=reports.append,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+
+    assert [message for message in reports if "no response" in message] == [
+        "firmware probe query 1: no response",
+        "firmware probe query 2: no response",
+        "firmware probe query 3: no response",
+    ]
+    assert reports[-1] == "firmware probe disconnected"
 
 
 def test_reconnect_delay_is_configurable_and_precedes_formal_creation():
@@ -139,6 +232,14 @@ def test_reconnect_delay_is_configurable_and_precedes_formal_creation():
 
         def disconnect(self):
             events.append(f"disconnect:{self.name}")
+
+        def enable(self):
+            events.append(f"enable:{self.name}")
+            return False
+
+        def disable(self):
+            events.append(f"disable:{self.name}")
+            return False
 
         def get_firmware(self, timeout, min_interval):
             del timeout, min_interval
@@ -168,6 +269,8 @@ def test_reconnect_delay_is_configurable_and_precedes_formal_creation():
     assert events == [
         "create:arm1",
         "connect:arm1",
+        "enable:arm1",
+        "disable:arm1",
         "disconnect:arm1",
         "sleep:0.5",
         "create:arm2",
@@ -199,6 +302,14 @@ def test_probe_is_disconnected_when_firmware_data_is_invalid():
         def disconnect(self):
             events.append("disconnect")
 
+        def enable(self):
+            events.append("enable")
+            return False
+
+        def disable(self):
+            events.append("disable")
+            return False
+
         def get_firmware(self, timeout, min_interval):
             del timeout, min_interval
             return {"hardware_version": "unknown"}
@@ -219,4 +330,4 @@ def test_probe_is_disconnected_when_firmware_data_is_invalid():
             config_factory=lambda **values: values,
         )
 
-    assert events == ["connect", "disconnect"]
+    assert events == ["connect", "enable", "disable", "disconnect"]

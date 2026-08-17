@@ -87,28 +87,52 @@ def _wait_for_firmware(
     timeout,
     poll_period,
     *,
+    report: Callable[[str], None] | None = None,
     monotonic=time.monotonic,
     sleep=time.sleep,
 ):
+    announce = report if report is not None else lambda message: None
     deadline = monotonic() + timeout
     last_error = None
+    query_count = 0
     while True:
         remaining = deadline - monotonic()
         if remaining <= 0.0:
             detail = f"; last query error: {last_error}" if last_error else ""
             raise FirmwareDetectionError(
-                f"timed out after {timeout:.3f} s waiting for firmware{detail}"
+                f"timed out after {timeout:.3f} s and {query_count} queries "
+                f"waiting for firmware{detail}"
             )
+        query_count += 1
+        query_timeout = min(1.0, remaining)
+        announce(
+            f"firmware probe query {query_count}: requesting device data "
+            f"with timeout={query_timeout:.3f} s"
+        )
+        query_error = None
         try:
             firmware_info = arm.get_firmware(
-                timeout=min(1.0, remaining), min_interval=0.0
+                timeout=query_timeout, min_interval=0.0
             )
         except Exception as error:  # Hardware query errors are retried.
             last_error = error
+            query_error = error
             firmware_info = None
+            announce(
+                f"firmware probe query {query_count} failed: "
+                f"{type(error).__name__}: {error}"
+            )
         if firmware_info is not None:
+            announce(
+                f"firmware probe query {query_count} received: "
+                f"{firmware_info!r}"
+            )
             _software_version(firmware_info)
             return dict(firmware_info)
+        if query_error is None:
+            announce(
+                f"firmware probe query {query_count}: no response"
+            )
         sleep(min(poll_period, max(0.0, deadline - monotonic())))
 
 
@@ -166,16 +190,33 @@ def connect_arm_two_stage(
         channel=can_interface,
     )
     probe_arm = arm_factory.create_arm(probe_config)
+    probe_enable_attempted = False
     announce(
         f"firmware probe connection: {model} on {can_interface} "
         "with default profile"
     )
     try:
         probe_arm.connect()
+        probe_enable_attempted = True
+        announce(
+            f"{model} firmware probe: sending one temporary enable request"
+        )
+        try:
+            enable_result = probe_arm.enable()
+            announce(
+                f"{model} firmware probe enable request result: "
+                f"{enable_result}"
+            )
+        except Exception as error:
+            announce(
+                f"{model} firmware probe enable request failed: "
+                f"{type(error).__name__}: {error}"
+            )
         firmware_info = _wait_for_firmware(
             probe_arm,
             float(probe_timeout),
             float(probe_poll_period),
+            report=announce,
             monotonic=monotonic,
             sleep=sleep,
         )
@@ -189,6 +230,18 @@ def connect_arm_two_stage(
             f"selected profile={firmware_profile}"
         )
     finally:
+        if probe_enable_attempted:
+            try:
+                disable_result = probe_arm.disable()
+                announce(
+                    f"{model} firmware probe disable request result: "
+                    f"{disable_result}"
+                )
+            except Exception as error:
+                announce(
+                    f"{model} firmware probe disable request failed: "
+                    f"{type(error).__name__}: {error}"
+                )
         probe_arm.disconnect()
         announce("firmware probe disconnected")
 

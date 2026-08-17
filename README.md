@@ -327,8 +327,9 @@ real hardware now always uses two connections. A first SDK `default` instance
 reads and saves the complete firmware dictionary, then disconnects. After the
 shared `firmware_reconnect_delay` (default `0.5 s`), a distinct second instance
 is created with the detected profile (`1.11 -> v111` for Nero,
-`S-V1.8-8 -> v188` for Piper-L). The probe neither enables the arm nor sends
-motion. Failure to obtain or parse `software_version` aborts startup.
+`S-V1.8-8 -> v188` for Piper-L). Both probes send one temporary enable request
+and send disable before disconnecting. They send no motion or firmware-write
+command. Failure to obtain or parse `software_version` aborts startup.
 
 Run Nero:
 

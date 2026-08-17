@@ -17,20 +17,19 @@ lifecycle for Nero/Piper-L; they contain no control algorithm.
 ## 生命周期 / Lifecycle
 
 ```text
-create(DEFAULT) -> connect -> get_firmware -> save -> disconnect
-                                                        |
-                                                        v
-                         wait 0.5 s -> create(detected profile) -> connect
-                                                                      |
-                                                                      v
-                                                                   control
+create(DEFAULT) -> connect -> temporary enable -> get_firmware
+       -> save -> disable -> disconnect -> wait 0.5 s
+       -> create(detected profile) -> connect -> control
 ```
 
-探测实例不调用 `enable()` 或运动 API。若没有 `software_version`、版本无法解析，
-或当前 pyAgxArm 不支持映射出的 profile，正式实例不会建立。 / The probe never
-calls `enable()` or a motion API. The formal instance is not created when
-`software_version` is absent, cannot be parsed, or maps to a profile unsupported
-by the installed pyAgxArm.
+Nero 和 Piper-L 探测实例都发送一次临时 `enable()`，读取固件后在断开前发送
+`disable()`；它们不发送模式切换、运动或固件写入命令。若没有
+`software_version`、版本无法解析，或当前 pyAgxArm 不支持映射出的 profile，
+正式实例不会建立。 / Both Nero and Piper-L probes send one temporary
+`enable()` and send `disable()` before disconnecting after the firmware read.
+They send no mode, motion, or firmware-write command. The formal instance is
+not created when `software_version` is absent, cannot be parsed, or maps to a
+profile unsupported by the installed pyAgxArm.
 
 ## 参数 / Parameters
 
