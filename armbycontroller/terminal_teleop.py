@@ -13,9 +13,9 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from armbycontroller.ik_core import increment_tool_orientation
-from armbycontroller.ik_core import quaternion_to_rotation_matrix
-from armbycontroller.ik_core import rotation_matrix_to_quaternion
+from armbycontroller.ik.core import increment_tool_orientation
+from armbycontroller.ik.core import quaternion_to_rotation_matrix
+from armbycontroller.ik.core import rotation_matrix_to_quaternion
 
 
 KEY_DIRECTIONS = {
@@ -96,7 +96,8 @@ class TerminalTeleop(Node):
             self.target_position = self.current_position.copy()
             self.target_orientation = self.current_orientation.copy()
             self.get_logger().info(
-                "current full pose received; position and orientation are active"
+                "current full pose received; position and orientation "
+                "are active"
             )
 
     def status_callback(self, message):

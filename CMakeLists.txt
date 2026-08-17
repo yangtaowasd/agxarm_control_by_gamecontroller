@@ -31,13 +31,18 @@ install(TARGETS
 )
 
 install(PROGRAMS
-  armbycontroller/keyboard_controller.py
+  armbycontroller/ros/keyboard_controller_node.py
   armbycontroller/pose_controller.py
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
+<<<<<<< HEAD
   armbycontroller/backend_api.py
   armbycontroller/hardware_probe.py
+=======
+  armbycontroller/ros/momentum_observer_node.py
+  armbycontroller/ros/experiment_recorder_node.py
+>>>>>>> feature/cartesian-impedance-step-by-step
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -48,12 +53,21 @@ install(DIRECTORY
 )
 
 install(DIRECTORY
+<<<<<<< HEAD
   docs
+=======
+  config
+>>>>>>> feature/cartesian-impedance-step-by-step
   DESTINATION share/${PROJECT_NAME}
 )
 
 install(DIRECTORY
   agx_arm_urdf
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(FILES
+  PROJECT_STUDY_GUIDE_ZH_EN.md
   DESTINATION share/${PROJECT_NAME}
 )
 
@@ -68,6 +82,30 @@ if(BUILD_TESTING)
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   ament_add_pytest_test(arm_control_test
     test/test_arm_control.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(cartesian_impedance_formula_test
+    test/test_cartesian_impedance.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(momentum_observer_test
+    test/test_momentum_observer.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(cartesian_admittance_test
+    test/test_cartesian_admittance.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(controller_interface_test
+    test/test_control_interface.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(experiment_framework_test
+    test/test_experiment.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(hardware_connection_test
+    test/test_hardware_connection.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
 endif()

@@ -9,12 +9,34 @@ import numpy as np
 from ament_index_python.packages import get_package_share_directory
 from ament_index_python.packages import PackageNotFoundError
 
+from armbycontroller.modeling.lie import rotation_exp
+from armbycontroller.modeling.lie import rotation_vector
 
 VERIFIED_FIRMWARE = {"nero": "v112", "piper_l": "v188"}
 
+DEFAULT_TOOL_CONFIGURATION = {
+    "nero": "none",
+    "piper_l": "gripper",
+}
+
+TOOL_URDF_FILENAMES = {
+    "nero": {
+        "none": "nero_description.urdf",
+        "gripper": "nero_with_gripper_description.xacro",
+        "left_revo2": "nero_with_left_revo2_description.xacro",
+        "right_revo2": "nero_with_right_revo2_description.xacro",
+    },
+    "piper_l": {
+        "none": "piper_l_description.urdf",
+        "gripper": "piper_l_with_gripper_description.xacro",
+        "left_revo2": "piper_l_with_left_revo2_description.xacro",
+        "right_revo2": "piper_l_with_right_revo2_description.xacro",
+    },
+}
+
 
 def resolve_firmware_name(robot_model, requested_firmware):
-    """Resolve ``auto`` to the firmware verified on the project hardware."""
+    """Resolve the configured dry-run or pre-detection fallback profile."""
     requested = str(requested_firmware).lower()
     if requested != "auto":
         return requested
@@ -66,7 +88,7 @@ def resolve_urdf_path(parameter_value, robot_model):
         except PackageNotFoundError:
             pass
         candidates.append(
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / "nero_screw_dynamics" / "agx_arm_urdf" / "nero" / "urdf"
             / "nero_description.urdf"
         )
@@ -79,7 +101,7 @@ def resolve_urdf_path(parameter_value, robot_model):
     except PackageNotFoundError:
         pass
     candidates.append(
-        Path(__file__).resolve().parents[1] / "agx_arm_urdf"
+        Path(__file__).resolve().parents[2] / "agx_arm_urdf"
         / robot_model / "urdf" / f"{robot_model}_description.urdf"
     )
     try:
@@ -105,12 +127,50 @@ def resolve_urdf_path(parameter_value, robot_model):
     )
 
 
+def resolve_tool_urdf_path(
+    bare_urdf_path,
+    robot_model,
+    tool_configuration="auto",
+    explicit_path="",
+):
+    """Resolve the dynamics/IK URDF for the configured fixed end tool."""
+    if explicit_path:
+        configured = Path(explicit_path).expanduser().resolve()
+        if not configured.is_file():
+            raise ValueError(
+                f"configured gravity_urdf_path does not exist: {configured}"
+            )
+        return configured
+
+    if robot_model not in TOOL_URDF_FILENAMES:
+        raise ValueError("robot_model must be nero or piper_l")
+    requested = str(tool_configuration).strip().lower()
+    if requested == "auto":
+        requested = DEFAULT_TOOL_CONFIGURATION[robot_model]
+    filenames = TOOL_URDF_FILENAMES[robot_model]
+    if requested not in filenames:
+        raise ValueError(
+            f"unsupported {robot_model} tool_configuration {requested!r}; "
+            f"choose auto or one of {sorted(filenames)}"
+        )
+    bare = Path(bare_urdf_path).expanduser().resolve()
+    configured = bare if requested == "none" else bare.parent / filenames[
+        requested
+    ]
+    if not configured.is_file():
+        raise ValueError(
+            f"URDF for {robot_model} tool_configuration={requested!r} "
+            f"does not exist: {configured}"
+        )
+    return configured.resolve()
+
+
 def create_screw_solver(
     urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
 ):
     """Create the shared PoE solver and verify the requested chain DOF."""
-    from armbycontroller.screw_ik import ScrewIkSolver
-    from armbycontroller.screw_model import UrdfScrewModel
+    from armbycontroller.ik.screw import ScrewIkSolver
+    from armbycontroller.modeling.screw_model import UrdfScrewModel
 
     model = UrdfScrewModel(
         urdf_path,
@@ -127,15 +187,6 @@ def create_screw_solver(
         max_iterations=iterations,
         position_tolerance=max(tolerance, 1e-4),
         orientation_tolerance=max(tolerance, 1e-4),
-    )
-
-
-def create_tracik_solver(
-    urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
-):
-    """Compatibility alias for callers using the old helper name."""
-    return create_screw_solver(
-        urdf_path, base_frame, tip_link, joint_count, timeout, tolerance
     )
 
 
@@ -227,25 +278,15 @@ def make_pointing_quaternion(direction, roll_reference):
 
 def increment_tool_orientation(rotation, pitch, yaw, roll):
     """Apply base-frame pitch/yaw and tool-frame roll increments."""
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-    cr, sr = math.cos(roll), math.sin(roll)
-    pitch_matrix = np.array(
-        [[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]]
-    )
-    yaw_matrix = np.array(
-        [[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]]
-    )
-    roll_matrix = np.array(
-        [[cr, -sr, 0.0], [sr, cr, 0.0], [0.0, 0.0, 1.0]]
-    )
+    pitch_matrix = rotation_exp(np.asarray([0.0, 1.0, 0.0]), pitch)
+    yaw_matrix = rotation_exp(np.asarray([0.0, 0.0, 1.0]), yaw)
+    roll_matrix = rotation_exp(np.asarray([0.0, 0.0, 1.0]), roll)
     return yaw_matrix @ pitch_matrix @ rotation @ roll_matrix
 
 
 def rotation_error_angle(actual, target):
     """Return the shortest rotation angle between rotation matrices."""
-    cosine = (float(np.trace(actual.T @ target)) - 1.0) / 2.0
-    return math.acos(float(np.clip(cosine, -1.0, 1.0)))
+    return float(np.linalg.norm(rotation_vector(target @ actual.T)))
 
 
 def pointing_error_angle(actual, target):
@@ -265,9 +306,8 @@ def solve_pointing_ik(solver, position, target_rotation, seed, roll_samples):
     best_solution = None
     best_distance = math.inf
     for angle in np.linspace(0.0, 2.0 * math.pi, roll_samples, endpoint=False):
-        cosine, sine = math.cos(float(angle)), math.sin(float(angle))
-        local_roll = np.array(
-            [[cosine, -sine, 0.0], [sine, cosine, 0.0], [0.0, 0.0, 1.0]]
+        local_roll = rotation_exp(
+            np.asarray([0.0, 0.0, 1.0]), float(angle)
         )
         solution = solver.ik(
             position, target_rotation @ local_roll, seed_jnt_values=seed
@@ -334,7 +374,10 @@ class AgxIkEngine:
         if joints is None:
             raise IkFailure("screw IK found no solution")
         joints = np.asarray(joints, dtype=float)
-        if joints.shape != (self.joint_count,) or not np.all(np.isfinite(joints)):
+        if (
+            joints.shape != (self.joint_count,)
+            or not np.all(np.isfinite(joints))
+        ):
             raise IkFailure("IK returned an invalid joint vector")
 
         fk_position, fk_rotation = self.solver.fk(joints)
