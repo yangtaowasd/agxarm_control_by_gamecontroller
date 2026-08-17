@@ -14,15 +14,17 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from armbycontroller.ik_core import AgxIkEngine
-from armbycontroller.ik_core import create_screw_solver
-from armbycontroller.ik_core import IkFailure
-from armbycontroller.ik_core import prepare_planned_joint_mode
-from armbycontroller.ik_core import quaternion_to_rotation_matrix
-from armbycontroller.ik_core import resolve_firmware_name
-from armbycontroller.ik_core import resolve_urdf_path
-from armbycontroller.ik_core import rotation_matrix_to_quaternion
-from armbycontroller.ik_core import set_joint_acceleration_limits
+from armbycontroller.hardware import connect_arm_two_stage
+from armbycontroller.ik.core import AgxIkEngine
+from armbycontroller.ik.core import create_screw_solver
+from armbycontroller.ik.core import IkFailure
+from armbycontroller.ik.core import prepare_planned_joint_mode
+from armbycontroller.ik.core import quaternion_to_rotation_matrix
+from armbycontroller.ik.core import resolve_firmware_name
+from armbycontroller.ik.core import resolve_urdf_path
+from armbycontroller.ik.core import rotation_matrix_to_quaternion
+from armbycontroller.ik.core import set_joint_acceleration_limits
+from armbycontroller.model_profiles import get_arm_profile
 
 
 class PoseController(Node):

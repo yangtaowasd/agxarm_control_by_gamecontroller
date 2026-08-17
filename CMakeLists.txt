@@ -36,13 +36,10 @@ install(PROGRAMS
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
   armbycontroller/motion_link_bridge.py
-<<<<<<< HEAD
   armbycontroller/backend_api.py
   armbycontroller/hardware_probe.py
-=======
   armbycontroller/ros/momentum_observer_node.py
   armbycontroller/ros/experiment_recorder_node.py
->>>>>>> feature/cartesian-impedance-step-by-step
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -53,11 +50,8 @@ install(DIRECTORY
 )
 
 install(DIRECTORY
-<<<<<<< HEAD
   docs
-=======
   config
->>>>>>> feature/cartesian-impedance-step-by-step
   DESTINATION share/${PROJECT_NAME}
 )
 

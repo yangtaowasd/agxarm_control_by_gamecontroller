@@ -59,9 +59,7 @@ def _nodes(context):
         "simulation_mode": simulation_mode,
         "execute_motion": execute_motion,
         "can_interface": LaunchConfiguration("can_interface"),
-<<<<<<< HEAD
         "initial_joint_positions": list(profile.initial_joint_positions),
-=======
         "firmware": LaunchConfiguration("firmware"),
         "firmware_probe_timeout": LaunchConfiguration(
             "firmware_probe_timeout"
@@ -75,7 +73,6 @@ def _nodes(context):
         # The publisher remains 30 Hz. A 30 ms acceptance gate leaves
         # scheduler jitter below the nominal 33.3 ms sample interval.
         "command_period": 0.03,
->>>>>>> feature/cartesian-impedance-step-by-step
         "state_period": 1.0 / 30.0,
         "robot_min_reach": profile.min_reach,
         "robot_max_reach": profile.max_reach,

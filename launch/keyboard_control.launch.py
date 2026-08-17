@@ -14,23 +14,10 @@ from armbycontroller.modeling.screw_model import project_gravity_vector
 COMMON = {
     "can_interface": "can0",
     "execute_motion": "true",
-<<<<<<< HEAD
-    "impedance_enabled": "false",
-    "control_rate": "100.0",
-    "mit_command_rate": "100.0",
-    "mit_gravity_compensation_enabled": "true",
-    "mit_gravity_scale": "1.0",
-    "mit_gravity_torque_limit": "10.0",
-    "cartesian_stiffness": "[4.0, 4.0, 4.0, 80.0, 80.0, 80.0]",
-    "cartesian_damping": "[1.5, 1.5, 1.5, 12.0, 12.0, 12.0]",
-    "cartesian_nullspace_stiffness": "0.5",
-    "cartesian_nullspace_damping": "0.1",
-=======
     "dynamics_state_topic": "/arm_dynamics_state",
     "external_torque_topic": "/arm_external_joint_torque",
     "control_sample_topic": "/arm_control_sample",
     "control_event_topic": "/arm_control_event",
->>>>>>> feature/cartesian-impedance-step-by-step
     "joint_acc_timeout": "2.0",
     "position_mode_timeout": "2.0",
     "reset_emergency_stop_on_start": "true",

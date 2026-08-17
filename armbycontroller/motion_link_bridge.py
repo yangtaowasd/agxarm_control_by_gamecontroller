@@ -19,43 +19,15 @@ from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
 import websocket
 
-<<<<<<< HEAD
 from armbycontroller.backend_protocol import extract_named_arm_joint_state
 from armbycontroller.control_protocol import KEY_COUNT
 from armbycontroller.control_protocol import sanitize_controller_keys
-from armbycontroller.ik_core import quaternion_to_rotation_matrix
-from armbycontroller.ik_core import rotation_matrix_to_quaternion
-from armbycontroller.model_profiles import get_arm_profile
-
-
-def _axis_rotation(axis, angle):
-    """Return one right-handed elementary rotation matrix."""
-    cosine = math.cos(angle)
-    sine = math.sin(angle)
-    if axis == "x":
-        return np.array([
-            [1.0, 0.0, 0.0],
-            [0.0, cosine, -sine],
-            [0.0, sine, cosine],
-        ])
-    if axis == "y":
-        return np.array([
-            [cosine, 0.0, sine],
-            [0.0, 1.0, 0.0],
-            [-sine, 0.0, cosine],
-        ])
-    return np.array([
-        [cosine, -sine, 0.0],
-        [sine, cosine, 0.0],
-        [0.0, 0.0, 1.0],
-    ])
-=======
 from armbycontroller.ik.core import quaternion_to_rotation_matrix
 from armbycontroller.ik.core import rotation_matrix_to_quaternion
+from armbycontroller.model_profiles import get_arm_profile
 from armbycontroller.modeling.lie import rotation_exp
 from armbycontroller.modeling.lie import rotation_from_vector
 from armbycontroller.modeling.lie import rotation_vector
->>>>>>> feature/cartesian-impedance-step-by-step
 
 
 def phone_rotation(orientation):

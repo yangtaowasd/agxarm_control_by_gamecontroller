@@ -3,7 +3,6 @@
 ROS 2 control for AGX Nero, Piper-L, and a Revo2 hand. Nero and Piper-L share
 the same controller, keyboard topic, key indices, IK core, and launch files.
 
-<<<<<<< HEAD
 ## Project layout
 
 - `armbycontroller/`: controllers, kinematics/dynamics, and backend adapters
@@ -14,7 +13,7 @@ the same controller, keyboard topic, key indices, IK core, and launch files.
   runtime paths
 - [`docs/phone-remotation-api.md`](docs/phone-remotation-api.md): HTTP/SSE
   backend contract and Motion Link compatibility
-=======
+
 ## Cartesian impedance development branch
 
 `feature/cartesian-impedance-step-by-step` starts from the validated joint MIT
@@ -197,7 +196,6 @@ ros2 service call /arm_experiment_recorder/recording \
 
 The file map outside `ros/`, `ik/`, and `impedance/` is split by category under
 `docs/file_map/README_ZH_EN.md`.
->>>>>>> feature/cartesian-impedance-step-by-step
 
 ## Build
 
@@ -231,12 +229,8 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `1` ... `7`: select joint; Piper-L ignores `7` because it has six joints
 - Joint mode: `A/D` decreases/increases the selected joint
 - `P`: switch between joint mode and Cartesian IK mode
-<<<<<<< HEAD
-- `I`: switch between planned position control and Cartesian impedance
-=======
 - `I`: switch between planned position control and the selected MIT impedance
   backend (Cartesian by default)
->>>>>>> feature/cartesian-impedance-step-by-step
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
@@ -252,35 +246,6 @@ pose by FK. All FK, IK, and Jacobian calculations use the same PoE screw model;
 there is no classical-IK fallback. `P` and `I` are independent, so either order
 works.
 
-<<<<<<< HEAD
-The 100 Hz controller evaluates
-`tau = Jg.T @ (Kx * pose_error - Dx * tool_twist) + C(q,dq)dq + g(q)`.
-Pose error, twist, stiffness, and damping use
-`[rx, ry, rz, x, y, z]` base-frame order. The defaults are
-`cartesian_stiffness=[4,4,4,80,80,80]` and
-`cartesian_damping=[1.5,1.5,1.5,12,12,12]`; rotational entries have
-N·m/rad and N·m·s/rad units, while translational entries have N/m and N·s/m
-units. Nero's redundant seventh axis also receives an exact-nullspace posture
-term configured by `cartesian_nullspace_stiffness` and
-`cartesian_nullspace_damping`. Piper-L has no nominal kinematic null space.
-
-The SDK MIT interface is used only as a joint-torque transport. Every command
-sets native MIT `kp=0`, `kd=0`, holds `p_des` at measured `q`, and sends the
-computed torque through `t_ff`, so no joint-space impedance is superimposed.
-Legacy `mit_kp` and `mit_kd` parameters are accepted but intentionally ignored.
-Pressing `I` requires complete position/velocity feedback and a valid dynamics
-result, then captures the current tool pose for a zero-error takeover.
-
-The dynamics term uses measured `q/dq`, zero joint acceleration, and the
-selected unmodified Nero or Piper-L URDF. Piper-L uses its gripper model and
-Nero uses its Revo2 left-hand model; accessory joints remain at their URDF zero
-positions. `mit_feedforward` remains an optional residual calibration bias.
-`mit_gravity_scale` scales model compensation, and
-`mit_gravity_torque_limit` is retained as the compatibility name for the hard
-limit on the final Cartesian-impedance joint torque (default ±10 N·m). This is
-a commanded torque limit, not measured contact-force feedback. The default
-gravity vector is `[0, 0, -9.80665]` in `base_link`.
-=======
 The Cartesian backend uses the SDK equation
 `τ_ref=Kp(q_des-q)+Kd(dq_des-dq)+τ_ff` with `Kp=0`, `Kd=0`,
 `p_des=q_measured`, `v_des=0`, and
@@ -336,7 +301,6 @@ shared `firmware_reconnect_delay` (default `0.5 s`), a distinct second instance
 is created with the detected profile (`1.11 -> v111` for Nero,
 `S-V1.8-8 -> v188` for Piper-L). The probe neither enables the arm nor sends
 motion. Failure to obtain or parse `software_version` aborts startup.
->>>>>>> feature/cartesian-impedance-step-by-step
 
 Run Nero:
 

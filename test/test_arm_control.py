@@ -11,48 +11,12 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
-<<<<<<< HEAD
 from armbycontroller.backend_api import BackendState
 from armbycontroller.backend_protocol import extract_named_arm_joint_state
 from armbycontroller.backend_protocol import sanitize_action
 from armbycontroller.backend_protocol import sanitize_pose_command
 from armbycontroller.backend_protocol import validate_bind_address
 from armbycontroller.control_protocol import sanitize_controller_keys
-from armbycontroller.ik_core import AgxIkEngine
-from armbycontroller.ik_core import create_screw_solver
-from armbycontroller.ik_core import IkFailure
-from armbycontroller.ik_core import increment_tool_orientation
-from armbycontroller.ik_core import make_pointing_quaternion
-from armbycontroller.ik_core import pointing_error_angle
-from armbycontroller.ik_core import prepare_planned_joint_mode
-from armbycontroller.ik_core import quaternion_to_rotation_matrix
-from armbycontroller.ik_core import radial_workspace_check
-from armbycontroller.ik_core import rotation_error_angle
-from armbycontroller.ik_core import rotation_matrix_to_quaternion
-from armbycontroller.ik_core import resolve_firmware_name
-from armbycontroller.ik_core import resolve_urdf_path
-from armbycontroller.ik_core import set_joint_acceleration_limits
-from armbycontroller.ik_core import solve_pointing_ik
-from armbycontroller.gravity_compensation import UrdfGravityModel
-from armbycontroller.gravity_compensation import nero_mount_gravity
-from armbycontroller.cartesian_impedance import cartesian_impedance_torque
-from armbycontroller.keyboard_controller import ArmJointJogState
-from armbycontroller.keyboard_controller import ArmKeyboardController
-from armbycontroller.keyboard_controller import advance_simulated_joint_state
-from armbycontroller.keyboard_controller import bounded_model_feedforward
-from armbycontroller.keyboard_controller import expand_joint_values
-from armbycontroller.keyboard_controller import default_mit_gains
-from armbycontroller.keyboard_controller import default_mit_feedforward
-from armbycontroller.keyboard_controller import KEY_COUNT
-from armbycontroller.keyboard_controller import KEY_DECREASE
-from armbycontroller.keyboard_controller import KEY_ESTOP
-from armbycontroller.keyboard_controller import KEY_HOME
-from armbycontroller.keyboard_controller import KEY_INCREASE
-from armbycontroller.keyboard_controller import KEY_IMPEDANCE_TOGGLE
-from armbycontroller.keyboard_controller import KEY_MODE_TOGGLE
-from armbycontroller.keyboard_controller import JointTrajectoryState
-from armbycontroller.keyboard_controller import limit_mit_combined_torque
-=======
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -99,7 +63,6 @@ from armbycontroller.modeling.lie import rotation_from_vector
 from armbycontroller.modeling.lie import rotation_vector
 from armbycontroller.modeling.lie import space_pose_error
 from armbycontroller.modeling.lie import transform as screw_transform
->>>>>>> feature/cartesian-impedance-step-by-step
 from armbycontroller.motion_link_bridge import phone_rotation
 from armbycontroller.motion_link_bridge import MotionLinkBridge
 from armbycontroller.motion_link_bridge import relative_target_rotation
@@ -345,30 +308,6 @@ def test_backend_state_reports_fresh_and_stale_feedback(monkeypatch):
     clock.monotonic = 102.0
     _, stale = state.snapshot()
     assert stale["connected"] is False
-
-
-def test_simulated_keyboard_state_respects_acceleration_and_target():
-    position, velocity = advance_simulated_joint_state(
-        np.array([0.0, 0.0]),
-        np.array([0.0, 0.0]),
-        np.array([1.0, -1.0]),
-        max_velocity=1.0,
-        max_acceleration=2.0,
-        period=0.1,
-    )
-    assert position == pytest.approx([0.02, -0.02])
-    assert velocity == pytest.approx([0.2, -0.2])
-
-    position, velocity = advance_simulated_joint_state(
-        np.array([0.99, -0.99]),
-        np.array([0.2, -0.2]),
-        np.array([1.0, -1.0]),
-        max_velocity=1.0,
-        max_acceleration=2.0,
-        period=0.1,
-    )
-    assert position == pytest.approx([1.0, -1.0])
-    assert velocity == pytest.approx([0.0, 0.0])
 
 
 def test_phone_relative_rotation_is_bounded():
@@ -1414,39 +1353,15 @@ def test_joint_trajectory_generates_bounded_q_dq_ddq():
     assert maximum_jerk <= 5.0 + 1e-9
 
 
-<<<<<<< HEAD
-def test_cartesian_impedance_maps_wrench_through_jacobian_transpose():
-    class IdentityModel:
-        def forward_kinematics(self, joints):
-            del joints
-            return np.eye(4)
-=======
 def test_mit_tick_sends_one_impedance_command_per_joint(monkeypatch):
     class FakeArm:
         def __init__(self):
             self.commands = []
             self.state_reads = 0
             self.angle_reads = 0
->>>>>>> feature/cartesian-impedance-step-by-step
 
-        def space_jacobian(self, joints):
-            return np.eye(6, len(joints))
-
-<<<<<<< HEAD
-    result = cartesian_impedance_torque(
-        IdentityModel(),
-        joint_positions=np.zeros(6),
-        joint_velocities=np.zeros(6),
-        target_position=[0.1, 0.0, 0.0],
-        target_rotation=np.eye(3),
-        stiffness=[4.0, 4.0, 4.0, 100.0, 100.0, 100.0],
-        damping=[1.0] * 6,
-    )
-
-    assert result.pose_error == pytest.approx([0.0, 0.0, 0.0, 0.1, 0.0, 0.0])
-    assert result.wrench == pytest.approx([0.0, 0.0, 0.0, 10.0, 0.0, 0.0])
-    assert result.joint_torque == pytest.approx(result.wrench)
-=======
+        def move_mit(self, **command):
+            self.commands.append(command)
         def get_motor_states(self, joint_index):
             del joint_index
             self.state_reads += 1
@@ -1728,61 +1643,9 @@ def test_cartesian_mit_uses_immediate_absolute_limit_not_torque_rate_limit(
     assert [command["t_ff"] for command in second_cycle] == (
         pytest.approx([0.0, 0.0, 0.0, 8.0, 0.0, 0.0])
     )
->>>>>>> feature/cartesian-impedance-step-by-step
 
 
-def test_cartesian_impedance_damping_opposes_tool_twist():
-    class IdentityModel:
-        def forward_kinematics(self, joints):
-            del joints
-            return np.eye(4)
-
-        def space_jacobian(self, joints):
-            return np.eye(6, len(joints))
-
-    result = cartesian_impedance_torque(
-        IdentityModel(),
-        joint_positions=np.zeros(6),
-        joint_velocities=[0.2, 0.0, 0.0, 0.5, 0.0, 0.0],
-        target_position=np.zeros(3),
-        target_rotation=np.eye(3),
-        stiffness=np.zeros(6),
-        damping=[2.0, 2.0, 2.0, 4.0, 4.0, 4.0],
-    )
-
-    assert result.joint_torque == pytest.approx(
-        [-0.4, 0.0, 0.0, -2.0, 0.0, 0.0]
-    )
-
-
-def test_cartesian_impedance_projects_posture_torque_into_redundancy():
-    class RedundantModel:
-        def forward_kinematics(self, joints):
-            del joints
-            return np.eye(4)
-
-        def space_jacobian(self, joints):
-            return np.hstack((np.eye(6), np.zeros((6, len(joints) - 6))))
-
-    result = cartesian_impedance_torque(
-        RedundantModel(),
-        joint_positions=np.zeros(7),
-        joint_velocities=np.zeros(7),
-        target_position=np.zeros(3),
-        target_rotation=np.eye(3),
-        stiffness=np.zeros(6),
-        damping=np.zeros(6),
-        nullspace_reference=[0.0] * 6 + [1.0],
-        nullspace_stiffness=2.0,
-        nullspace_damping=0.1,
-    )
-
-    assert result.joint_torque == pytest.approx([0.0] * 6 + [2.0])
-
-
-def test_mit_tick_sends_cartesian_torque_with_native_joint_gains_zero(
-    monkeypatch,
-):
+def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
     class FakeArm:
         def __init__(self):
             self.commands = []
@@ -1795,24 +1658,15 @@ def test_mit_tick_sends_cartesian_torque_with_native_joint_gains_zero(
             return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
 
         def get_joint_angles(self):
-            return SimpleNamespace(msg=[0.0] * 6)
+            return SimpleNamespace(msg=[0.25, -0.5])
 
-    class IdentityModel:
-        def forward_kinematics(self, joints):
-            del joints
-            return np.eye(4)
+    class FakeGravityModel:
+        def __init__(self):
+            self.received = None
 
-        def space_jacobian(self, joints):
-            return np.eye(6, len(joints))
-
-    class FakeDynamicsModel:
-        def inverse_dynamics(self, positions, velocities, accelerations):
-            self.received = (
-                np.asarray(positions),
-                np.asarray(velocities),
-                np.asarray(accelerations),
-            )
-            return np.ones(6)
+        def compensation(self, joints):
+            self.received = list(joints)
+            return np.array([2.0, -3.0])
 
     class FakeLogger:
         def info(self, message, **kwargs):
@@ -1821,121 +1675,34 @@ def test_mit_tick_sends_cartesian_torque_with_native_joint_gains_zero(
         def warning(self, message, **kwargs):
             del message, kwargs
 
-        def error(self, message, **kwargs):
-            del message, kwargs
-
     controller = object.__new__(ArmKeyboardController)
     controller.impedance_enabled = True
     controller.emergency_stopped = False
-    controller.simulation_mode = False
     controller.execute_motion = True
     controller.arm_ready = True
     controller.arm = FakeArm()
-    controller.joint_count = 6
-    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
-    controller.kinematic_model = IdentityModel()
-    controller.ik_target_position = np.array([0.2, 0.0, 0.0])
-    controller.ik_target_rotation = np.eye(3)
-    controller.cartesian_stiffness = [0.0, 0.0, 0.0, 10.0, 0.0, 0.0]
-    controller.cartesian_damping = [0.0] * 6
-    controller.cartesian_nullspace_stiffness = 0.5
-    controller.cartesian_nullspace_damping = 0.1
-    controller.mit_feedforward = [0.0] * 6
-    controller.gravity_model = FakeDynamicsModel()
+    controller.joint_count = 2
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.jog.sync_target([0.8, 0.8])
+    controller.mit_kp = [1.0] * 2
+    controller.mit_kd = [0.2] * 2
+    controller.mit_feedforward = [0.0] * 2
+    controller.gravity_model = FakeGravityModel()
     controller.mit_gravity_scale = 1.0
-    controller.mit_gravity_torque_limit = [10.0] * 6
+    controller.mit_gravity_torque_limit = [6.0] * 2
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
-<<<<<<< HEAD
-=======
     monkeypatch.setattr(
         "armbycontroller.ros.keyboard_controller_node.time.monotonic",
         lambda: 100.0,
     )
->>>>>>> feature/cartesian-impedance-step-by-step
 
     controller.mit_tick()
 
-    positions, velocities, accelerations = controller.gravity_model.received
-    assert positions == pytest.approx([0.0] * 6)
-    assert velocities == pytest.approx([0.0] * 6)
-    assert accelerations == pytest.approx([0.0] * 6)
-    assert [item["joint_index"] for item in controller.arm.commands] == [
-        1, 2, 3, 4, 5, 6
-    ]
-    assert [item["p_des"] for item in controller.arm.commands] == pytest.approx(
-        [0.0] * 6
-    )
-    assert all(item["v_des"] == 0.0 for item in controller.arm.commands)
-    assert all(item["kp"] == 0.0 for item in controller.arm.commands)
-    assert all(item["kd"] == 0.0 for item in controller.arm.commands)
-    assert [item["t_ff"] for item in controller.arm.commands] == pytest.approx(
-        [1.0, 1.0, 1.0, 3.0, 1.0, 1.0]
-    )
-
-
-def test_mit_tick_limits_total_cartesian_torque(monkeypatch):
-    class FakeArm:
-        def __init__(self):
-            self.commands = []
-
-        def move_mit(self, **command):
-            self.commands.append(command)
-
-        def get_motor_states(self, joint_index):
-            del joint_index
-            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
-
-        def get_joint_angles(self):
-            return SimpleNamespace(msg=[0.0] * 6)
-
-    class IdentityModel:
-        def forward_kinematics(self, joints):
-            del joints
-            return np.eye(4)
-
-        def space_jacobian(self, joints):
-            return np.eye(6, len(joints))
-
-    class FakeLogger:
-        def info(self, message, **kwargs):
-            del message, kwargs
-
-        def warning(self, message, **kwargs):
-            del message, kwargs
-
-        def error(self, message, **kwargs):
-            del message, kwargs
-
-    controller = object.__new__(ArmKeyboardController)
-    controller.impedance_enabled = True
-    controller.emergency_stopped = False
-    controller.simulation_mode = False
-    controller.execute_motion = True
-    controller.arm_ready = True
-    controller.arm = FakeArm()
-    controller.joint_count = 6
-    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
-    controller.kinematic_model = IdentityModel()
-    controller.ik_target_position = np.array([2.0, 0.0, 0.0])
-    controller.ik_target_rotation = np.eye(3)
-    controller.cartesian_stiffness = [0.0, 0.0, 0.0, 20.0, 0.0, 0.0]
-    controller.cartesian_damping = [0.0] * 6
-    controller.cartesian_nullspace_stiffness = 0.0
-    controller.cartesian_nullspace_damping = 0.0
-    controller.mit_feedforward = [0.0] * 6
-    controller.gravity_model = None
-    controller.mit_gravity_scale = 1.0
-    controller.mit_gravity_torque_limit = [5.0] * 6
-    monkeypatch.setattr(
-        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
-    )
-
-    controller.mit_tick()
-
-    assert [item["t_ff"] for item in controller.arm.commands] == pytest.approx(
-        [0.0, 0.0, 0.0, 5.0, 0.0, 0.0]
+    assert controller.gravity_model.received == [0.25, -0.5]
+    assert [command["t_ff"] for command in controller.arm.commands] == (
+        pytest.approx([2.0, -3.0])
     )
 
 
@@ -1973,15 +1740,15 @@ def test_impedance_entry_refuses_incomplete_joint_feedback(monkeypatch):
 
     assert not controller.impedance_enabled
     assert logger.errors == [
-        "cannot enter Cartesian impedance: complete q/dq feedback is required"
+        "cannot enter MIT: complete q/dq feedback is required"
     ]
 
 
-def test_joint_goal_updates_cartesian_target_without_move_j(monkeypatch):
+def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(
+    monkeypatch,
+):
     class FakeArm:
         def __init__(self):
-<<<<<<< HEAD
-=======
             self.commands = []
 
         def move_mit(self, **command):
@@ -2121,41 +1888,51 @@ def test_ik_joint_target_is_consumed_only_by_mit_backend(monkeypatch):
     class FakeArm:
         def __init__(self):
             self.mit_commands = []
->>>>>>> feature/cartesian-impedance-step-by-step
             self.move_j_commands = []
+
+        def move_mit(self, **command):
+            self.mit_commands.append(command)
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(msg=SimpleNamespace(velocity=0.0))
 
         def move_j(self, target):
             self.move_j_commands.append(target)
-
-    class FakeSolver:
-        def fk(self, joints):
-            return np.asarray(joints[:3]), np.eye(3)
 
     class FakeLogger:
         def info(self, message, **kwargs):
             del message, kwargs
 
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
     controller = object.__new__(ArmKeyboardController)
     controller.impedance_enabled = True
-    controller.simulation_mode = False
+    controller.emergency_stopped = False
     controller.execute_motion = True
     controller.arm_ready = True
     controller.arm = FakeArm()
-    controller.control_mode = "joint"
-    controller.ik_target_position = None
-    controller.ik_target_rotation = None
-    controller.ik_solver = FakeSolver()
+    controller.joint_count = 6
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
     controller.jog.sync_target([0.1, -0.2, 0.3, 0.0, 0.2, -0.1])
+    controller.mit_kp = [1.0] * 6
+    controller.mit_kd = [0.2] * 6
+    controller.mit_feedforward = [0.0] * 6
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
 
-    controller.send_target("joint jog")
+    controller.send_target("IK pose jog")
+    controller.mit_tick()
 
     assert controller.arm.move_j_commands == []
-    assert controller.ik_target_position == pytest.approx([0.1, -0.2, 0.3])
-    assert controller.ik_target_rotation == pytest.approx(np.eye(3))
+    assert [command["p_des"] for command in controller.arm.mit_commands] == (
+        pytest.approx(controller.jog.target_joints)
+    )
 
 
 def test_startup_reset_clears_latched_emergency_stop(monkeypatch):
