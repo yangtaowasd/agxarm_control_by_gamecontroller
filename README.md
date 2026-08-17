@@ -222,9 +222,13 @@ Then start the required robot:
 ./scripts/start_piper_l.sh
 ```
 
-The robot scripts do not reconfigure CAN, automatically move home, or clear a
-latched emergency stop. They use the X11 keyboard backend for NoMachine; pass
-`device:=/dev/input/eventN` to use a local evdev keyboard instead.
+The robot scripts do not reconfigure CAN or automatically move home. For the
+explicit real-hardware workflow they reset a latched electronic stop before
+enabling; physically inspect the arm and clear its workspace before starting.
+They use the X11 keyboard backend for NoMachine; pass
+`device:=/dev/input/eventN` to use a local evdev keyboard instead. Any launch
+setting can be overridden as a trailing argument, for example
+`./scripts/start_nero.sh reset_emergency_stop_on_start:=false`.
 
 ## Build
 
