@@ -58,6 +58,7 @@ install(DIRECTORY
 
 install(PROGRAMS
   scripts/setup_can.sh
+  scripts/select_input_device.sh
   scripts/start_nero.sh
   scripts/start_piper_l.sh
   DESTINATION share/${PROJECT_NAME}/scripts

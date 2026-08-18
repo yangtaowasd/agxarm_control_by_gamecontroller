@@ -206,13 +206,14 @@ The file map outside `ros/`, `ik/`, and `impedance/` is split by category under
 
 ## CAN and robot startup
 
-Configure both CAN interfaces once:
+The robot startup scripts configure `can0` before launching. To
+configure CAN without starting a robot, run:
 
 ```bash
 ./scripts/setup_can.sh
 ```
 
-Then start the required robot:
+Start the required robot directly:
 
 ```bash
 # Nero
@@ -222,12 +223,14 @@ Then start the required robot:
 ./scripts/start_piper_l.sh
 ```
 
-The robot scripts do not reconfigure CAN or automatically move home. For the
+The robot scripts configure CAN but do not automatically move home. For the
 explicit real-hardware workflow they reset a latched electronic stop before
 enabling; physically inspect the arm and clear its workspace before starting.
-They use the X11 keyboard backend for NoMachine; pass
-`device:=/dev/input/eventN` to use a local evdev keyboard instead. Any launch
-setting can be overridden as a trailing argument, for example
+CAN setup uses `sudo` when the current user is not root. The scripts use the
+interactive terminal to select either the X11 keyboard backend for NoMachine
+or a local `/dev/input/eventN` evdev keyboard. In non-interactive use they
+default to X11. Pass `device:=x11` or `device:=/dev/input/eventN` to skip the
+menu. Any launch setting can be overridden as a trailing argument, for example
 `./scripts/start_nero.sh reset_emergency_stop_on_start:=false`.
 
 ## Build

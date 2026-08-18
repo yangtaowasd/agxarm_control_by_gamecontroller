@@ -3,7 +3,7 @@
 set -euo pipefail
 
 readonly CAN_BITRATE=1000000
-readonly CAN_INTERFACES=(can0 can1)
+readonly CAN_INTERFACES=(can0)
 
 if ! command -v ip >/dev/null 2>&1; then
   echo "Error: the 'ip' command was not found. Install the iproute2 package." >&2

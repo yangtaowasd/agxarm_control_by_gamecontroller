@@ -5,6 +5,12 @@ set -euo pipefail
 readonly SCRIPT_DIRECTORY="$(
   cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
 )"
+"${SCRIPT_DIRECTORY}/setup_can.sh"
+KEYBOARD_DEVICE="$(
+  "${SCRIPT_DIRECTORY}/select_input_device.sh" "$@"
+)"
+readonly KEYBOARD_DEVICE
+
 SOURCE_WORKSPACE_DIRECTORY="$(
   cd -- "${SCRIPT_DIRECTORY}/../../.." && pwd
 )"
@@ -34,7 +40,7 @@ exec ros2 launch armbycontroller keyboard_control.launch.py \
   nero_mount:=side \
   execute_motion:=true \
   can_interface:=can0 \
-  device:=x11 \
+  device:="${KEYBOARD_DEVICE}" \
   move_home_on_start:=false \
   reset_emergency_stop_on_start:=true \
   "$@"
