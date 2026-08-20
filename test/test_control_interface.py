@@ -49,25 +49,25 @@ class IdentityModel:
 def test_interaction_safety_limits_are_one_validated_source():
     limits = InteractionSafetyLimits(
         torque_limit=np.ones(6) * 8.0,
-        reference_velocity_limit=np.ones(6) * 0.5,
-        measured_velocity_stop_limit=np.ones(6) * 1.5,
-        measured_velocity_hard_limit=np.ones(6) * 2.0,
+        reference_velocity_limit=np.ones(6) * 1.0,
+        measured_velocity_stop_limit=np.ones(6) * 2.0,
+        measured_velocity_hard_limit=np.ones(6) * 2.5,
         measured_velocity_violation_cycles=3,
         joint_limit_margin=0.03,
     )
 
     assert limits.joint_count == 6
     assert limits.torque_limit == pytest.approx([8.0] * 6)
-    assert limits.reference_velocity_limit == pytest.approx([0.5] * 6)
+    assert limits.reference_velocity_limit == pytest.approx([1.0] * 6)
     assert limits.velocity_guard().violation_cycles == 3
     assert INTERACTION_TORQUE_LIMIT_MAX == 8.0
 
     with pytest.raises(ValueError, match=r"\(0, 8\] N.m"):
         InteractionSafetyLimits(
             torque_limit=np.ones(6) * 8.01,
-            reference_velocity_limit=np.ones(6) * 0.5,
-            measured_velocity_stop_limit=np.ones(6) * 1.5,
-            measured_velocity_hard_limit=np.ones(6) * 2.0,
+            reference_velocity_limit=np.ones(6) * 1.0,
+            measured_velocity_stop_limit=np.ones(6) * 2.0,
+            measured_velocity_hard_limit=np.ones(6) * 2.5,
             measured_velocity_violation_cycles=3,
             joint_limit_margin=0.03,
         )

@@ -180,9 +180,9 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "firmware_probe_poll_period: 0.1" in common
     assert "firmware_reconnect_delay: 0.5" in common
     assert "interaction_torque_limit: [8.0]" in common
-    assert "interaction_reference_joint_velocity_limit: [0.5]" in common
-    assert "interaction_measured_joint_velocity_stop_limit: [1.0]" in common
-    assert "interaction_measured_joint_velocity_hard_limit: [2.0]" in common
+    assert "interaction_reference_joint_velocity_limit: [1.0]" in common
+    assert "interaction_measured_joint_velocity_stop_limit: [1.5]" in common
+    assert "interaction_measured_joint_velocity_hard_limit: [2.5]" in common
     assert "interaction_measured_velocity_violation_cycles: 3" in common
     assert "interaction_joint_limit_margin: 0.03" in common
     assert "firmware:" not in common
@@ -197,7 +197,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_friction" in nero
     assert "admittance_resistive_stiffness" in nero
     assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
-    assert "interaction_measured_joint_velocity_stop_limit: [1.5]" in nero
+    assert "interaction_measured_joint_velocity_stop_limit: [2.0]" in nero
     assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero
     assert "admittance_task_weights: [0.4, 0.4, 0.4, 1.0" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
@@ -1341,9 +1341,9 @@ def test_shared_velocity_guard_covers_impedance_mode(monkeypatch):
     controller = object.__new__(ArmKeyboardController)
     controller.interaction_safety = InteractionSafetyLimits(
         torque_limit=np.ones(6) * 8.0,
-        reference_velocity_limit=np.ones(6) * 0.5,
-        measured_velocity_stop_limit=np.ones(6) * 1.0,
-        measured_velocity_hard_limit=np.ones(6) * 2.0,
+        reference_velocity_limit=np.ones(6) * 1.0,
+        measured_velocity_stop_limit=np.ones(6) * 1.5,
+        measured_velocity_hard_limit=np.ones(6) * 2.5,
         measured_velocity_violation_cycles=3,
         joint_limit_margin=0.03,
     )
@@ -1356,7 +1356,7 @@ def test_shared_velocity_guard_covers_impedance_mode(monkeypatch):
     )
     feedback = MotorFeedback(
         position=np.zeros(6),
-        velocity=np.asarray([0.0, 0.0, 2.1, 0.0, 0.0, 0.0]),
+        velocity=np.asarray([0.0, 0.0, 2.6, 0.0, 0.0, 0.0]),
         torque=np.zeros(6),
     )
 

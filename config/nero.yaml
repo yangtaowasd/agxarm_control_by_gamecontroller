@@ -15,8 +15,8 @@ arm_keyboard_controller:
     mit_gravity_compensation_enabled: true
     mit_gravity_scale: 1.0
 
-    # Nero keeps more measured-speed headroom than the shared 1.0 default.
-    interaction_measured_joint_velocity_stop_limit: [1.5]
+    # Nero keeps more measured-speed headroom than the shared 1.5 default.
+    interaction_measured_joint_velocity_stop_limit: [2.0]
 
     # Nero uses isotropic task-space rotation stiffness.  The stronger
     # base-Z return is a Piper-L-only tuning choice.

@@ -690,9 +690,9 @@ implementation.
 | `firmware_reconnect_delay` | scalar | s | `0.5`；探测连接断开与正式连接创建之间的等待 / delay between probe disconnect and formal-connection creation |
 | `impedance_backend` | string | — | `cartesian` (`joint` 可对照 / for comparison) |
 | `interaction_torque_limit` | 1 or n | N·m | `8.0` per joint；关节阻抗、笛卡尔阻抗、导纳和混合共用的估算总力矩上限 / estimated-total-torque limit shared by joint/Cartesian impedance, admittance, and hybrid |
-| `interaction_reference_joint_velocity_limit` | 1 or n | rad/s | `0.5` per joint；阻抗轨迹和导纳/混合旋量速度 IK 共用 / shared by impedance trajectories and admittance/hybrid screw-velocity IK |
-| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`1.5`; Piper-L=`1.0` per joint；持续速度停止线 / sustained measured-speed stop threshold |
-| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.0` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
+| `interaction_reference_joint_velocity_limit` | 1 or n | rad/s | `1.0` per joint；阻抗轨迹和导纳/混合旋量速度 IK 共用 / shared by impedance trajectories and admittance/hybrid screw-velocity IK |
+| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`2.0`; Piper-L=`1.5` per joint；持续速度停止线 / sustained measured-speed stop threshold |
+| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
 | `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
 | `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
@@ -852,15 +852,15 @@ in joint space before the total torque clip.
   entering its target; requesting two or three modes together leaves the
   current mode unchanged.
 - 所有 `I/O/H` 模式的参考关节速度统一受
-  `interaction_reference_joint_velocity_limit=0.5 rad/s` 限制，并在 ROS 硬件
-  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `1.5 rad/s` 连续三个
-  周期、Piper-L 超过 `1.0 rad/s` 连续三个周期，或任一机械臂单周期超过
-  `2.0 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
+  `interaction_reference_joint_velocity_limit=1.0 rad/s` 限制，并在 ROS 硬件
+  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.0 rad/s` 连续三个
+  周期、Piper-L 超过 `1.5 rad/s` 连续三个周期，或任一机械臂单周期超过
+  `2.5 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
   Twist/位移和预测位置限制。 / Every `I/O/H` mode shares
-  `interaction_reference_joint_velocity_limit=0.5 rad/s` and first passes the
+  `interaction_reference_joint_velocity_limit=1.0 rad/s` and first passes the
   same measured-speed guard in the ROS hardware adapter. An electronic stop is
-  triggered after three consecutive cycles above `1.5 rad/s` on Nero or
-  `1.0 rad/s` on Piper-L, or immediately above `2.0 rad/s` on either arm.
+  triggered after three consecutive cycles above `2.0 rad/s` on Nero or
+  `1.5 rad/s` on Piper-L, or immediately above `2.5 rad/s` on either arm.
   Admittance and hybrid control additionally retain their wrench, virtual
   Twist/offset, and predictive-position bounds.
 - 导纳与混合对 URDF 边界外最多 `interaction_joint_limit_margin=0.03 rad` 只开放受控
@@ -1158,8 +1158,8 @@ Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
 下游从同一 PoE 模型取得旋量 Jacobian、构造工具几何 Jacobian，再由受限加权
 DLS 生成 `dq_ref`，并用验证包同值低增益 MIT 跟踪；共享 Model Compensation
 提供重力项，每周期参考从实测 `q` 重锚定，估算总力矩限制为 ±8 N·m；参考关节速度
-限制为 `0.5 rad/s`，实测任一关节超过 `1.5 rad/s` 连续三个周期或单周期超过
-`2.0 rad/s` 会触发电子急停。
+限制为 `1.0 rad/s`，实测任一关节超过 `2.0 rad/s` 连续三个周期或单周期超过
+`2.5 rad/s` 会触发电子急停。
 若要验证带阻力且松手回中的版本，在启动命令末尾追加
 `admittance_mode:=resistive`。 / Nero defaults to
 `admittance_mode=zero_force`. With the arm supported and a fresh
@@ -1172,8 +1172,8 @@ same PoE model, constructs the tool geometric Jacobian, and uses weighted DLS
 to produce `dq_ref`. It is tracked with the verified package's low MIT gains;
 shared Model Compensation supplies gravity, the reference is reanchored to
 measured `q` every cycle, and estimated total torque is limited to ±8 N·m.
-Reference joint speed is limited to `0.5 rad/s`; measured speed above
-`1.5 rad/s` for three consecutive cycles or above `2.0 rad/s` for one cycle
+Reference joint speed is limited to `1.0 rad/s`; measured speed above
+`2.0 rad/s` for three consecutive cycles or above `2.5 rad/s` for one cycle
 triggers the electronic stop. Append
 `admittance_mode:=resistive` to test the strongly returning variant.
 

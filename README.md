@@ -120,10 +120,10 @@ model, converts it to the tool-origin geometric Jacobian, then applies weighted
 DLS with joint-speed and predictive-position bounds. The resulting joint
 velocity is tracked with low-gain MIT. Every cycle uses
 `q_ref=q_measured+dq_ref*dt`, so tracking error cannot accumulate into a
-pullback toward an old joint target. `dq_ref` is capped at `0.5 rad/s` per
-joint. On Nero, measured speed above `1.5 rad/s` for three consecutive 100 Hz
-cycles, or above the `2.0 rad/s` hard limit once, triggers the electronic stop
-(Piper-L keeps a `1.0 rad/s` sustained threshold).
+pullback toward an old joint target. `dq_ref` is capped at `1.0 rad/s` per
+joint. On Nero, measured speed above `2.0 rad/s` for three consecutive 100 Hz
+cycles, or above the `2.5 rad/s` hard limit once, triggers the electronic stop
+(Piper-L keeps a `1.5 rad/s` sustained threshold).
 Estimated MIT total torque is capped at `8 N·m`. The separate
 `armbycontroller/admittance/`
 package provides two explicit modes:
@@ -151,9 +151,9 @@ one command stream. `hybrid_desired_wrench` uses
 
 All MIT interaction modes now use the same `interaction_*` joint-safety
 configuration. The shared defaults are an `8 N.m` estimated-total-torque
-limit, `0.5 rad/s` reference-speed limit, `2.0 rad/s` immediate measured-speed
+limit, `1.0 rad/s` reference-speed limit, `2.5 rad/s` immediate measured-speed
 stop, three-cycle sustained-speed debounce, and `0.03 rad` joint-limit margin.
-The sustained measured-speed threshold is `1.5 rad/s` on Nero and `1.0 rad/s`
+The sustained measured-speed threshold is `2.0 rad/s` on Nero and `1.5 rad/s`
 on Piper-L. Admittance-specific wrench, virtual Twist, and offset bounds remain
 separate because they are task-space control-law parameters.
 
@@ -433,7 +433,7 @@ ros2 launch armbycontroller keyboard_control.launch.py \
 The controller defaults to 100 Hz IK/control scheduling. Per-tick keyboard
 increments are scaled so the original Cartesian, orientation, and joint jog
 speeds are preserved at the higher rate. The MIT reference generator defaults
-to 0.5 rad/s velocity, 1 rad/s² acceleration, and 5 rad/s³ jerk limits, exposed
+to 1.0 rad/s velocity, 1 rad/s² acceleration, and 5 rad/s³ jerk limits, exposed
 as `interaction_reference_joint_velocity_limit`,
 `mit_trajectory_max_acceleration`, and `mit_trajectory_max_jerk`. Planned mode
 retains 20 percent speed and 1 rad/s²

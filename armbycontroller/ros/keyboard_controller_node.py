@@ -509,17 +509,17 @@ class ArmKeyboardController(Node):
         )
         self.declare_parameter(
             "interaction_reference_joint_velocity_limit",
-            [0.5],
-            scalar_or_array,
-        )
-        self.declare_parameter(
-            "interaction_measured_joint_velocity_stop_limit",
             [1.0],
             scalar_or_array,
         )
         self.declare_parameter(
+            "interaction_measured_joint_velocity_stop_limit",
+            [1.5],
+            scalar_or_array,
+        )
+        self.declare_parameter(
             "interaction_measured_joint_velocity_hard_limit",
-            [2.0],
+            [2.5],
             scalar_or_array,
         )
         self.declare_parameter(

@@ -7,9 +7,9 @@ arm_keyboard_controller:
     impedance_backend: cartesian
     # Shared by joint impedance, Cartesian impedance, admittance, and hybrid.
     interaction_torque_limit: [8.0]
-    interaction_reference_joint_velocity_limit: [0.5]
-    interaction_measured_joint_velocity_stop_limit: [1.0]
-    interaction_measured_joint_velocity_hard_limit: [2.0]
+    interaction_reference_joint_velocity_limit: [1.0]
+    interaction_measured_joint_velocity_stop_limit: [1.5]
+    interaction_measured_joint_velocity_hard_limit: [2.5]
     interaction_measured_velocity_violation_cycles: 3
     interaction_joint_limit_margin: 0.03
     hybrid_admittance_axes: z
