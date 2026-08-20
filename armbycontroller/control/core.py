@@ -78,8 +78,6 @@ class ControlReference:
     velocity: np.ndarray
     acceleration: np.ndarray
     external_wrench: np.ndarray
-    external_joint_torque: np.ndarray | None = None
-    external_joint_torque_valid: bool = False
 
     def __post_init__(self):
         position = _vector(self.position, "reference.position")
@@ -99,22 +97,6 @@ class ControlReference:
             self,
             "external_wrench",
             _vector(self.external_wrench, "reference.external_wrench", 6),
-        )
-        object.__setattr__(
-            self,
-            "external_joint_torque",
-            _vector(
-                np.zeros(size)
-                if self.external_joint_torque is None
-                else self.external_joint_torque,
-                "reference.external_joint_torque",
-                size,
-            ),
-        )
-        object.__setattr__(
-            self,
-            "external_joint_torque_valid",
-            bool(self.external_joint_torque_valid),
         )
 
     @classmethod
@@ -327,12 +309,6 @@ def control_sample(sample, result, *, robot_model, interaction_mode):
             "velocity": sample.reference.velocity,
             "acceleration": sample.reference.acceleration,
             "external_wrench": sample.reference.external_wrench,
-            "external_joint_torque": (
-                sample.reference.external_joint_torque
-            ),
-            "external_joint_torque_valid": (
-                sample.reference.external_joint_torque_valid
-            ),
         },
         "command": command_values,
         "signals": result.signals,

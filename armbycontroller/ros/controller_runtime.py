@@ -104,31 +104,6 @@ class ControllerRuntimeMixin:
                 maximum_torque=getattr(
                     self, "cartesian_max_torque", float("inf")
                 ),
-                observer_friction_assist_enabled=getattr(
-                    self,
-                    "cartesian_observer_friction_assist_enabled",
-                    False,
-                ),
-                observer_friction_assist_gain=getattr(
-                    self,
-                    "cartesian_observer_friction_assist_gain",
-                    0.0,
-                ),
-                observer_friction_assist_limit=getattr(
-                    self,
-                    "cartesian_observer_friction_assist_limit",
-                    0.0,
-                ),
-                observer_friction_assist_velocity=getattr(
-                    self,
-                    "cartesian_observer_friction_assist_velocity",
-                    0.08,
-                ),
-                observer_friction_assist_minimum_torque=getattr(
-                    self,
-                    "cartesian_observer_friction_assist_minimum_torque",
-                    0.03,
-                ),
             ))
         admittance_settings = (
             "admittance_mit_kp",
@@ -334,15 +309,6 @@ class ControllerRuntimeMixin:
             reference_velocity,
             reference_acceleration,
             np.zeros(6) if external_wrench is None else external_wrench,
-            np.asarray(
-                getattr(
-                    self,
-                    "latest_external_joint_torque",
-                    np.zeros(self.joint_count),
-                ),
-                dtype=float,
-            ),
-            self._external_wrench_is_fresh(now),
         )
         return ControlInput(now, period, state, reference)
 

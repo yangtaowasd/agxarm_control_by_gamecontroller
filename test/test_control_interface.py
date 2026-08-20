@@ -509,41 +509,6 @@ def test_cartesian_adapter_applies_configured_model_scale():
     )
 
 
-def test_cartesian_adapter_uses_fresh_observer_residual_as_friction_assist():
-    controller = CartesianImpedanceController(
-        IdentityModel(),
-        stiffness=[0.0, 0.0, 0.0, 10.0, 0.0, 0.0],
-        damping=np.zeros(6),
-        torque_limit=np.ones(6) * 8.0,
-        observer_friction_assist_enabled=True,
-        observer_friction_assist_gain=[0.85] * 6,
-        observer_friction_assist_limit=[0.2] * 6,
-        observer_friction_assist_velocity=[0.08] * 6,
-        observer_friction_assist_minimum_torque=[0.03] * 6,
-    )
-    control_input = ControlInput(
-        12.5,
-        0.01,
-        ControlState(np.zeros(6), np.zeros(6), np.zeros(6)),
-        ControlReference(
-            [0.0, 0.0, 0.0, 0.1, 0.0, 0.0],
-            np.zeros(6),
-            np.zeros(6),
-            np.zeros(6),
-            [0.0, 0.0, 0.0, -0.2, 0.0, 0.0],
-            True,
-        ),
-    )
-
-    result = controller.step(control_input)
-
-    assert result.signals["task_torque"][3] == pytest.approx(1.0)
-    assert result.signals["observer_friction_torque"] == pytest.approx(
-        [0.0, 0.0, 0.0, 0.17, 0.0, 0.0]
-    )
-    assert result.signals["raw_command_torque"][3] == pytest.approx(5.17)
-
-
 def test_cartesian_adapter_adds_unprojected_joint_posture_impedance():
     controller = CartesianImpedanceController(
         IdentityModel(),

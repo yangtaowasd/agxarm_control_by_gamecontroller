@@ -10,7 +10,6 @@ from armbycontroller.control.safety import ControlCycleGuard
 from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.impedance.cartesian import cartesian_impedance_command
 from armbycontroller.impedance.cartesian import limit_cartesian_wrench
-from armbycontroller.observers import ObserverFrictionAssist
 
 
 def _joint_vector(values, joint_count, name, *, positive=False):
@@ -156,11 +155,6 @@ class CartesianImpedanceController:
         position_tolerance=0.0,
         maximum_force=float("inf"),
         maximum_torque=float("inf"),
-        observer_friction_assist_enabled=False,
-        observer_friction_assist_gain=0.0,
-        observer_friction_assist_limit=0.0,
-        observer_friction_assist_velocity=0.08,
-        observer_friction_assist_minimum_torque=0.03,
     ):
         self.model = model
         self.stiffness = np.asarray(stiffness, dtype=float).copy()
@@ -235,17 +229,6 @@ class CartesianImpedanceController:
             or np.any(self.joint_posture_damping < 0.0)
         ):
             raise ValueError("Cartesian joint gains must be nonnegative")
-        self.observer_friction_assist = (
-            ObserverFrictionAssist(
-                self.joint_count,
-                observer_friction_assist_gain,
-                observer_friction_assist_limit,
-                observer_friction_assist_velocity,
-                observer_friction_assist_minimum_torque,
-            )
-            if bool(observer_friction_assist_enabled)
-            else None
-        )
         self._reference_position = None
         self._reference_pose = None
         self._reference_jacobian = None
@@ -312,26 +295,7 @@ class CartesianImpedanceController:
             + self.joint_posture_damping
             * (reference.velocity - state.velocity)
         )
-        restoring_torque = (
-            raw.task_torque + raw.nullspace_torque + joint_posture_torque
-        )
-        observer_friction_torque = np.zeros(self.joint_count)
-        if self.observer_friction_assist is not None:
-            observer_friction_torque = (
-                self.observer_friction_assist.evaluate(
-                    restoring_torque,
-                    state.velocity,
-                    reference.external_joint_torque,
-                    observation_valid=(
-                        reference.external_joint_torque_valid
-                    ),
-                )
-            )
-        raw_command_torque = (
-            raw.command_torque
-            + joint_posture_torque
-            + observer_friction_torque
-        )
+        raw_command_torque = raw.command_torque + joint_posture_torque
         zeros = np.zeros(self.joint_count)
         torque = self.mit_envelope.command(
             state.position,
@@ -351,7 +315,6 @@ class CartesianImpedanceController:
             "task_torque": raw.task_torque,
             "nullspace_torque": raw.nullspace_torque,
             "joint_posture_torque": joint_posture_torque,
-            "observer_friction_torque": observer_friction_torque,
             "raw_command_torque": raw_command_torque,
             "torque_limit": self.torque_limit,
             "torque_clipped": torque.saturated,
@@ -361,9 +324,7 @@ class CartesianImpedanceController:
             model_torque=raw.model_torque,
             task_torque=raw.task_torque,
             auxiliary_torque=(
-                raw.nullspace_torque
-                + joint_posture_torque
-                + observer_friction_torque
+                raw.nullspace_torque + joint_posture_torque
             ),
         ))
         return ControlResult(

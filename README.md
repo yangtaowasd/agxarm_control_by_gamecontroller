@@ -105,15 +105,12 @@ When URDF compensation is active, the controller now ignores
 `mit_feedforward` in that compensation path and sends only the scaled,
 absolute-bounded inverse-dynamics result.
 
-The observer process never connects to CAN or calls the arm SDK. It updates once for
-every timestamped 100 Hz dynamics-state message, using the previous cycle's
-measured motor torque for the interval that just elapsed. The default gain is
-`momentum_observer_gain:=10.0 1/s`. On Nero, Cartesian impedance conservatively
-uses a fresh residual as low-speed friction assist: 85% of an opposing residual,
-subject to an existing restoring-torque direction, a `0.08 rad/s` speed gate,
-small per-joint caps, and the shared torque/slew envelope. It cannot create a
-motion direction by itself or trigger an emergency stop. Disable the process
-with `momentum_observer_enabled:=false`; stale/missing residuals disable assist.
+The observer process never connects to CAN or calls the arm SDK. It updates
+once for every timestamped 100 Hz dynamics-state message, using the previous
+cycle's measured motor torque for the interval that just elapsed. The default
+gain is `momentum_observer_gain:=10.0 1/s`. Its residual is not added to
+Cartesian-impedance torque; it remains a diagnostic output and an input to
+admittance. Disable the process with `momentum_observer_enabled:=false`.
 
 On both Nero and Piper-L, `O` toggles Cartesian admittance. The observed
 external joint torque is mapped to a base-frame wrench by damped least squares,

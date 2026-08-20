@@ -414,25 +414,6 @@ O(n) through spatial-inertia forward/backward recursion. It obtains
 `C^T qdot` from `Mdot qdot-C qdot`; `Mdot qdot` is one directional derivative
 of `p=M(q)qdot` along `qdot`, without constructing a full Coriolis matrix.
 
-Nero 笛卡尔阻抗会把新鲜残差用于有界低速静摩擦助推。令 `tau_r` 为任务、零
-空间和关节姿态恢复力矩之和；仅当 `|qdot_i|<v_s`、`|tau_r_i|` 超过最小值且
-`-r_i` 与 `tau_r_i` 同向时： / Nero Cartesian impedance uses a fresh
-residual for bounded low-speed stiction assist. Let `tau_r` be the sum of task,
-nullspace, and joint-posture restoring torque. Only when `|qdot_i|<v_s`,
-`|tau_r_i|` exceeds the minimum, and `-r_i` agrees with `tau_r_i`:
-
-```text
-tau_f,i = clip(-0.85 r_i, -tau_f,max,i, tau_f,max,i)
-tau_cmd = tau_model + tau_r + tau_f
-```
-
-观测器不能区分真实接触、摩擦和模型误差，因此该项不能独立产生运动，残差过期
-或关节离开低速区即归零，并继续经过统一总力矩与变化率包络。 / The observer
-cannot distinguish real contact, friction, and model error. Therefore this
-term cannot create motion by itself, becomes zero for stale residuals or after
-leaving the low-speed window, and remains inside the shared total-torque and
-slew-rate envelope.
-
 ### 5.9 导纳受限旋量速度 IK 与 MIT / Bounded screw velocity IK and MIT
 
 导纳状态输出基坐标系 twist `v_a=[omega;v]`。受限旋量速度 IK 从同一 PoE 模型
@@ -753,7 +734,6 @@ profile is used.
 | `armbycontroller/ros/hardware_session.py` | 两阶段连接、启动安全、反馈归一化、SDK 命令、急停和退出断开 / Two-stage connection, startup safety, normalized feedback, SDK commands, emergency stop, and shutdown disconnect |
 | `armbycontroller/ros/control_cycle.py` | 键盘周期调度、四类 MIT tick、笛卡尔目标与单周期唯一命令所有者 / Keyboard-cycle dispatch, four MIT ticks, Cartesian targets, and one command owner per cycle |
 | `armbycontroller/observers/momentum.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
-| `armbycontroller/observers/friction.py` | 只沿已有恢复方向工作的低速、有界残差摩擦助推 / Bounded low-speed residual friction assist that only follows an existing restoring direction |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
 | `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
@@ -813,11 +793,6 @@ implementation.
 | `cartesian_impedance_joint_posture_stiffness` | 1 or n | N·m/rad | Nero=`[0,0.5,0.5,0.6,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
-| `cartesian_impedance_observer_friction_assist_enabled` | bool | — | Nero=`true`; Piper-L=`false` |
-| `cartesian_impedance_observer_friction_assist_gain` | 1 or n | — | Nero=`0.85`；只补偿残差的 85% / compensates only 85% of the residual |
-| `cartesian_impedance_observer_friction_assist_limit` | 1 or n | N·m | Nero=`[0.30,0.35,0.30,0.25,0.18,0.12,0.10]`，J1…J7 硬上限 / J1…J7 hard caps |
-| `cartesian_impedance_observer_friction_assist_velocity` | 1 or n | rad/s | Nero=`0.08`；仅低于该速度 / only below this speed |
-| `cartesian_impedance_observer_friction_assist_minimum_torque` | 1 or n | N·m | Nero=`0.03`；已有恢复力矩门槛 / existing-restoring-torque gate |
 | `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
 | `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
 | `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
@@ -965,11 +940,11 @@ in joint space before the total torque clip.
 - 软件计算上限不是驱动器电流硬限，也不是力传感器测量。 / A software
   command limit is neither a drive-current hard limit nor a force-sensor
   measurement.
-- 独立动量观测器进程本身是被动的且不触发急停；Nero 笛卡尔阻抗可消费其新鲜
-  残差，但只能按恢复方向、低速门控和逐轴上限形成摩擦助推。 / The separate
-  momentum-observer process itself is passive and never triggers an emergency
-  stop. Nero Cartesian impedance may consume its fresh residual only through
-  restoring-direction, low-speed, and per-axis friction-assist bounds.
+- 独立动量观测器进程本身是被动的且不触发急停；其残差不再叠加到阻抗控制力矩，
+  仍可作为诊断输出和导纳输入。 / The separate momentum-observer process is
+  passive and never triggers an emergency stop. Its residual is no longer
+  added to impedance torque and remains available for diagnostics and
+  admittance input.
 - 观测器进程禁止访问 SDK/CAN；输入只能来自控制器复用的 100 Hz
   `/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
   its only input is the controller's reused 100 Hz `/arm_dynamics_state`
@@ -1549,11 +1524,10 @@ checks.
 6. **低增益实机 / Low-gain hardware**：先静止保持，再毫米级 IK，保存完整日志。
    / First stationary hold, then millimetre IK steps with complete logs.
 7. **动量观测 / Momentum observation**：已完成只读 100 Hz topic seam、独立进程、
-   O(n) 动量递推、残差发布及 Nero 有界低速 85% 摩擦助推；尚未完成逐关节实机
-   摩擦辨识或碰撞阈值验证。 / The read-only 100 Hz topic seam, separate
-   process, O(n) momentum recursion, residual publishing, and Nero bounded
-   low-speed 85% friction assist are complete; per-joint hardware friction
-   identification and validated collision thresholds are not.
+   O(n) 动量递推和残差发布；残差不补偿阻抗静摩擦，尚未完成碰撞阈值验证。 /
+   The read-only 100 Hz topic seam, separate process, O(n) momentum recursion,
+   and residual publishing are complete. The residual does not compensate
+   impedance friction; validated collision thresholds remain incomplete.
 8. **Nero/Piper-L 导纳 / Nero/Piper-L admittance**：已完成独立
    `cartesian/` 共用任务几何、完全分开的 `impedance/`/`admittance/` adapter、
    Nero 抗漂移柔顺零力、`resistive`、机器人独立参数、`O` 键、I/O/H 互锁、7/6 轴

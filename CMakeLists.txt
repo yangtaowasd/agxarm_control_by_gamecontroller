@@ -121,10 +121,6 @@ if(BUILD_TESTING)
     test/test_momentum_observer.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
-  ament_add_pytest_test(observer_friction_test
-    test/test_observer_friction.py
-    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
-  )
   ament_add_pytest_test(cartesian_admittance_test
     test/test_cartesian_admittance.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1

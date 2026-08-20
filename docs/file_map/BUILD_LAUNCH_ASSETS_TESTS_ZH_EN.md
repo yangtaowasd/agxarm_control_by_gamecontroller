@@ -49,7 +49,6 @@ current `tool_configuration` does not reference it.
 | --- | --- |
 | `test/test_arm_control.py` | 状态机、轨迹、AGX adapter、安全启动和模式互锁集成回归 / state machine, trajectory, AGX adapter, startup safety, and interlock regression |
 | `test/test_momentum_observer.py` | 观测器公式、时间戳与 ROS 隔离 / observer formula, timestamp, and ROS isolation |
-| `test/test_observer_friction.py` | 低速残差摩擦助推的方向、比例、上限和退出条件 / direction, ratio, caps, and exit conditions for low-speed residual friction assist |
 | `test/test_control_interface.py` | 统一控制器 interface 与三个 adapter / common controller interface and three adapters |
 | `test/test_cartesian_common.py` | 阻抗/导纳共用笛卡尔任务几何的独立契约 / independent contracts for shared Cartesian Task Geometry |
 | `test/test_experiment.py` | 实验生命周期、sink 与指标 / experiment lifecycle, sinks, and metrics |

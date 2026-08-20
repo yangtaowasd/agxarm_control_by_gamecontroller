@@ -220,48 +220,6 @@ class ArmKeyboardController(
             ),
             dtype=float,
         )
-        self.cartesian_observer_friction_assist_enabled = bool(
-            self.get_parameter(
-                "cartesian_impedance_observer_friction_assist_enabled"
-            ).value
-        )
-        observer_assist_parameters = (
-            "cartesian_impedance_observer_friction_assist_gain",
-            "cartesian_impedance_observer_friction_assist_limit",
-            "cartesian_impedance_observer_friction_assist_velocity",
-            "cartesian_impedance_observer_friction_assist_minimum_torque",
-        )
-        observer_assist_values = {
-            name: np.asarray(
-                expand_joint_values(
-                    self.get_parameter(name).value,
-                    self.joint_count,
-                    name,
-                ),
-                dtype=float,
-            )
-            for name in observer_assist_parameters
-        }
-        self.cartesian_observer_friction_assist_gain = (
-            observer_assist_values[
-                "cartesian_impedance_observer_friction_assist_gain"
-            ]
-        )
-        self.cartesian_observer_friction_assist_limit = (
-            observer_assist_values[
-                "cartesian_impedance_observer_friction_assist_limit"
-            ]
-        )
-        self.cartesian_observer_friction_assist_velocity = (
-            observer_assist_values[
-                "cartesian_impedance_observer_friction_assist_velocity"
-            ]
-        )
-        self.cartesian_observer_friction_assist_minimum_torque = (
-            observer_assist_values[
-                "cartesian_impedance_observer_friction_assist_minimum_torque"
-            ]
-        )
         task_parameter_names = (
             "admittance_virtual_mass",
             "admittance_zero_force_damping",
@@ -508,20 +466,6 @@ class ArmKeyboardController(
                 "nonnegative"
             )
         if (
-            np.any(self.cartesian_observer_friction_assist_gain < 0.0)
-            or np.any(self.cartesian_observer_friction_assist_gain >= 1.0)
-            or np.any(self.cartesian_observer_friction_assist_limit < 0.0)
-            or np.any(
-                self.cartesian_observer_friction_assist_velocity <= 0.0
-            )
-            or np.any(
-                self.cartesian_observer_friction_assist_minimum_torque < 0.0
-            )
-        ):
-            raise ValueError(
-                "Cartesian observer friction-assist settings are invalid"
-            )
-        if (
             not np.all(np.isfinite(self.cartesian_model_scale))
             or np.any(self.cartesian_model_scale < 0.0)
             or np.any(self.cartesian_model_scale > 1.0)
@@ -639,7 +583,6 @@ class ArmKeyboardController(
         self.feedback_previous_velocity = np.zeros(self.joint_count)
         self.feedback_previous_time = None
         self.latest_external_wrench = np.zeros(6)
-        self.latest_external_joint_torque = np.zeros(self.joint_count)
         self.latest_external_wrench_received_at = -math.inf
         self.latest_external_wrench_source_time = -math.inf
 

@@ -383,7 +383,6 @@ class HardwareSessionMixin:
             )
             return
         self.latest_external_wrench = wrench
-        self.latest_external_joint_torque = external_torque.copy()
         self.latest_external_wrench_received_at = time.monotonic()
         if source_time > 0.0:
             self.latest_external_wrench_source_time = source_time

@@ -313,7 +313,7 @@ class ControlCycleMixin:
             )
         self.get_logger().info(
             "Cartesian MIT error=%s wrench=%s task=%s null=%s posture=%s "
-            "friction=%s model=%s total=%s sent=%s N·m"
+            "model=%s total=%s sent=%s N·m"
             % (
                 np.round(raw.pose_error, 4).tolist(),
                 np.round(raw.commanded_wrench, 3).tolist(),
@@ -321,9 +321,6 @@ class ControlCycleMixin:
                 np.round(raw.nullspace_torque, 3).tolist(),
                 np.round(
                     result.signals["joint_posture_torque"], 3
-                ).tolist(),
-                np.round(
-                    result.signals["observer_friction_torque"], 3
                 ).tolist(),
                 np.round(raw.model_torque, 3).tolist(),
                 np.round(

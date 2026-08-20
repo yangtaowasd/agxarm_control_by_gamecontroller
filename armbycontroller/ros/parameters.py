@@ -225,26 +225,6 @@ def declare_controller_parameters(node):
         "cartesian_impedance_model_scale", [1.0], scalar_or_array
     )
     node.declare_parameter(
-        "cartesian_impedance_observer_friction_assist_enabled", False
-    )
-    node.declare_parameter(
-        "cartesian_impedance_observer_friction_assist_gain",
-        [0.0],
-        scalar_or_array,
-    )
-    node.declare_parameter(
-        "cartesian_impedance_observer_friction_assist_limit",
-        [0.0],
-        scalar_or_array,
-    )
-    node.declare_parameter(
-        "cartesian_impedance_observer_friction_assist_velocity", [0.08]
-    )
-    node.declare_parameter(
-        "cartesian_impedance_observer_friction_assist_minimum_torque",
-        [0.03],
-    )
-    node.declare_parameter(
         "admittance_virtual_mass", [0.2, 0.2, 0.2, 2.0, 2.0, 2.0]
     )
     node.declare_parameter("admittance_mode", "zero_force")
