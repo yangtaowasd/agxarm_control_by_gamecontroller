@@ -110,7 +110,7 @@ def declare_controller_parameters(node):
     node.declare_parameter("velocity_filter_time_constant", 0.03)
     node.declare_parameter("control_rate", 100.0)
     node.declare_parameter("step_rad", 0.005)
-    node.declare_parameter("speed_percent", 20)
+    node.declare_parameter("speed_percent", 40)
     node.declare_parameter("joint_max_acceleration", 1.0)
     node.declare_parameter("joint_acc_timeout", 2.0)
     node.declare_parameter("position_mode_timeout", 2.0)
@@ -199,6 +199,8 @@ def declare_controller_parameters(node):
     node.declare_parameter("cartesian_impedance_translation_stiffness", 10.0)
     node.declare_parameter("cartesian_impedance_rotation_damping", 0.08)
     node.declare_parameter("cartesian_impedance_translation_damping", 0.8)
+    node.declare_parameter("cartesian_impedance_max_force", 10.0)
+    node.declare_parameter("cartesian_impedance_max_torque", 4.0)
     node.declare_parameter(
         "cartesian_impedance_nullspace_stiffness",
         [0.4],
@@ -221,6 +223,26 @@ def declare_controller_parameters(node):
     )
     node.declare_parameter(
         "cartesian_impedance_model_scale", [1.0], scalar_or_array
+    )
+    node.declare_parameter(
+        "cartesian_impedance_observer_friction_assist_enabled", False
+    )
+    node.declare_parameter(
+        "cartesian_impedance_observer_friction_assist_gain",
+        [0.0],
+        scalar_or_array,
+    )
+    node.declare_parameter(
+        "cartesian_impedance_observer_friction_assist_limit",
+        [0.0],
+        scalar_or_array,
+    )
+    node.declare_parameter(
+        "cartesian_impedance_observer_friction_assist_velocity", [0.08]
+    )
+    node.declare_parameter(
+        "cartesian_impedance_observer_friction_assist_minimum_torque",
+        [0.03],
     )
     node.declare_parameter(
         "admittance_virtual_mass", [0.2, 0.2, 0.2, 2.0, 2.0, 2.0]
@@ -275,7 +297,18 @@ def declare_controller_parameters(node):
         "admittance_task_weights", [0.4, 0.4, 0.4, 1.0, 1.0, 1.0]
     )
     node.declare_parameter("admittance_velocity_dls_damping", 0.02)
+    node.declare_parameter(
+        "admittance_singularity_slow_threshold", 0.05
+    )
+    node.declare_parameter(
+        "admittance_singularity_stop_threshold", 0.01
+    )
+    node.declare_parameter("admittance_singularity_damping", 0.08)
     node.declare_parameter("hybrid_admittance_axes", "z")
+    node.declare_parameter("hybrid_admittance_frame", "base")
+    node.declare_parameter(
+        "hybrid_admittance_frame_rotation", [0.0, 0.0, 0.0]
+    )
     node.declare_parameter("hybrid_desired_wrench", [0.0] * 6)
     node.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
     node.declare_parameter(

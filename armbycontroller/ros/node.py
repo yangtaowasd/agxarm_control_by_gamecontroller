@@ -31,6 +31,7 @@ from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import resolve_tool_urdf_path
+from armbycontroller.hybrid import compliance_frame_rotation
 from armbycontroller.hybrid import task_axis_mask
 from armbycontroller.modeling.screw_model import project_gravity_vector
 from armbycontroller.ros.control_cycle import ControlCycleMixin
@@ -51,7 +52,9 @@ from armbycontroller.teleop import KEY_COUNT
 from armbycontroller.teleop import KEY_HOME as KEY_HOME  # noqa: F401
 from armbycontroller.teleop import KEY_JOINT_1 as KEY_JOINT_1  # noqa: F401
 from armbycontroller.teleop import KEY_JOINT_7 as KEY_JOINT_7  # noqa: F401
-from armbycontroller.teleop import KEY_MODE_TOGGLE as KEY_MODE_TOGGLE  # noqa: F401
+from armbycontroller.teleop import (  # noqa: F401
+    KEY_MODE_TOGGLE as KEY_MODE_TOGGLE,
+)
 
 
 def bounded_model_feedforward(model_torque, scale, torque_limit):
@@ -158,6 +161,12 @@ class ArmKeyboardController(
             rotation_damping,
             translation_damping,
         )
+        self.cartesian_max_force = float(
+            self.get_parameter("cartesian_impedance_max_force").value
+        )
+        self.cartesian_max_torque = float(
+            self.get_parameter("cartesian_impedance_max_torque").value
+        )
         self.cartesian_nullspace_stiffness = np.asarray(
             expand_joint_values(
                 self.get_parameter(
@@ -210,6 +219,48 @@ class ArmKeyboardController(
                 "cartesian_impedance_model_scale",
             ),
             dtype=float,
+        )
+        self.cartesian_observer_friction_assist_enabled = bool(
+            self.get_parameter(
+                "cartesian_impedance_observer_friction_assist_enabled"
+            ).value
+        )
+        observer_assist_parameters = (
+            "cartesian_impedance_observer_friction_assist_gain",
+            "cartesian_impedance_observer_friction_assist_limit",
+            "cartesian_impedance_observer_friction_assist_velocity",
+            "cartesian_impedance_observer_friction_assist_minimum_torque",
+        )
+        observer_assist_values = {
+            name: np.asarray(
+                expand_joint_values(
+                    self.get_parameter(name).value,
+                    self.joint_count,
+                    name,
+                ),
+                dtype=float,
+            )
+            for name in observer_assist_parameters
+        }
+        self.cartesian_observer_friction_assist_gain = (
+            observer_assist_values[
+                "cartesian_impedance_observer_friction_assist_gain"
+            ]
+        )
+        self.cartesian_observer_friction_assist_limit = (
+            observer_assist_values[
+                "cartesian_impedance_observer_friction_assist_limit"
+            ]
+        )
+        self.cartesian_observer_friction_assist_velocity = (
+            observer_assist_values[
+                "cartesian_impedance_observer_friction_assist_velocity"
+            ]
+        )
+        self.cartesian_observer_friction_assist_minimum_torque = (
+            observer_assist_values[
+                "cartesian_impedance_observer_friction_assist_minimum_torque"
+            ]
         )
         task_parameter_names = (
             "admittance_virtual_mass",
@@ -285,6 +336,19 @@ class ArmKeyboardController(
         self.admittance_velocity_dls_damping = float(
             self.get_parameter("admittance_velocity_dls_damping").value
         )
+        self.admittance_singularity_slow_threshold = float(
+            self.get_parameter(
+                "admittance_singularity_slow_threshold"
+            ).value
+        )
+        self.admittance_singularity_stop_threshold = float(
+            self.get_parameter(
+                "admittance_singularity_stop_threshold"
+            ).value
+        )
+        self.admittance_singularity_damping = float(
+            self.get_parameter("admittance_singularity_damping").value
+        )
         self.admittance_joint_limit_margin = (
             self.interaction_safety.joint_limit_margin
         )
@@ -292,6 +356,24 @@ class ArmKeyboardController(
             self.get_parameter("hybrid_admittance_axes").value
         ).strip().lower()
         task_axis_mask(self.hybrid_admittance_axes)
+        self.hybrid_admittance_frame = str(
+            self.get_parameter("hybrid_admittance_frame").value
+        ).strip().lower()
+        self.hybrid_admittance_frame_rotation = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "hybrid_admittance_frame_rotation"
+                ).value,
+                3,
+                "hybrid_admittance_frame_rotation",
+            ),
+            dtype=float,
+        )
+        compliance_frame_rotation(
+            self.hybrid_admittance_frame,
+            np.eye(4),
+            self.hybrid_admittance_frame_rotation,
+        )
         self.hybrid_desired_wrench = np.asarray(
             expand_joint_values(
                 self.get_parameter("hybrid_desired_wrench").value,
@@ -370,10 +452,17 @@ class ArmKeyboardController(
             self.admittance_wrench_dls_damping <= 0.0
             or self.admittance_wrench_timeout <= 0.0
             or self.admittance_velocity_dls_damping <= 0.0
+            or self.admittance_singularity_stop_threshold <= 0.0
+            or self.admittance_singularity_slow_threshold
+            <= self.admittance_singularity_stop_threshold
+            or self.admittance_singularity_damping < 0.0
         ):
             raise ValueError(
-                "admittance DLS damping and wrench timeout must be positive"
+                "admittance DLS, singularity, and wrench timeout settings "
+                "are invalid"
             )
+        if self.cartesian_max_force <= 0.0 or self.cartesian_max_torque <= 0.0:
+            raise ValueError("Cartesian wrench limits must be positive")
         if any(
             not 0.0 <= value <= 500.0
             for value in self.admittance_mit_kp
@@ -417,6 +506,20 @@ class ArmKeyboardController(
             raise ValueError(
                 "Cartesian, nullspace, and joint-posture gains must be "
                 "nonnegative"
+            )
+        if (
+            np.any(self.cartesian_observer_friction_assist_gain < 0.0)
+            or np.any(self.cartesian_observer_friction_assist_gain >= 1.0)
+            or np.any(self.cartesian_observer_friction_assist_limit < 0.0)
+            or np.any(
+                self.cartesian_observer_friction_assist_velocity <= 0.0
+            )
+            or np.any(
+                self.cartesian_observer_friction_assist_minimum_torque < 0.0
+            )
+        ):
+            raise ValueError(
+                "Cartesian observer friction-assist settings are invalid"
             )
         if (
             not np.all(np.isfinite(self.cartesian_model_scale))
@@ -536,6 +639,7 @@ class ArmKeyboardController(
         self.feedback_previous_velocity = np.zeros(self.joint_count)
         self.feedback_previous_time = None
         self.latest_external_wrench = np.zeros(6)
+        self.latest_external_joint_torque = np.zeros(self.joint_count)
         self.latest_external_wrench_received_at = -math.inf
         self.latest_external_wrench_source_time = -math.inf
 

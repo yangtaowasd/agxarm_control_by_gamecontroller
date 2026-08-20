@@ -190,14 +190,12 @@ def connect_arm_two_stage(
         channel=can_interface,
     )
     probe_arm = arm_factory.create_arm(probe_config)
-    probe_enable_attempted = False
     announce(
         f"firmware probe connection: {model} on {can_interface} "
         "with default profile"
     )
     try:
         probe_arm.connect()
-        probe_enable_attempted = True
         announce(
             f"{model} firmware probe: sending one temporary enable request"
         )
@@ -230,18 +228,6 @@ def connect_arm_two_stage(
             f"selected profile={firmware_profile}"
         )
     finally:
-        if probe_enable_attempted:
-            try:
-                disable_result = probe_arm.disable()
-                announce(
-                    f"{model} firmware probe disable request result: "
-                    f"{disable_result}"
-                )
-            except Exception as error:
-                announce(
-                    f"{model} firmware probe disable request failed: "
-                    f"{type(error).__name__}: {error}"
-                )
         probe_arm.disconnect()
         announce("firmware probe disconnected")
 

@@ -16,7 +16,8 @@ arm_keyboard_controller:
     mit_gravity_scale: 1.0
 
     # Nero keeps more measured-speed headroom than the shared 1.5 default.
-    interaction_measured_joint_velocity_stop_limit: [2.0]
+    interaction_measured_joint_velocity_stop_limit: [2.3]
+    interaction_measured_joint_velocity_hard_limit: [2.6]
 
     # Nero uses isotropic task-space rotation stiffness.  The stronger
     # base-Z return is a Piper-L-only tuning choice.
@@ -36,6 +37,15 @@ arm_keyboard_controller:
     # J1...J7 model multiplier. J4 is the fourth value.
     # Keep 1.0 until bare-arm static torque calibration is available.
     cartesian_impedance_model_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    # Use 85% of an opposing momentum-observer residual only inside the
+    # low-speed stiction window. Per-joint caps limit contact/model leakage;
+    # the result still passes through the shared torque and slew-rate limits.
+    cartesian_impedance_observer_friction_assist_enabled: true
+    cartesian_impedance_observer_friction_assist_gain: [0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85]
+    cartesian_impedance_observer_friction_assist_limit: [0.30, 0.35, 0.30, 0.25, 0.18, 0.12, 0.10]  # N.m
+    cartesian_impedance_observer_friction_assist_velocity: [0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08]  # rad/s
+    cartesian_impedance_observer_friction_assist_minimum_torque: [0.03, 0.03, 0.03, 0.03, 0.03, 0.03, 0.03]  # N.m
 
     # Nero bare-arm admittance, independent from Piper-L tuning. Spatial
     # vectors use [Mx, My, Mz, Fx, Fy, Fz]. "Zero force" is intentionally

@@ -186,6 +186,13 @@ class CartesianAdmittanceController:
                 getattr(self.admittance, "mode", "unknown"),
             ),
             "joint_velocity": reference_velocity,
+            "jacobian_minimum_singular_value": (
+                self.velocity_ik.last_minimum_singular_value
+            ),
+            "singularity_velocity_scale": (
+                self.velocity_ik.last_velocity_scale
+            ),
+            "velocity_ik_damping": self.velocity_ik.last_damping,
         }
         signals.update(compensation.signals())
         signals.update(torque.signals(

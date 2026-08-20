@@ -313,7 +313,7 @@ class ControlCycleMixin:
             )
         self.get_logger().info(
             "Cartesian MIT error=%s wrench=%s task=%s null=%s posture=%s "
-            "model=%s total=%s sent=%s N·m"
+            "friction=%s model=%s total=%s sent=%s N·m"
             % (
                 np.round(raw.pose_error, 4).tolist(),
                 np.round(raw.commanded_wrench, 3).tolist(),
@@ -321,6 +321,9 @@ class ControlCycleMixin:
                 np.round(raw.nullspace_torque, 3).tolist(),
                 np.round(
                     result.signals["joint_posture_torque"], 3
+                ).tolist(),
+                np.round(
+                    result.signals["observer_friction_torque"], 3
                 ).tolist(),
                 np.round(raw.model_torque, 3).tolist(),
                 np.round(
@@ -458,7 +461,8 @@ class ControlCycleMixin:
         self.last_admittance_tick_time = now
         if not self._external_wrench_is_fresh(now):
             self.get_logger().error(
-                "admittance external wrench timed out; leaving interaction mode"
+                "admittance external wrench timed out; leaving interaction "
+                "mode"
             )
             self._exit_admittance("external wrench timeout", feedback)
             return

@@ -13,7 +13,14 @@ arm_keyboard_controller:
     interaction_measured_joint_velocity_hard_limit: [2.5]
     interaction_measured_velocity_violation_cycles: 3
     interaction_joint_limit_margin: 0.03
+    cartesian_impedance_max_force: 10.0   # N, norm limit before J^T
+    cartesian_impedance_max_torque: 4.0  # N.m, norm limit before J^T
+    admittance_singularity_slow_threshold: 0.05
+    admittance_singularity_stop_threshold: 0.01
+    admittance_singularity_damping: 0.08
     hybrid_admittance_axes: z
+    hybrid_admittance_frame: base  # base | tool | custom
+    hybrid_admittance_frame_rotation: [0.0, 0.0, 0.0]  # rad, custom only
     hybrid_desired_wrench: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     firmware_probe_timeout: 5.0       # s; first/default connection
     firmware_probe_poll_period: 0.1   # s

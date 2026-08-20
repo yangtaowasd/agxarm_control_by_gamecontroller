@@ -12,6 +12,7 @@ from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
 from armbycontroller.impedance.cartesian import cartesian_pose_error
 from armbycontroller.impedance.cartesian import equivalent_cartesian_impedance
 from armbycontroller.impedance.cartesian import equivalent_joint_impedance
+from armbycontroller.modeling.lie import rotation_from_vector
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 
 
@@ -157,6 +158,32 @@ def test_cartesian_impedance_is_full_jacobian_transpose_wrench_mapping():
     assert result.commanded_wrench == pytest.approx(expected_wrench)
     assert result.task_torque == pytest.approx(jacobian.T @ expected_wrench)
     assert result.command_torque == pytest.approx(result.task_torque)
+
+
+def test_cartesian_impedance_limits_force_and_torque_vector_magnitudes():
+    target = transform(
+        rotation=rotation_from_vector([0.0, 0.0, 1.0]),
+        translation=[0.3, 0.4, 0.0],
+    )
+
+    result = cartesian_impedance_command(
+        FixedModel(),
+        None,
+        np.zeros(6),
+        np.zeros(6),
+        target,
+        np.zeros(6),
+        np.ones(6) * 10.0,
+        np.zeros(6),
+        maximum_force=5.0,
+        maximum_torque=2.0,
+    )
+
+    assert result.raw_commanded_wrench == pytest.approx(
+        [0, 0, 10, 3, 4, 0]
+    )
+    assert result.commanded_wrench == pytest.approx([0, 0, 2, 3, 4, 0])
+    assert result.wrench_limited
 
 
 def test_seven_axis_nullspace_impedance_restores_only_redundant_motion():

@@ -16,6 +16,15 @@ zero-force and resistive Cartesian-admittance modes for Nero and Piper-L,
 driven by momentum-observer external torque, and a direction-selective,
 complementary impedance/admittance hybrid mode.
 
+ROS 2 包名与仓库目录统一为
+`agxarm_control_by_gamecontroller`；`armbycontroller` 仅作为内部 Python
+import namespace。因此 `colcon --packages-select`、`ros2 launch` 和
+`ros2 run` 均使用前者，Python import 使用后者。 / The ROS 2 package
+and repository directory share the name `agxarm_control_by_gamecontroller`;
+`armbycontroller` is retained only as the internal Python import namespace.
+Therefore, `colcon --packages-select`, `ros2 launch`, and `ros2 run` use the
+former, while Python imports use the latter.
+
 当前阶段已把纯数学核心接入 `mit_tick()` 和 AGX MIT/CAN。默认
 `impedance_backend:=cartesian`；设为 `joint` 可以保留旧关节 MIT 作为对照。
 导纳下游采用已验证 `nero_admittance_mit` 的受限旋量 Jacobian 速度 IK 与实测状态重锚定 MIT
@@ -45,16 +54,19 @@ robot-specific YAML tuning.
 实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
 `software_version` 选择 Nero/Piper-L 对应驱动 profile。探测实例断开后等待默认
 `0.5 s`，才创建全新的正式控制实例。
-Nero 和 Piper-L 探测阶段都会短暂请求使能，读取固件后立即请求失能；不会发送
-运动或固件写入命令。 /
+Nero 和 Piper-L 探测阶段都会请求使能；探测连接结束时只断开通信，不发送
+`disable()`，使能状态留给正式连接接管。即使固件探测失败也不会自动失能；不会
+发送运动或固件写入命令。 /
 Real-hardware startup uses one two-stage connection for both arms. Stage one
 creates a probe with
 the SDK `default` profile, connects, saves the complete firmware dictionary,
 and always disconnects. After a default `0.5 s` post-disconnect delay, stage
 two selects the Nero/Piper-L driver profile from the saved `software_version`
 and creates a distinct formal control instance.
-Both Nero and Piper-L probes briefly request enable and immediately request
-disable after the firmware read; they send no motion or firmware-write command.
+Both Nero and Piper-L probes request enable. Probe teardown disconnects
+communication without sending `disable()`, leaving the enabled state for the
+formal connection to take over. A failed firmware probe also does not
+automatically disable the arm. No motion or firmware-write command is sent.
 
 ## 2. 心智模型 / Mental model
 
@@ -402,6 +414,25 @@ O(n) through spatial-inertia forward/backward recursion. It obtains
 `C^T qdot` from `Mdot qdot-C qdot`; `Mdot qdot` is one directional derivative
 of `p=M(q)qdot` along `qdot`, without constructing a full Coriolis matrix.
 
+Nero 笛卡尔阻抗会把新鲜残差用于有界低速静摩擦助推。令 `tau_r` 为任务、零
+空间和关节姿态恢复力矩之和；仅当 `|qdot_i|<v_s`、`|tau_r_i|` 超过最小值且
+`-r_i` 与 `tau_r_i` 同向时： / Nero Cartesian impedance uses a fresh
+residual for bounded low-speed stiction assist. Let `tau_r` be the sum of task,
+nullspace, and joint-posture restoring torque. Only when `|qdot_i|<v_s`,
+`|tau_r_i|` exceeds the minimum, and `-r_i` agrees with `tau_r_i`:
+
+```text
+tau_f,i = clip(-0.85 r_i, -tau_f,max,i, tau_f,max,i)
+tau_cmd = tau_model + tau_r + tau_f
+```
+
+观测器不能区分真实接触、摩擦和模型误差，因此该项不能独立产生运动，残差过期
+或关节离开低速区即归零，并继续经过统一总力矩与变化率包络。 / The observer
+cannot distinguish real contact, friction, and model error. Therefore this
+term cannot create motion by itself, becomes zero for stale residuals or after
+leaving the low-speed window, and remains inside the shared total-torque and
+slew-rate envelope.
+
 ### 5.9 导纳受限旋量速度 IK 与 MIT / Bounded screw velocity IK and MIT
 
 导纳状态输出基坐标系 twist `v_a=[omega;v]`。受限旋量速度 IK 从同一 PoE 模型
@@ -433,17 +464,18 @@ the controller exits to a normal hold.
 
 ### 5.10 Twist 层互补混合控制 / Complementary Twist-level hybrid control
 
-混合模式仍遵守本项目的六维顺序 `[rx,ry,rz,x,y,z]=[角;线]`。配置
-`hybrid_admittance_axes` 生成对角选择矩阵 `S_a`，互补阻抗选择矩阵严格取
-`S_i=I-S_a`，因此每个任务方向只有一个外环拥有。默认值 `z` 对应
-`S_a=diag(0,0,0,0,0,1)`：基座 Z 平移走导纳，其余五维围绕按 `H` 时捕获的
-末端位姿走阻抗。 / Hybrid mode retains the project ordering
-`[rx,ry,rz,x,y,z]=[angular;linear]`. `hybrid_admittance_axes` constructs the
-diagonal selection matrix `S_a`, and the complementary impedance selection is
-strictly `S_i=I-S_a`, so one outer loop owns each task direction. The default
-`z` gives `S_a=diag(0,0,0,0,0,1)`: base-frame Z translation is admittance,
-while the remaining five dimensions use impedance around the pose captured
-when `H` is pressed.
+混合模式仍遵守 `[rx,ry,rz,x,y,z]=[角;线]`。令 `R_bc` 为柔顺参考系到基座的
+旋转，`G=diag(R_bc,R_bc)`，局部轴 mask 为 `S_local`，则正交柔顺投影和互补阻抗
+投影为 `S_a=G S_local G^T`、`S_i=I-S_a`。参考系可选固定 `base`、进入模式时
+捕获的 `tool` 或由旋转向量定义的 `custom`。运行中重配置时，旧虚拟速度投影到
+新 `S_a`，旧阻抗误差投影到新刚性子空间，新增刚性方向在实测位姿重锚定。
+/ Hybrid mode retains `[rx,ry,rz,x,y,z]=[angular;linear]`. With compliance-frame
+rotation `R_bc`, `G=diag(R_bc,R_bc)`, and local mask `S_local`, the orthogonal
+compliance projector is `S_a=G S_local G^T` and `S_i=I-S_a`. The frame is
+fixed `base`, mode-entry `tool`, or rotation-vector-defined `custom`.
+Reconfiguration projects old virtual velocity into the new `S_a`, projects
+old impedance error into the new rigid subspace, and captures measured pose
+for newly rigid directions.
 
 ```text
 W_a     = S_a (W_ext - W_des)
@@ -455,12 +487,20 @@ tau_ff  = Jg^T W_i + tau_null + C(q,dq)dq + g(q)
 tau_est = kp (q_ref-q) + kd (dq_ref-dq) + tau_ff
 ```
 
+速度 IK 以 `sigma_min(Jg)` 分级：从 `0.05` 降到 `0.01` 时连续增加 DLS 阻尼并
+把 Twist 缩放到零；非零运动在 `sigma_min<=0.01` 时拒绝。阻抗弹簧/阻尼 wrench
+在 `Jg^T` 前分别实施 `4 N.m` 旋转力矩范数与 `10 N` 平移力范数上限。 / Velocity
+IK grades singularity by `sigma_min(Jg)`: from `0.05` to `0.01`, DLS damping
+increases while Twist scales continuously to zero; nonzero motion is rejected
+at `sigma_min<=0.01`. Before `Jg^T`, impedance wrench is norm-limited to
+`4 N.m` rotational torque and `10 N` translational force.
+
 `hybrid_desired_wrench` 的顺序为 `[Mx,My,Mz,Fx,Fy,Fz]`，只有 `S_a` 选中的
 分量进入导纳。实现由一个 `HybridCartesianController` 独占输出：选择、导纳
 Twist、互补阻抗 wrench、受限旋量速度 IK、模型补偿和 MIT 包络在同一周期合成，
 不会同时启动原来的纯阻抗与纯导纳 controller。混合模式复用统一交互安全对象的
 参考/实测速度边界，并使用导纳低增益 MIT 参数；包含阻抗、零空间、模型和 PD 的估算总力矩实施逐关节
-最大 `8 N.m` 上限。当前选择轴固定表达在 `base_link`；曲面法向动态投影尚未实现。
+最大 `8 N.m` 上限。自定义参考系可对齐已知曲面法向；自动法向估计尚未实现。
 /
 `hybrid_desired_wrench` is ordered `[Mx,My,Mz,Fx,Fy,Fz]`, and only components
 selected by `S_a` enter admittance. One `HybridCartesianController` owns the
@@ -471,8 +511,8 @@ run simultaneously. Hybrid mode reuses the unified interaction reference and
 measured-speed limits plus admittance low-gain MIT tuning, and applies a
 per-joint maximum `8 N.m`
 estimated-total-torque envelope including impedance, nullspace, model, and PD
-terms. Selection axes are currently fixed in `base_link`; dynamic
-surface-normal projection is not yet implemented.
+terms. A custom frame can align one axis with a known surface normal; automatic
+surface-normal estimation remains outside this controller.
 
 ## 6. 架构 / Architecture
 
@@ -686,7 +726,7 @@ profile is used.
 | `armbycontroller/admittance/core.py` | 两种导纳内部共用的输入整形、二阶积分、SE(3) 目标和安全边界 / Input conditioning, second-order integration, SE(3) target, and safety bounds shared internally by admittance modes |
 | `armbycontroller/admittance/laws.py` | 两种紧密相关的导纳律：Nero 优先的抗漂移柔顺零力，以及带正阻尼和回中刚度的阻力导纳 / Two closely related admittance laws: Nero-first anti-drift soft zero force and resistive admittance with positive damping and restoring stiffness |
 | `armbycontroller/admittance/controller.py` | 导纳 twist 到受限旋量速度 IK、实测位置重锚定和低增益 MIT 的 controller adapter / Controller adapter from admittance twist to bounded screw velocity IK, measured-position reanchoring, and low-gain MIT |
-| `armbycontroller/hybrid/selection.py` | 按项目 `[rx,ry,rz,x,y,z]` 顺序解析固定基座轴并生成任务选择 mask / Parses fixed base-frame axes in project order and creates task-selection masks |
+| `armbycontroller/hybrid/selection.py` | 解析局部柔顺轴、`base/tool/custom` 参考系并生成基座坐标正交任务投影 / Parses local compliance axes and `base/tool/custom` frames into base-frame orthogonal task projectors |
 | `armbycontroller/hybrid/controller.py` | 单一所有者的互补混合 adapter：选中轴导纳 Twist、其余轴阻抗 wrench、受限旋量 IK、模型补偿和一个 MIT 包络 / One-owner complementary hybrid adapter: selected-axis admittance Twist, remaining-axis impedance wrench, bounded screw IK, model compensation, and one MIT envelope |
 | `armbycontroller/api/interaction.py` | 面向 UI/前端且与传输无关的幂等普通/阻抗/导纳 set-mode 合同、结果 schema 和状态 schema；不开放混合命令 / Transport-neutral idempotent normal/impedance/admittance set-mode contract, result schema, and state schema for UI/frontends; no hybrid command is public |
 | `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
@@ -712,7 +752,8 @@ profile is used.
 | `armbycontroller/ros/interaction_runtime.py` | UI service adapter、普通态中转互锁和阻抗/导纳/混合所有权切换 / UI service adapters, normal-mediated interlock, and impedance/admittance/hybrid ownership transitions |
 | `armbycontroller/ros/hardware_session.py` | 两阶段连接、启动安全、反馈归一化、SDK 命令、急停和退出断开 / Two-stage connection, startup safety, normalized feedback, SDK commands, emergency stop, and shutdown disconnect |
 | `armbycontroller/ros/control_cycle.py` | 键盘周期调度、四类 MIT tick、笛卡尔目标与单周期唯一命令所有者 / Keyboard-cycle dispatch, four MIT ticks, Cartesian targets, and one command owner per cycle |
-| `armbycontroller/modeling/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
+| `armbycontroller/observers/momentum.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
+| `armbycontroller/observers/friction.py` | 只沿已有恢复方向工作的低速、有界残差摩擦助推 / Bounded low-speed residual friction assist that only follows an existing restoring direction |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
 | `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
@@ -756,8 +797,8 @@ implementation.
 | `interaction_torque_limit` | 1 or n | N·m | `8.0` per joint；关节阻抗、笛卡尔阻抗、导纳和混合共用的估算总力矩上限 / estimated-total-torque limit shared by joint/Cartesian impedance, admittance, and hybrid |
 | `interaction_torque_rate_limit` | 1 or n | N·m/s | `20.0` per joint；在 100 Hz 下每周期最多变化 0.2 N·m / estimated-total-torque slew limit shared by all four MIT controllers; at 100 Hz, at most 0.2 N·m per cycle |
 | `interaction_reference_joint_velocity_limit` | 1 or n | rad/s | `1.0` per joint；阻抗轨迹和导纳/混合旋量速度 IK 共用 / shared by impedance trajectories and admittance/hybrid screw-velocity IK |
-| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`2.0`; Piper-L=`1.5` per joint；持续速度停止线 / sustained measured-speed stop threshold |
-| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
+| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`2.3`; Piper-L=`1.5` per joint；持续速度停止线 / sustained measured-speed stop threshold |
+| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | Nero=`2.6`; Piper-L=`2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
 | `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
 | `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
@@ -765,11 +806,18 @@ implementation.
 | `cartesian_impedance_translation_stiffness` | scalar | N/m | Nero=`70.0`; Piper-L=`10.0` |
 | `cartesian_impedance_rotation_damping` | scalar | N·m·s/rad | Nero=`0.24`; Piper-L=`0.08` |
 | `cartesian_impedance_translation_damping` | scalar | N·s/m | Nero=`1.4`; Piper-L=`0.8` |
+| `cartesian_impedance_max_force` | scalar | N | `10.0`；`Jg^T` 前的平移力向量范数上限 / translational-force norm limit before `Jg^T` |
+| `cartesian_impedance_max_torque` | scalar | N·m | `4.0`；`Jg^T` 前的旋转力矩向量范数上限 / rotational-torque norm limit before `Jg^T` |
 | `cartesian_impedance_nullspace_stiffness` | 1 or n | N·m/rad | `0.4`，仅 Nero / Nero only |
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_joint_posture_stiffness` | 1 or n | N·m/rad | Nero=`[0,0.5,0.5,0.6,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
+| `cartesian_impedance_observer_friction_assist_enabled` | bool | — | Nero=`true`; Piper-L=`false` |
+| `cartesian_impedance_observer_friction_assist_gain` | 1 or n | — | Nero=`0.85`；只补偿残差的 85% / compensates only 85% of the residual |
+| `cartesian_impedance_observer_friction_assist_limit` | 1 or n | N·m | Nero=`[0.30,0.35,0.30,0.25,0.18,0.12,0.10]`，J1…J7 硬上限 / J1…J7 hard caps |
+| `cartesian_impedance_observer_friction_assist_velocity` | 1 or n | rad/s | Nero=`0.08`；仅低于该速度 / only below this speed |
+| `cartesian_impedance_observer_friction_assist_minimum_torque` | 1 or n | N·m | Nero=`0.03`；已有恢复力矩门槛 / existing-restoring-torque gate |
 | `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
 | `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
 | `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
@@ -804,7 +852,12 @@ implementation.
 | `admittance_mit_model_scale` | scalar | — | `1.0`, range `[0,1]`; gravity feedforward scale |
 | `admittance_task_weights` | 6 | — | `[0.4,0.4,0.4,1,1,1]` in `[angular;linear]` order |
 | `admittance_velocity_dls_damping` | scalar | — | `0.02` |
-| `hybrid_admittance_axes` | string | — | `z`; base-frame names from `rx,ry,rz,x,y,z`, comma/space separated |
+| `admittance_singularity_slow_threshold` | scalar | — | `0.05`; `sigma_min(Jg)` below this value starts adaptive damping and Twist scaling |
+| `admittance_singularity_stop_threshold` | scalar | — | `0.01`; rejects nonzero Twist at or below this `sigma_min(Jg)` |
+| `admittance_singularity_damping` | scalar | — | `0.08`; maximum damping added near the stop threshold |
+| `hybrid_admittance_axes` | string | — | `z`; local-frame names from `rx,ry,rz,x,y,z`, comma/space separated |
+| `hybrid_admittance_frame` | string | — | `base`; `base`, mode-entry `tool`, or `custom` |
+| `hybrid_admittance_frame_rotation` | 3 | rad | `[0,0,0]`; SO(3) rotation vector from custom compliance frame to base |
 | `hybrid_desired_wrench` | 6 | N·m, N | `[0,0,0,0,0,0]` in `[Mx,My,Mz,Fx,Fy,Fz]` order; only selected admittance axes apply |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
@@ -815,7 +868,7 @@ implementation.
 | `impedance_mode_service` | string | — | `/arm/set_impedance_mode`; idempotent `std_srvs/srv/Trigger` |
 | `admittance_mode_service` | string | — | `/arm/set_admittance_mode`; idempotent `std_srvs/srv/Trigger` |
 | `experiment_recording_enabled` | bool | — | `false`; 是否启动独立 recorder / whether to launch the separate recorder |
-| `experiment_output_directory` | path | — | `~/.ros/armbycontroller/experiments` |
+| `experiment_output_directory` | path | — | `~/.ros/agxarm_control_by_gamecontroller/experiments` |
 | `experiment_name` | string | — | `manual_control` |
 | `experiment_flush_every` | scalar | samples/events | `1`; 每条刷新，安全优先 / flush every record, prioritizing recoverability |
 
@@ -867,13 +920,15 @@ in joint space before the total torque clip.
 
 ## 10. 安全边界 / Safety boundaries
 
-- Nero 和 Piper-L 固件探测都在 `get_firmware()` 前发送一次临时 `enable()`，并
-  在断开前发送 `disable()`；它们不切换模式、不运动、不写固件。正式控制实例只
-  在探测实例断开并等待 `firmware_reconnect_delay` 后创建。 / Both Nero and
-  Piper-L firmware probes send one temporary `enable()` before `get_firmware()`
-  and send `disable()` before disconnecting; they do not change modes, move, or
-  write firmware. The formal control instance is created only after the probe
-  disconnects and `firmware_reconnect_delay` elapses.
+- Nero 和 Piper-L 固件探测都在 `get_firmware()` 前发送一次 `enable()`，断开前
+  明确不发送 `disable()`；即使探测失败，使能状态也可能保留，必须使用物理急停
+  或另一个控制连接处理。正式控制实例只在探测实例断开并等待
+  `firmware_reconnect_delay` 后创建。 / Both Nero and Piper-L firmware probes
+  send one `enable()` before `get_firmware()` and deliberately do not send
+  `disable()` before disconnecting. Even a failed probe may leave the arm
+  enabled; use the physical E-stop or another control connection to handle it.
+  The formal control instance is created only after the probe disconnects and
+  `firmware_reconnect_delay` elapses.
 - 固件数据缺失、`software_version` 无法解析或检测 profile 不受当前 SDK 支持时，
   实机启动直接失败。 / Hardware startup fails closed when firmware data is
   absent, `software_version` cannot be parsed, or the detected profile is not
@@ -888,6 +943,10 @@ in joint space before the total torque clip.
 - `Kx/Dx` 必须对称半正定，以避免明显的主动负刚度/负阻尼配置。 / `Kx/Dx`
   must be symmetric positive semidefinite, rejecting obvious active negative
   stiffness/damping.
+- 笛卡尔 wrench 范数限制位于 `Jg^T` 之前，但不能替代之后的逐关节总力矩/变化率
+  包络；奇异停止阈值也不能替代物理急停。 / Cartesian wrench norm limits act
+  before `Jg^T` but do not replace the downstream per-joint total-torque/rate
+  envelope; the singularity stop threshold does not replace a physical E-stop.
 - Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
   Nero nullspace gains must be nonnegative, and nullspace torque shares the
   same ±8 N·m total-torque envelope.
@@ -906,9 +965,11 @@ in joint space before the total torque clip.
 - 软件计算上限不是驱动器电流硬限，也不是力传感器测量。 / A software
   command limit is neither a drive-current hard limit nor a force-sensor
   measurement.
-- 动量观测器是被动监视器；它不修改 `tau_cmd`，也不触发急停。 / The momentum
-  observer is a passive monitor; it neither changes `tau_cmd` nor triggers an
-  emergency stop.
+- 独立动量观测器进程本身是被动的且不触发急停；Nero 笛卡尔阻抗可消费其新鲜
+  残差，但只能按恢复方向、低速门控和逐轴上限形成摩擦助推。 / The separate
+  momentum-observer process itself is passive and never triggers an emergency
+  stop. Nero Cartesian impedance may consume its fresh residual only through
+  restoring-direction, low-speed, and per-axis friction-assist bounds.
 - 观测器进程禁止访问 SDK/CAN；输入只能来自控制器复用的 100 Hz
   `/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
   its only input is the controller's reused 100 Hz `/arm_dynamics_state`
@@ -943,14 +1004,15 @@ in joint space before the total torque clip.
   the actual robot mode.
 - 所有 `I/O/H` 模式的参考关节速度统一受
   `interaction_reference_joint_velocity_limit=1.0 rad/s` 限制，并在 ROS 硬件
-  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.0 rad/s` 连续三个
-  周期、Piper-L 超过 `1.5 rad/s` 连续三个周期，或任一机械臂单周期超过
-  `2.5 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
+  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.3 rad/s` 连续三个
+  周期、Piper-L 超过 `1.5 rad/s` 连续三个周期，或 Nero 单周期超过
+  `2.6 rad/s`、Piper-L 单周期超过 `2.5 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
   Twist/位移和预测位置限制。 / Every `I/O/H` mode shares
   `interaction_reference_joint_velocity_limit=1.0 rad/s` and first passes the
   same measured-speed guard in the ROS hardware adapter. An electronic stop is
-  triggered after three consecutive cycles above `2.0 rad/s` on Nero or
-  `1.5 rad/s` on Piper-L, or immediately above `2.5 rad/s` on either arm.
+  triggered after three consecutive cycles above `2.3 rad/s` on Nero or
+  `1.5 rad/s` on Piper-L, or immediately above `2.6 rad/s` on Nero and
+  `2.5 rad/s` on Piper-L.
   Admittance and hybrid control additionally retain their wrench, virtual
   Twist/offset, and predictive-position bounds.
 - 导纳与混合对 URDF 边界外最多 `interaction_joint_limit_margin=0.03 rad` 只开放受控
@@ -1088,7 +1150,7 @@ in joint space before the total torque clip.
 cd /home/yang/demo_ws
 source /opt/ros/humble/setup.bash
 python3 -m pip install "modern_robotics>=1.1.1"
-colcon build --packages-select armbycontroller --symlink-install
+colcon build --packages-select agxarm_control_by_gamecontroller --symlink-install
 source install/setup.bash
 ```
 
@@ -1161,7 +1223,7 @@ python3 -m pytest -q test/test_experiment.py
 ```bash
 cd /home/yang/demo_ws
 source /opt/ros/humble/setup.bash
-colcon test --packages-select armbycontroller
+colcon test --packages-select agxarm_control_by_gamecontroller
 colcon test-result --verbose
 ```
 
@@ -1204,11 +1266,11 @@ creates a fresh run directory for every launch and never overwrites an existing
 experiment.
 
 ```bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=piper_l \
   experiment_recording_enabled:=true \
   experiment_name:=joint_vs_cartesian \
-  experiment_output_directory:=~/.ros/armbycontroller/experiments
+  experiment_output_directory:=~/.ros/agxarm_control_by_gamecontroller/experiments
 ```
 
 输出 / Outputs:
@@ -1252,7 +1314,7 @@ python3 -m pytest -q test/test_cartesian_impedance.py \
 cd /home/yang/demo_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
   can_interface:=can0 execute_motion:=true \
   nero_mount:=horizontal \
@@ -1289,8 +1351,8 @@ Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
 DLS 生成 `dq_ref`，并用验证包同值低增益 MIT 跟踪；共享 Model Compensation
 提供重力项，每周期参考从实测 `q` 重锚定，估算总力矩限制为 ±8 N·m、变化率为
 `20 N·m/s`；参考关节速度
-限制为 `1.0 rad/s`，实测任一关节超过 `2.0 rad/s` 连续三个周期或单周期超过
-`2.5 rad/s` 会触发电子急停。
+限制为 `1.0 rad/s`，实测任一关节超过 `2.3 rad/s` 连续三个周期或单周期超过
+`2.6 rad/s` 会触发电子急停。
 若要验证带阻力且松手回中的版本，在启动命令末尾追加
 `admittance_mode:=resistive`。 / Nero defaults to
 `admittance_mode=zero_force`. With the arm supported and a fresh
@@ -1305,21 +1367,26 @@ shared Model Compensation supplies gravity, the reference is reanchored to
 measured `q` every cycle, and estimated total torque is limited to ±8 N·m and
 `20 N·m/s`.
 Reference joint speed is limited to `1.0 rad/s`; measured speed above
-`2.0 rad/s` for three consecutive cycles or above `2.5 rad/s` for one cycle
+`2.3 rad/s` for three consecutive cycles or above `2.6 rad/s` for one cycle
 triggers the electronic stop. Append
 `admittance_mode:=resistive` to test the strongly returning variant.
 
 混合实机试验使用同一启动命令，默认无需修改 YAML：确认观测 wrench 新鲜、支撑
 机械臂后按 `H`，当前末端位姿成为阻抗锚点，基座 Z 方向走导纳，其余五维走阻抗；
 再次按 `H` 先退出到普通保持。可在启动命令显式追加
-`hybrid_admittance_axes:=x,y` 选择多个固定基座方向。`I`、`O`、`H` 任意互切都
+`hybrid_admittance_axes:=x,y` 选择多个局部方向；追加
+`hybrid_admittance_frame:=tool` 可使用进入时工具轴，或使用
+`hybrid_admittance_frame:=custom hybrid_admittance_frame_rotation:=[0,0,1.5708]`
+把局部 X 旋到基座 Y。`I`、`O`、`H` 任意互切都
 先经过普通模式，混合期间 `P`、home 和手动 jog 锁定。 / Use the same launch
 command for a hybrid hardware trial without changing YAML. After confirming a
 fresh observer wrench and physically supporting the arm, press `H`: the
 current tool pose becomes the impedance anchor, base-frame Z uses admittance,
 and the other five dimensions use impedance. Press `H` again to exit through
-normal hold. Append `hybrid_admittance_axes:=x,y` to select multiple fixed
-base-frame directions. Every switch among `I`, `O`, and `H` passes through
+normal hold. Append `hybrid_admittance_axes:=x,y` for multiple local axes;
+use `hybrid_admittance_frame:=tool` for mode-entry tool axes, or `custom` plus
+`hybrid_admittance_frame_rotation:=[0,0,1.5708]` to rotate local X onto base Y.
+Every switch among `I`, `O`, and `H` passes through
 normal mode; `P`, home, and manual jog are locked while hybrid is active.
 
 ### Piper-L 实机接线 / Piper-L hardware wiring
@@ -1328,7 +1395,7 @@ normal mode; `P`, home, and manual jog are locked while hybrid is active.
 cd /home/yang/demo_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=piper_l device:=/dev/input/event3 \
   can_interface:=can0 firmware:=auto execute_motion:=true \
   impedance_backend:=cartesian impedance_enabled:=false \
@@ -1482,10 +1549,11 @@ checks.
 6. **低增益实机 / Low-gain hardware**：先静止保持，再毫米级 IK，保存完整日志。
    / First stationary hold, then millimetre IK steps with complete logs.
 7. **动量观测 / Momentum observation**：已完成只读 100 Hz topic seam、独立进程、
-   O(n) 动量递推和残差发布；尚未完成摩擦辨识或碰撞阈值验证。 / The read-only
-   100 Hz topic seam, separate process, O(n) momentum recursion, and residual
-   publication are done; friction identification and collision-threshold
-   validation remain undone.
+   O(n) 动量递推、残差发布及 Nero 有界低速 85% 摩擦助推；尚未完成逐关节实机
+   摩擦辨识或碰撞阈值验证。 / The read-only 100 Hz topic seam, separate
+   process, O(n) momentum recursion, residual publishing, and Nero bounded
+   low-speed 85% friction assist are complete; per-joint hardware friction
+   identification and validated collision thresholds are not.
 8. **Nero/Piper-L 导纳 / Nero/Piper-L admittance**：已完成独立
    `cartesian/` 共用任务几何、完全分开的 `impedance/`/`admittance/` adapter、
    Nero 抗漂移柔顺零力、`resistive`、机器人独立参数、`O` 键、I/O/H 互锁、7/6 轴
@@ -1498,12 +1566,12 @@ checks.
    reanchoring, and low-gain MIT adapter are implemented; hardware thresholds
    and feel of the integrated controller still require low-speed validation.
 9. **Twist 混合控制 / Twist hybrid control**：已完成新 `hybrid/` 模块、`H` 键、
-   固定基座轴 `S_a` 与互补 `S_i`、单一 controller 输出、受限旋量速度 IK、共享
+   任意旋转参考系的正交 `S_a` 与互补 `S_i`、无跳变重配置、单一 controller 输出、奇异分级受限旋量速度 IK、共享
    速度/力矩保护和四态互锁；曲面法向动态投影与整合版本实机验证仍待完成。 /
    The new `hybrid/` module, `H` key, fixed-base-axis `S_a` and complementary
    `S_i`, one-owner controller output, bounded screw-velocity IK, shared
    speed/torque guards, and four-state interlock are implemented; dynamic
-   surface-normal projection and hardware validation of this integration
+   automatic surface-normal estimation and hardware validation of this integration
    remain pending.
 10. **统一 controller seam / Unified controller seam**：已完成四个 adapter 的
    `ControlInput -> ControlResult`、统一命令类型、JSON sample 和共用测试面。 /
@@ -1560,7 +1628,7 @@ checks.
 | 笛卡尔阻抗 | Cartesian impedance | Tool-space wrench spring-damper law |
 | 笛卡尔导纳 | Cartesian admittance | External wrench drives a virtual mass-damper-spring pose |
 | 互补混合控制 | Complementary hybrid control | Selected task axes produce admittance Twist while the complementary axes produce impedance wrench inside one controller |
-| 选择矩阵 | Selection matrix | Diagonal task projector `S_a`, with complementary `S_i=I-S_a` |
+| 柔顺子空间投影 | Compliance subspace projector | Orthogonal task projector `S_a=G S_local G^T`, with complementary `S_i=I-S_a` |
 | 柔顺零力 | Soft zero force | Near-zero desired wrench with weak holding, damping, and stick/slip anti-drift resistance |
 | 阻力导纳 | Resistive admittance | Positive damping and stiffness resist motion and restore the anchor |
 | 互锁 | Interlock | Normal/impedance/admittance/hybrid are mutually exclusive and every cross-mode switch passes through normal |
@@ -1595,6 +1663,13 @@ checks.
 | 实验运行 | Experiment Run | 一个 manifest、顺序 sample/event 流和结束 summary / One manifest, ordered sample/event streams, and closing summary |
 
 ## 17. 主要资料 / Primary sources
+
+- ICube Robotics, `cartesian_controllers_ros2`, Cartesian VIC reference-frame,
+  rule, state, and singularity-diagnostic implementation:
+  https://github.com/ICube-Robotics/cartesian_controllers_ros2
+- Yifan Hou, `force_control`, hybrid force/velocity subspace switching and
+  separate spring force/torque norm limits:
+  https://github.com/yifan-hou/force_control/tree/mainline
 
 - Kevin M. Lynch and Frank C. Park, *Modern Robotics: Mechanics, Planning,
   and Control*, Cambridge University Press, 2017. Companion material:

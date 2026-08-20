@@ -98,6 +98,37 @@ class ControllerRuntimeMixin:
                     "joint_limit_margin",
                     0.0,
                 ),
+                maximum_force=getattr(
+                    self, "cartesian_max_force", float("inf")
+                ),
+                maximum_torque=getattr(
+                    self, "cartesian_max_torque", float("inf")
+                ),
+                observer_friction_assist_enabled=getattr(
+                    self,
+                    "cartesian_observer_friction_assist_enabled",
+                    False,
+                ),
+                observer_friction_assist_gain=getattr(
+                    self,
+                    "cartesian_observer_friction_assist_gain",
+                    0.0,
+                ),
+                observer_friction_assist_limit=getattr(
+                    self,
+                    "cartesian_observer_friction_assist_limit",
+                    0.0,
+                ),
+                observer_friction_assist_velocity=getattr(
+                    self,
+                    "cartesian_observer_friction_assist_velocity",
+                    0.08,
+                ),
+                observer_friction_assist_minimum_torque=getattr(
+                    self,
+                    "cartesian_observer_friction_assist_minimum_torque",
+                    0.03,
+                ),
             ))
         admittance_settings = (
             "admittance_mit_kp",
@@ -110,6 +141,9 @@ class ControllerRuntimeMixin:
             "admittance_task_weights",
             "admittance_velocity_dls_damping",
             "admittance_joint_limit_margin",
+            "admittance_singularity_slow_threshold",
+            "admittance_singularity_stop_threshold",
+            "admittance_singularity_damping",
         )
         if (
             model is not None
@@ -122,6 +156,13 @@ class ControllerRuntimeMixin:
                 damping=self.admittance_velocity_dls_damping,
                 task_weights=self.admittance_task_weights,
                 joint_limit_margin=self.admittance_joint_limit_margin,
+                singularity_slow_threshold=(
+                    self.admittance_singularity_slow_threshold
+                ),
+                singularity_stop_threshold=(
+                    self.admittance_singularity_stop_threshold
+                ),
+                singularity_damping=self.admittance_singularity_damping,
             )
             controllers.append(CartesianAdmittanceController(
                 model,
@@ -156,6 +197,8 @@ class ControllerRuntimeMixin:
             "cartesian_nullspace_stiffness",
             "cartesian_nullspace_damping",
             "hybrid_admittance_axes",
+            "hybrid_admittance_frame",
+            "hybrid_admittance_frame_rotation",
             "hybrid_desired_wrench",
         )
         if (
@@ -169,6 +212,13 @@ class ControllerRuntimeMixin:
                 damping=self.admittance_velocity_dls_damping,
                 task_weights=self.admittance_task_weights,
                 joint_limit_margin=self.admittance_joint_limit_margin,
+                singularity_slow_threshold=(
+                    self.admittance_singularity_slow_threshold
+                ),
+                singularity_stop_threshold=(
+                    self.admittance_singularity_stop_threshold
+                ),
+                singularity_damping=self.admittance_singularity_damping,
             )
             controllers.append(HybridCartesianController(
                 model,
@@ -185,6 +235,10 @@ class ControllerRuntimeMixin:
                     None,
                 ),
                 admittance_axes=self.hybrid_admittance_axes,
+                admittance_frame=self.hybrid_admittance_frame,
+                admittance_frame_rotation=(
+                    self.hybrid_admittance_frame_rotation
+                ),
                 desired_wrench=self.hybrid_desired_wrench,
                 model_scale=self.cartesian_model_scale,
                 nullspace_stiffness=self.cartesian_nullspace_stiffness,
@@ -200,6 +254,12 @@ class ControllerRuntimeMixin:
                 ),
                 measured_velocity_violation_cycles=(
                     self.admittance_measured_velocity_violation_cycles
+                ),
+                maximum_force=getattr(
+                    self, "cartesian_max_force", float("inf")
+                ),
+                maximum_torque=getattr(
+                    self, "cartesian_max_torque", float("inf")
                 ),
             ))
         return ControlEngine(controllers)
@@ -274,6 +334,15 @@ class ControllerRuntimeMixin:
             reference_velocity,
             reference_acceleration,
             np.zeros(6) if external_wrench is None else external_wrench,
+            np.asarray(
+                getattr(
+                    self,
+                    "latest_external_joint_torque",
+                    np.zeros(self.joint_count),
+                ),
+                dtype=float,
+            ),
+            self._external_wrench_is_fresh(now),
         )
         return ControlInput(now, period, state, reference)
 

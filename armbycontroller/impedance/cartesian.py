@@ -1,6 +1,7 @@
 """Frame-consistent Cartesian impedance mapped by virtual work."""
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 
@@ -18,7 +19,9 @@ class CartesianImpedanceCommand:
     pose_error: np.ndarray
     desired_twist: np.ndarray
     measured_twist: np.ndarray
+    raw_commanded_wrench: np.ndarray
     commanded_wrench: np.ndarray
+    wrench_limited: bool
     geometric_jacobian: np.ndarray
     task_torque: np.ndarray
     nullspace_torque: np.ndarray
@@ -94,6 +97,24 @@ def _symmetric_psd_matrix(values, size, name):
 
 def _impedance_matrix(values, name):
     return _symmetric_psd_matrix(values, 6, name)
+
+
+def limit_cartesian_wrench(wrench, maximum_force, maximum_torque):
+    """Limit rotational torque and translational force vector magnitudes."""
+    result = spatial_vector(wrench, "wrench").copy()
+    limits = (float(maximum_torque), float(maximum_force))
+    if any(
+        (not math.isfinite(limit) and limit != math.inf) or limit <= 0.0
+        for limit in limits
+    ):
+        raise ValueError("Cartesian wrench limits must be positive")
+    limited = False
+    for values, limit in ((result[:3], limits[0]), (result[3:], limits[1])):
+        magnitude = float(np.linalg.norm(values))
+        if magnitude > limit:
+            values *= limit / magnitude
+            limited = True
+    return result, limited
 
 
 def cartesian_pose_error(current_pose, desired_pose):
@@ -174,6 +195,8 @@ def cartesian_impedance_command(
     nullspace_damping=0.0,
     model_scale=1.0,
     model_torque_override=None,
+    maximum_force=math.inf,
+    maximum_torque=math.inf,
 ):
     """
     Evaluate strict Cartesian impedance and map it to joint torque.
@@ -220,9 +243,12 @@ def cartesian_impedance_command(
     )
     pose_error = cartesian_pose_error(current_pose, target)
     measured_twist = jacobian @ velocities
-    wrench = (
+    raw_wrench = (
         stiffness @ pose_error
         + damping @ (target_twist - measured_twist)
+    )
+    wrench, wrench_limited = limit_cartesian_wrench(
+        raw_wrench, maximum_force, maximum_torque
     )
     task_torque = joint_torque_from_wrench(jacobian, wrench)
 
@@ -333,7 +359,9 @@ def cartesian_impedance_command(
         pose_error=pose_error.copy(),
         desired_twist=target_twist.copy(),
         measured_twist=measured_twist.copy(),
+        raw_commanded_wrench=raw_wrench.copy(),
         commanded_wrench=wrench.copy(),
+        wrench_limited=wrench_limited,
         geometric_jacobian=jacobian.copy(),
         task_torque=task_torque.copy(),
         nullspace_torque=nullspace_torque.copy(),

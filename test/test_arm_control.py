@@ -157,6 +157,9 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
         "admittance_mit_model_scale",
         "admittance_task_weights",
         "admittance_velocity_dls_damping",
+        "admittance_singularity_slow_threshold",
+        "admittance_singularity_stop_threshold",
+        "admittance_singularity_damping",
         "interaction_torque_limit",
         "interaction_torque_rate_limit",
         "interaction_reference_joint_velocity_limit",
@@ -165,7 +168,16 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
         "interaction_measured_velocity_violation_cycles",
         "interaction_joint_limit_margin",
         "hybrid_admittance_axes",
+        "hybrid_admittance_frame",
+        "hybrid_admittance_frame_rotation",
         "hybrid_desired_wrench",
+        "cartesian_impedance_max_force",
+        "cartesian_impedance_max_torque",
+        "cartesian_impedance_observer_friction_assist_enabled",
+        "cartesian_impedance_observer_friction_assist_gain",
+        "cartesian_impedance_observer_friction_assist_limit",
+        "cartesian_impedance_observer_friction_assist_velocity",
+        "cartesian_impedance_observer_friction_assist_minimum_torque",
     } <= module.CONFIGURED_PARAMETERS
     assert {
         "mit_gravity_torque_limit",
@@ -267,7 +279,8 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_friction" in nero
     assert "admittance_resistive_stiffness" in nero
     assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
-    assert "interaction_measured_joint_velocity_stop_limit: [2.0]" in nero
+    assert "interaction_measured_joint_velocity_stop_limit: [2.3]" in nero
+    assert "interaction_measured_joint_velocity_hard_limit: [2.6]" in nero
     assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero
     assert "admittance_task_weights: [0.4, 0.4, 0.4, 1.0" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
@@ -279,6 +292,12 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "[0.0, 0.5, 0.5, 0.6, 0.0, 0.0, 0.0]" in nero
     assert "cartesian_impedance_joint_posture_damping" in nero
     assert "[0.0, 0.08, 0.08, 0.12, 0.0, 0.0, 0.0]" in nero
+    assert "cartesian_impedance_observer_friction_assist_enabled: true" in nero
+    assert (
+        "cartesian_impedance_observer_friction_assist_gain: "
+        "[0.85, 0.85, 0.85, 0.85, 0.85, 0.85, 0.85]"
+    ) in nero
+    assert "cartesian_impedance_observer_friction_assist_limit" in nero
     assert "tool_configuration: gripper" in piper
     assert "nero_mount" not in piper
     assert "nero_velocity_estimation_enabled" not in piper
@@ -294,6 +313,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "cartesian_impedance_base_z_rotation_stiffness: 4.0" in piper
     assert "cartesian_impedance_joint_posture_stiffness" not in piper
     assert "cartesian_impedance_joint_posture_damping" not in piper
+    assert "cartesian_impedance_observer_friction_assist" not in piper
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in nero
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in piper
 
@@ -944,7 +964,9 @@ def test_pose_hardware_connection_uses_saved_probe_result(monkeypatch):
     monkeypatch.setattr(
         PoseController, "get_logger", lambda self: FakeLogger()
     )
-    monkeypatch.setattr("armbycontroller.pose_controller.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "armbycontroller.pose_controller.time.sleep", lambda _: None
+    )
     controller = object.__new__(PoseController)
     controller.robot_model = "piper_l"
     controller.can_interface = "can-test"
@@ -1199,6 +1221,9 @@ def test_external_torque_callback_uses_urdf_jacobian_without_sdk(
     assert controller.latest_external_wrench == pytest.approx(
         np.ones(6) / 1.01
     )
+    assert controller.latest_external_joint_torque == pytest.approx(
+        np.ones(6)
+    )
     assert controller.latest_external_wrench_received_at == 12.5
 
 
@@ -1240,6 +1265,9 @@ def test_nero_external_torque_callback_maps_seven_joints_to_six_axis_wrench(
 
     assert controller.latest_external_wrench == pytest.approx(
         np.ones(6) / 1.01
+    )
+    assert controller.latest_external_joint_torque == pytest.approx(
+        [1.0] * 6 + [0.0]
     )
     assert controller.latest_external_wrench_received_at == 12.5
 

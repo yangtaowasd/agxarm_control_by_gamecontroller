@@ -12,7 +12,7 @@ from sensor_msgs.msg import JointState
 
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import resolve_tool_urdf_path
-from armbycontroller.modeling.momentum_observer import (
+from armbycontroller.observers.momentum import (
     GeneralizedMomentumObserver,
 )
 from armbycontroller.modeling.screw_model import project_gravity_vector

@@ -250,7 +250,8 @@ class MitTorqueEnvelope:
         if self.torque_rate_limit is not None:
             if period is None or not np.isfinite(period) or period <= 0.0:
                 raise ValueError(
-                    "period must be finite and positive with torque-rate limits"
+                    "period must be finite and positive with torque-rate "
+                    "limits"
                 )
             if self.previous_torque is None:
                 self.reset()

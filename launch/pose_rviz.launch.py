@@ -100,7 +100,7 @@ def _nodes(context):
             arguments=["-d", str(rviz_path)],
         ),
         Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="pose_controller.py",
             name=f"{model}_ik_controller",
             output="screen",

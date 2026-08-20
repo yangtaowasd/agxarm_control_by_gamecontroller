@@ -148,7 +148,8 @@ class InteractionRuntimeMixin:
             feedback = self.read_motor_feedback()
             if feedback is None:
                 self.get_logger().error(
-                    "cannot enter MIT: complete q/dq/torque feedback is required"
+                    "cannot enter MIT: complete q/dq/torque feedback is "
+                    "required"
                 )
                 return
             joints = feedback.position
@@ -344,13 +345,18 @@ class InteractionRuntimeMixin:
         return False
 
     def _interaction_exit_joints(self, mode, feedback=None):
-        """Require a fresh complete sample before handing MIT back to MOVE_J."""
+        """Require fresh feedback before handing MIT back to MOVE_J."""
         if not self.execute_motion:
             return self.current_or_target_joints()
-        sample = feedback if feedback is not None else self.read_motor_feedback()
+        sample = (
+            feedback
+            if feedback is not None
+            else self.read_motor_feedback()
+        )
         if sample is None:
             self._fail_interaction_transition(
-                f"cannot exit {mode}: fresh q/dq/torque feedback is unavailable"
+                f"cannot exit {mode}: fresh q/dq/torque feedback is "
+                "unavailable"
             )
             return None
         arrays = tuple(

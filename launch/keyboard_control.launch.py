@@ -33,7 +33,9 @@ OBSERVER = {
 }
 EXPERIMENT = {
     "experiment_recording_enabled": "false",
-    "experiment_output_directory": "~/.ros/armbycontroller/experiments",
+    "experiment_output_directory": (
+        "~/.ros/agxarm_control_by_gamecontroller/experiments"
+    ),
     "experiment_name": "manual_control",
     "experiment_flush_every": "1",
 }
@@ -79,11 +81,18 @@ CONFIGURED_PARAMETERS = {
     "cartesian_impedance_translation_stiffness",
     "cartesian_impedance_rotation_damping",
     "cartesian_impedance_translation_damping",
+    "cartesian_impedance_max_force",
+    "cartesian_impedance_max_torque",
     "cartesian_impedance_nullspace_stiffness",
     "cartesian_impedance_nullspace_damping",
     "cartesian_impedance_joint_posture_stiffness",
     "cartesian_impedance_joint_posture_damping",
     "cartesian_impedance_model_scale",
+    "cartesian_impedance_observer_friction_assist_enabled",
+    "cartesian_impedance_observer_friction_assist_gain",
+    "cartesian_impedance_observer_friction_assist_limit",
+    "cartesian_impedance_observer_friction_assist_velocity",
+    "cartesian_impedance_observer_friction_assist_minimum_torque",
     "admittance_mode",
     "admittance_virtual_mass",
     "admittance_zero_force_damping",
@@ -104,7 +113,12 @@ CONFIGURED_PARAMETERS = {
     "admittance_mit_model_scale",
     "admittance_task_weights",
     "admittance_velocity_dls_damping",
+    "admittance_singularity_slow_threshold",
+    "admittance_singularity_stop_threshold",
+    "admittance_singularity_damping",
     "hybrid_admittance_axes",
+    "hybrid_admittance_frame",
+    "hybrid_admittance_frame_rotation",
     "hybrid_desired_wrench",
     "mit_trajectory_max_acceleration",
     "mit_trajectory_max_jerk",
@@ -132,7 +146,7 @@ def _nodes(context):
     ).strip()
     if robot_config_path == USE_ROBOT_CONFIG:
         robot_config_path = PathJoinSubstitution([
-            FindPackageShare("armbycontroller"),
+            FindPackageShare("agxarm_control_by_gamecontroller"),
             "config",
             ROBOT_CONFIG_FILENAMES[model],
         ]).perform(context)
@@ -159,12 +173,13 @@ def _nodes(context):
             controller_parameters[name] = LaunchConfiguration(name)
     nodes = [
         Node(
-            package="armbycontroller", executable="keyboard",
+            package="agxarm_control_by_gamecontroller",
+            executable="keyboard",
             name="arm_keyboard_reader", output="screen",
             parameters=[{"device": LaunchConfiguration("device")}],
         ),
         Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="main.py",
             name="arm_keyboard_controller", output="screen",
             parameters=[*parameter_files, controller_parameters],
@@ -199,7 +214,7 @@ def _nodes(context):
             if LaunchConfiguration(name).perform(context).strip():
                 observer_parameters[name] = LaunchConfiguration(name)
         nodes.append(Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="momentum_observer_node.py",
             name="arm_momentum_observer",
             output="screen",
@@ -211,7 +226,7 @@ def _nodes(context):
     )
     if experiment_enabled:
         nodes.append(Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="experiment_recorder_node.py",
             name="arm_experiment_recorder",
             output="screen",
@@ -241,7 +256,7 @@ def generate_launch_description():
         "robot_model": "nero",
         "device": "/dev/input/event3",
         "common_config": PathJoinSubstitution([
-            FindPackageShare("armbycontroller"),
+            FindPackageShare("agxarm_control_by_gamecontroller"),
             "config",
             "common.yaml",
         ]),

@@ -1,4 +1,4 @@
-# armbycontroller
+# agxarm_control_by_gamecontroller
 
 ROS 2 control for AGX Nero, Piper-L, and a Revo2 hand. Nero and Piper-L share
 the same controller, keyboard topic, key indices, IK core, and launch files.
@@ -105,12 +105,15 @@ When URDF compensation is active, the controller now ignores
 `mit_feedforward` in that compensation path and sends only the scaled,
 absolute-bounded inverse-dynamics result.
 
-The observer never connects to CAN or calls the arm SDK. It updates once for
+The observer process never connects to CAN or calls the arm SDK. It updates once for
 every timestamped 100 Hz dynamics-state message, using the previous cycle's
 measured motor torque for the interval that just elapsed. The default gain is
-`momentum_observer_gain:=10.0 1/s`. It is monitor-only: `r` does not alter
-impedance torque and cannot trigger an emergency stop. Disable the process
-with `momentum_observer_enabled:=false`.
+`momentum_observer_gain:=10.0 1/s`. On Nero, Cartesian impedance conservatively
+uses a fresh residual as low-speed friction assist: 85% of an opposing residual,
+subject to an existing restoring-torque direction, a `0.08 rad/s` speed gate,
+small per-joint caps, and the shared torque/slew envelope. It cannot create a
+motion direction by itself or trigger an emergency stop. Disable the process
+with `momentum_observer_enabled:=false`; stale/missing residuals disable assist.
 
 On both Nero and Piper-L, `O` toggles Cartesian admittance. The observed
 external joint torque is mapped to a base-frame wrench by damped least squares,
@@ -121,8 +124,8 @@ DLS with joint-speed and predictive-position bounds. The resulting joint
 velocity is tracked with low-gain MIT. Every cycle uses
 `q_ref=q_measured+dq_ref*dt`, so tracking error cannot accumulate into a
 pullback toward an old joint target. `dq_ref` is capped at `1.0 rad/s` per
-joint. On Nero, measured speed above `2.0 rad/s` for three consecutive 100 Hz
-cycles, or above the `2.5 rad/s` hard limit once, triggers the electronic stop
+joint. On Nero, measured speed above `2.3 rad/s` for three consecutive 100 Hz
+cycles, or above the `2.6 rad/s` hard limit once, triggers the electronic stop
 (Piper-L keeps a `1.5 rad/s` sustained threshold).
 Estimated MIT total torque is capped at `8 N·m` and slewed at `20 N·m/s` by
 default. If observer wrench data or its source timestamp exceeds the `0.10 s`
@@ -143,22 +146,33 @@ Nero defaults to `admittance_mode:=zero_force`; Piper-L defaults to
 `admittance_mode:=resistive`. Each robot has independent mass, damping,
 stiffness, deadband, and motion limits in its own YAML file.
 
-`H` toggles one-owner hybrid Cartesian control. Its default base-frame
-selection is `hybrid_admittance_axes:=z`, which means the project-order mask
-`[rx,ry,rz,x,y,z]=[0,0,0,0,0,1]`: Z follows the admittance Twist, while the
-other five axes use Cartesian impedance about the pose captured on entry.
+`H` toggles one-owner hybrid Cartesian control. Its default Cartesian
+Compliance Subspace is `hybrid_admittance_axes:=z` in
+`hybrid_admittance_frame:=base`. Set the frame to `tool` to capture the tool
+orientation on entry, or to `custom` with
+`hybrid_admittance_frame_rotation:=[rx,ry,rz]` to orient compliant axes by an
+SO(3) rotation vector. The resulting orthogonal projector and its complement
+assign every task direction to exactly one outer loop. Runtime subspace
+reconfiguration projects virtual velocity and re-anchors newly rigid
+directions at measured pose.
 Both paths are combined inside `HybridCartesianController` and sent through
 one bounded screw-velocity IK, model compensation, low-gain MIT envelope, and
 one command stream. `hybrid_desired_wrench` uses
 `[Mx,My,Mz,Fx,Fy,Fz]` and defaults to zero.
 
+Admittance and hybrid velocity IK continuously increase DLS damping and scale
+the requested Twist as the minimum Jacobian singular value falls from
+`0.05` to `0.01`; nonzero motion is rejected at or below `0.01`. Cartesian
+impedance wrench is limited before `J^T` to `10 N` translational-force norm
+and `4 N.m` rotational-torque norm, in addition to the joint torque envelope.
+
 All MIT interaction modes now use the same `interaction_*` joint-safety
 configuration. The shared defaults are an `8 N.m` estimated-total-torque
 limit, `20 N.m/s` estimated-total-torque rate limit, `1.0 rad/s`
-reference-speed limit, `2.5 rad/s` immediate measured-speed stop, three-cycle
-sustained-speed debounce, and `0.03 rad` joint-limit margin.
-The sustained measured-speed threshold is `2.0 rad/s` on Nero and `1.5 rad/s`
-on Piper-L. Admittance-specific wrench, virtual Twist, and offset bounds remain
+reference-speed limit, three-cycle sustained-speed debounce, and `0.03 rad`
+joint-limit margin. Nero uses `2.3 rad/s` sustained and `2.6 rad/s` immediate
+measured-speed stops; Piper-L retains `1.5 rad/s` and `2.5 rad/s` respectively.
+Admittance-specific wrench, virtual Twist, and offset bounds remain
 separate because they are task-space control-law parameters.
 
 `I`, `O`, and `H` are strictly interlocked. Every cross-mode transition follows
@@ -246,11 +260,11 @@ and `resistive` virtual dynamics and its shared observer/interlock architecture.
 Start a self-describing JSONL experiment together with keyboard control:
 
 ```bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=piper_l \
   experiment_recording_enabled:=true \
   experiment_name:=cartesian_impedance_gain_a \
-  experiment_output_directory:=~/.ros/armbycontroller/experiments
+  experiment_output_directory:=~/.ros/agxarm_control_by_gamecontroller/experiments
 ```
 
 Each fresh run directory contains `manifest.json`, `samples.jsonl`,
@@ -261,7 +275,7 @@ separate process and never accesses CAN. When launched independently, control
 it with:
 
 ```bash
-ros2 run armbycontroller experiment_recorder_node.py --ros-args \
+ros2 run agxarm_control_by_gamecontroller experiment_recorder_node.py --ros-args \
   -p experiment_name:=manual_comparison
 ros2 service call /arm_experiment_recorder/recording \
   std_srvs/srv/SetBool '{data: true}'
@@ -309,7 +323,7 @@ overridden as a trailing argument, for example
 ```bash
 cd /home/yang/demo_ws
 python3 -m pip install "modern_robotics>=1.1.1"
-colcon build --packages-up-to armbycontroller
+colcon build --packages-up-to agxarm_control_by_gamecontroller
 source install/setup.bash
 ```
 
@@ -409,13 +423,16 @@ reads and saves the complete firmware dictionary, then disconnects. After the
 shared `firmware_reconnect_delay` (default `0.5 s`), a distinct second instance
 is created with the detected profile (`1.11 -> v111` for Nero,
 `S-V1.8-8 -> v188` for Piper-L). Both probes send one temporary enable request
-and send disable before disconnecting. They send no motion or firmware-write
-command. Failure to obtain or parse `software_version` aborts startup.
+and disconnect without sending disable, allowing the formal connection to take
+over without an intentional enable-state drop. They send no motion or
+firmware-write command. Failure to obtain or parse `software_version` aborts
+startup but deliberately does not disable the arm; use the physical E-stop if
+that failure occurs.
 
 Run Nero:
 
 ```bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
   can_interface:=can0 execute_motion:=true \
   nero_mount:=horizontal \
@@ -435,7 +452,7 @@ posture, and J2/J3/J4 posture reference before enabling Cartesian MIT.
 Run Piper-L with the same keys:
 
 ```bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=piper_l device:=/dev/input/event3 \
   can_interface:=can0 firmware:=auto \
   impedance_backend:=cartesian \
@@ -453,7 +470,7 @@ ros2 topic echo /arm_external_joint_torque
 Dry run:
 
 ```bash
-ros2 launch armbycontroller keyboard_control.launch.py \
+ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=nero execute_motion:=false
 ```
 
@@ -491,16 +508,16 @@ without sending `disable()` so another controller can take over. Set
 
 ```bash
 # Nero
-ros2 launch armbycontroller pose_rviz.launch.py robot_model:=nero
+ros2 launch agxarm_control_by_gamecontroller pose_rviz.launch.py robot_model:=nero
 
 # Piper-L
-ros2 launch armbycontroller pose_rviz.launch.py robot_model:=piper_l
+ros2 launch agxarm_control_by_gamecontroller pose_rviz.launch.py robot_model:=piper_l
 ```
 
 In another interactive terminal:
 
 ```bash
-ros2 run armbycontroller terminal_teleop.py --ros-args \
+ros2 run agxarm_control_by_gamecontroller terminal_teleop.py --ros-args \
   -p topic_prefix:=/nero -p step:=0.01
 
 # Use /piper_l instead when running Piper-L.
@@ -513,7 +530,7 @@ pose to feedback and `Q` quits.
 ## Standalone pose controller
 
 ```bash
-ros2 run armbycontroller pose_controller.py --ros-args \
+ros2 run agxarm_control_by_gamecontroller pose_controller.py --ros-args \
   -p robot_model:=piper_l -p topic_prefix:=/piper_l \
   -p tip_link:=link6 -p firmware:=default \
   -p initial_joint_positions:="[0.0, 1.3939753, -1.0158306, 0.0, 1.2799181, 0.0]" \
@@ -573,6 +590,6 @@ would create unsafe Cartesian motion.
 ## Revo2 hand
 
 ```bash
-ros2 run armbycontroller hand_controller.py --ros-args \
+ros2 run agxarm_control_by_gamecontroller hand_controller.py --ros-args \
   -p can_interface:=can0 -p firmware:=v111 -p execute_motion:=true
 ```

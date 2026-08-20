@@ -6,7 +6,7 @@
 | --- | --- |
 | `CMakeLists.txt` | C++/Python 安装、节点/资源安装、九组 pytest，以及限定到源码目录的 style lint 注册 / C++/Python install, node/resource install, nine pytest groups, and source-scoped style-lint registration |
 | `package.xml` | ROS 2 build/runtime/test 依赖；实验 recorder 需要 `std_srvs` / ROS 2 dependencies, including `std_srvs` for experiment recording |
-| `resource/armbycontroller` | ament Python package 索引 marker / ament Python-package index marker |
+| `resource/agxarm_control_by_gamecontroller` | ament ROS package 索引 marker / ament ROS-package index marker |
 | `README.md` | 快速构建与运行入口 / quick build and run entry point |
 | `PROJECT_STUDY_GUIDE_ZH_EN.md` | 完整双语目标、公式、架构、安全与学习路径 / complete bilingual goal, equations, architecture, safety, and learning path |
 | `CONTEXT.md` | 控制实验领域词汇 / control-experiment domain language |
@@ -49,6 +49,7 @@ current `tool_configuration` does not reference it.
 | --- | --- |
 | `test/test_arm_control.py` | 状态机、轨迹、AGX adapter、安全启动和模式互锁集成回归 / state machine, trajectory, AGX adapter, startup safety, and interlock regression |
 | `test/test_momentum_observer.py` | 观测器公式、时间戳与 ROS 隔离 / observer formula, timestamp, and ROS isolation |
+| `test/test_observer_friction.py` | 低速残差摩擦助推的方向、比例、上限和退出条件 / direction, ratio, caps, and exit conditions for low-speed residual friction assist |
 | `test/test_control_interface.py` | 统一控制器 interface 与三个 adapter / common controller interface and three adapters |
 | `test/test_cartesian_common.py` | 阻抗/导纳共用笛卡尔任务几何的独立契约 / independent contracts for shared Cartesian Task Geometry |
 | `test/test_experiment.py` | 实验生命周期、sink 与指标 / experiment lifecycle, sinks, and metrics |

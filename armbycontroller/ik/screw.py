@@ -34,6 +34,9 @@ class BoundedScrewVelocityIk:
         damping=0.02,
         task_weights=None,
         joint_limit_margin=0.03,
+        singularity_slow_threshold=0.05,
+        singularity_stop_threshold=0.01,
+        singularity_damping=0.08,
     ):
         self.model = model
         self.joint_count = int(model.joint_count)
@@ -48,6 +51,13 @@ class BoundedScrewVelocityIk:
             positive=True,
         )
         self.damping = float(damping)
+        self.singularity_slow_threshold = float(
+            singularity_slow_threshold
+        )
+        self.singularity_stop_threshold = float(
+            singularity_stop_threshold
+        )
+        self.singularity_damping = float(singularity_damping)
         self.joint_limit_margin = float(joint_limit_margin)
         if (
             self.joint_limits.shape != (self.joint_count, 2)
@@ -55,10 +65,20 @@ class BoundedScrewVelocityIk:
             or np.any(self.joint_limits[:, 0] >= self.joint_limits[:, 1])
             or not math.isfinite(self.damping)
             or self.damping <= 0.0
+            or not math.isfinite(self.singularity_slow_threshold)
+            or not math.isfinite(self.singularity_stop_threshold)
+            or not math.isfinite(self.singularity_damping)
+            or self.singularity_stop_threshold <= 0.0
+            or self.singularity_slow_threshold
+            <= self.singularity_stop_threshold
+            or self.singularity_damping < 0.0
             or not math.isfinite(self.joint_limit_margin)
             or self.joint_limit_margin < 0.0
         ):
             raise ValueError("invalid bounded screw velocity IK settings")
+        self.last_minimum_singular_value = math.inf
+        self.last_velocity_scale = 1.0
+        self.last_damping = self.damping
 
     @staticmethod
     def _vector(values, size, name, *, positive=False):
@@ -113,6 +133,28 @@ class BoundedScrewVelocityIk:
         if not math.isfinite(period) or period <= 0.0:
             raise ValueError("period must be finite and positive")
         jacobian, _ = geometric_jacobian(self.model, joints)
+        singular_values = np.linalg.svd(jacobian, compute_uv=False)
+        minimum = float(singular_values[-1])
+        scale = float(np.clip(
+            (minimum - self.singularity_stop_threshold)
+            / (
+                self.singularity_slow_threshold
+                - self.singularity_stop_threshold
+            ),
+            0.0,
+            1.0,
+        ))
+        self.last_minimum_singular_value = minimum
+        self.last_velocity_scale = scale
+        self.last_damping = (
+            self.damping + (1.0 - scale) * self.singularity_damping
+        )
+        if scale == 0.0 and np.linalg.norm(target) > 1e-12:
+            raise ScrewIkFailure(
+                "bounded screw velocity IK reached its singularity stop "
+                f"threshold (sigma_min={minimum:.6g})"
+            )
+        target = scale * target
         weighted_jacobian = self.task_weights[:, None] * jacobian
         weighted_target = self.task_weights * target
         lower, upper = self._bounds(joints, period)
@@ -129,7 +171,7 @@ class BoundedScrewVelocityIk:
             reduced = weighted_jacobian[:, free]
             normal = (
                 reduced.T @ reduced
-                + self.damping ** 2 * np.eye(np.count_nonzero(free))
+                + self.last_damping ** 2 * np.eye(np.count_nonzero(free))
             )
             try:
                 velocity[free] = np.linalg.solve(

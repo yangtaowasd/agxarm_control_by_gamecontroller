@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
-from armbycontroller.modeling.momentum_observer import (
+from armbycontroller.observers.momentum import (
     GeneralizedMomentumObserver,
 )
 from armbycontroller.ros.momentum_observer_node import MomentumObserverNode

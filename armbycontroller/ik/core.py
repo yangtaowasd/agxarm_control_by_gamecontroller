@@ -93,7 +93,9 @@ def resolve_urdf_path(parameter_value, robot_model):
             / "nero_description.urdf"
         )
     try:
-        share = Path(get_package_share_directory("armbycontroller"))
+        share = Path(get_package_share_directory(
+            "agxarm_control_by_gamecontroller"
+        ))
         candidates.append(
             share / "agx_arm_urdf" / robot_model / "urdf"
             / f"{robot_model}_description.urdf"

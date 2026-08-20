@@ -13,7 +13,8 @@ external-disturbance observation mathematics.
 | `armbycontroller/modeling/__init__.py` | 独立共享建模 package 的边界 / boundary of the standalone shared-modeling package |
 | `armbycontroller/modeling/lie.py` | SO(3)/SE(3) 指数与对数、空间误差、伴随、空间运动/力叉乘 / SO(3)/SE(3) exp/log, space error, adjoint, motion/force cross products |
 | `armbycontroller/modeling/screw_model.py` | 解析 URDF/Xacro，构造 PoE chain，计算 FK、空间 Jacobian、质量矩阵、RNEA、动量观测项 / parse URDF/Xacro; PoE, FK, space Jacobian, mass matrix, RNEA, observer terms |
-| `armbycontroller/modeling/momentum_observer.py` | 不使用加速度微分的广义动量残差积分器 / acceleration-free generalized-momentum residual integrator |
+| `armbycontroller/observers/momentum.py` | 不使用加速度微分的广义动量残差积分器 / acceleration-free generalized-momentum residual integrator |
+| `armbycontroller/observers/friction.py` | 方向门控、低速、有界的残差摩擦助推 / direction-gated, low-speed, bounded residual friction assist |
 | `armbycontroller/ik/screw.py` | 共享 PoE 模型的完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK / full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over the shared PoE model |
 | `armbycontroller/__init__.py` | 顶层 Python package 标识 / top-level Python package marker |
 
@@ -23,7 +24,8 @@ external-disturbance observation mathematics.
 modeling/lie.py <- cartesian/spatial.py <- impedance/ | admittance/
        ^
        +-------- modeling/screw_model.py <- ik/screw.py <- controller adapters
-                              \---- modeling/momentum_observer.py
+                              \---- observers/momentum.py
+                                       \---- observers/friction.py
 ```
 
 数学 module 不应反向依赖 ROS 节点、键盘协议或 AGX SDK。模型数组遵循关节顺序，

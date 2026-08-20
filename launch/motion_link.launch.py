@@ -97,14 +97,14 @@ def _nodes(context):
     }
     return [
         Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="pose_controller.py",
             name=f"{model}_pose_controller",
             output="screen",
             parameters=[controller_parameters],
         ),
         Node(
-            package="armbycontroller",
+            package="agxarm_control_by_gamecontroller",
             executable="motion_link_bridge.py",
             name=f"{model}_motion_link_bridge",
             output="screen",

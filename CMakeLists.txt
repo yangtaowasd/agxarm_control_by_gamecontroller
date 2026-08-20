@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(armbycontroller)
+project(agxarm_control_by_gamecontroller)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,7 +15,9 @@ find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(X11 REQUIRED)
 
-ament_python_install_package(${PROJECT_NAME})
+# The ROS package follows the repository name; keep the established Python
+# import namespace independent from the ROS package identity.
+ament_python_install_package(armbycontroller)
 
 add_executable(keyboard
   src/keyboard.cpp
@@ -117,6 +119,10 @@ if(BUILD_TESTING)
   )
   ament_add_pytest_test(momentum_observer_test
     test/test_momentum_observer.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
+  ament_add_pytest_test(observer_friction_test
+    test/test_observer_friction.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
   ament_add_pytest_test(cartesian_admittance_test

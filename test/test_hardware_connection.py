@@ -123,7 +123,6 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
         "connect:arm1",
         "enable:arm1",
         "firmware:arm1",
-        "disable:arm1",
     ]
     expected_events.extend([
         "disconnect:arm1",
@@ -150,7 +149,6 @@ def test_two_stage_connection_saves_probe_data_and_reconnects_with_it(
         f"firmware probe query 1 received: {firmware_info!r}",
         f"firmware probe data saved: {firmware_info}; "
         f"selected profile={expected_profile}",
-        f"{robot_model} firmware probe disable request result: False",
     ]
     expected_reports.extend([
         "firmware probe disconnected",
@@ -270,7 +268,6 @@ def test_reconnect_delay_is_configurable_and_precedes_formal_creation():
         "create:arm1",
         "connect:arm1",
         "enable:arm1",
-        "disable:arm1",
         "disconnect:arm1",
         "sleep:0.5",
         "create:arm2",
@@ -330,4 +327,4 @@ def test_probe_is_disconnected_when_firmware_data_is_invalid():
             config_factory=lambda **values: values,
         )
 
-    assert events == ["connect", "enable", "disable", "disconnect"]
+    assert events == ["connect", "enable", "disconnect"]

@@ -5,15 +5,21 @@ from dataclasses import dataclass
 import numpy as np
 
 from armbycontroller.cartesian import spatial_vector
+from armbycontroller.cartesian import transform_matrix
 from armbycontroller.control.core import ControlResult
 from armbycontroller.control.mit import MitTorqueEnvelope
 from armbycontroller.control.model_compensation import ModelCompensator
 from armbycontroller.control.safety import ControlCycleGuard
 from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control.safety import SustainedVelocityGuard
+from armbycontroller.hybrid.selection import compliance_frame_rotation
 from armbycontroller.hybrid.selection import task_axis_mask
+from armbycontroller.hybrid.selection import task_subspace_projector
 from armbycontroller.ik.screw import BoundedScrewVelocityIk
 from armbycontroller.impedance.cartesian import cartesian_impedance_command
+from armbycontroller.impedance.cartesian import cartesian_pose_error
+from armbycontroller.impedance.cartesian import limit_cartesian_wrench
+from armbycontroller.modeling.lie import rotation_from_vector
 
 
 HYBRID_MIT_TORQUE_LIMIT_MAX = INTERACTION_TORQUE_LIMIT_MAX
@@ -68,6 +74,8 @@ class HybridCartesianController:
         *,
         torque_rate_limit=None,
         admittance_axes="z",
+        admittance_frame="base",
+        admittance_frame_rotation=None,
         desired_wrench=None,
         model_scale=1.0,
         nullspace_stiffness=None,
@@ -76,28 +84,59 @@ class HybridCartesianController:
         measured_velocity_limit=None,
         measured_velocity_hard_limit=None,
         measured_velocity_violation_cycles=3,
+        maximum_force=float("inf"),
+        maximum_torque=float("inf"),
     ):
         self.model = model
         self.admittance = admittance
         self.velocity_ik = velocity_ik
         self.joint_count = int(model.joint_count)
+        self.maximum_force = float(maximum_force)
+        self.maximum_torque = float(maximum_torque)
+        limit_cartesian_wrench(
+            np.zeros(6), self.maximum_force, self.maximum_torque
+        )
         if velocity_ik.model is not model:
-            raise ValueError("hybrid controller and velocity IK must share model")
+            raise ValueError(
+                "hybrid controller and velocity IK must share model"
+            )
         if velocity_ik.joint_count != self.joint_count:
             raise ValueError("hybrid velocity IK joint count does not match")
 
+        self.admittance_axes = admittance_axes
         self.admittance_axis_mask = task_axis_mask(admittance_axes)
-        self.impedance_axis_mask = 1.0 - self.admittance_axis_mask
-        self.admittance_selection = np.diag(self.admittance_axis_mask)
-        self.impedance_selection = np.diag(self.impedance_axis_mask)
-        stiffness = _task_matrix(cartesian_stiffness, "cartesian_stiffness")
-        damping = _task_matrix(cartesian_damping, "cartesian_damping")
-        self.impedance_stiffness = (
-            self.impedance_selection @ stiffness @ self.impedance_selection
+        self.admittance_frame = str(admittance_frame).strip().lower()
+        self.admittance_frame_rotation_vector = np.asarray(
+            np.zeros(3)
+            if admittance_frame_rotation is None
+            else admittance_frame_rotation,
+            dtype=float,
         )
-        self.impedance_damping = (
-            self.impedance_selection @ damping @ self.impedance_selection
+        if (
+            self.admittance_frame_rotation_vector.shape != (3,)
+            or not np.all(np.isfinite(
+                self.admittance_frame_rotation_vector
+            ))
+        ):
+            raise ValueError(
+                "admittance_frame_rotation must be a finite 3-vector"
+            )
+        compliance_frame_rotation(
+            self.admittance_frame,
+            np.eye(4),
+            self.admittance_frame_rotation_vector,
         )
+        self.task_stiffness = _task_matrix(
+            cartesian_stiffness, "cartesian_stiffness"
+        )
+        self.task_damping = _task_matrix(
+            cartesian_damping, "cartesian_damping"
+        )
+        self.compliance_frame_rotation = np.eye(3)
+        self.admittance_selection = task_subspace_projector(
+            self.admittance_axes
+        )
+        self._update_complementary_impedance()
         self.desired_wrench = spatial_vector(
             np.zeros(6) if desired_wrench is None else desired_wrench,
             "desired_wrench",
@@ -156,12 +195,84 @@ class HybridCartesianController:
         self.anchor_pose = None
         self.anchor_position = None
 
+    def _update_complementary_impedance(self):
+        self.impedance_selection = np.eye(6) - self.admittance_selection
+        self.impedance_axis_mask = 1.0 - self.admittance_axis_mask
+        self.impedance_stiffness = (
+            self.impedance_selection
+            @ self.task_stiffness
+            @ self.impedance_selection
+        )
+        self.impedance_damping = (
+            self.impedance_selection
+            @ self.task_damping
+            @ self.impedance_selection
+        )
+
+    def _set_subspace(self, current_pose, axes=None, frame=None,
+                      frame_rotation=None):
+        axes = self.admittance_axes if axes is None else axes
+        frame = self.admittance_frame if frame is None else frame
+        rotation_vector = (
+            self.admittance_frame_rotation_vector
+            if frame_rotation is None
+            else np.asarray(frame_rotation, dtype=float)
+        )
+        rotation = compliance_frame_rotation(
+            frame, current_pose, rotation_vector
+        )
+        self.admittance_axes = axes
+        self.admittance_axis_mask = task_axis_mask(axes)
+        self.admittance_frame = str(frame).strip().lower()
+        self.admittance_frame_rotation_vector = np.asarray(
+            rotation_vector, dtype=float
+        ).copy()
+        self.compliance_frame_rotation = rotation
+        self.admittance_selection = task_subspace_projector(axes, rotation)
+        self._update_complementary_impedance()
+
+    def reconfigure_admittance_subspace(
+        self, current_pose, *, axes=None, frame=None, frame_rotation=None
+    ):
+        """Change the compliant subspace with measured-pose re-anchoring."""
+        if self.anchor_pose is None:
+            raise RuntimeError(
+                "hybrid controller must be reset before reconfigure"
+            )
+        current = transform_matrix(current_pose, "current_pose")
+        old_impedance_selection = self.impedance_selection.copy()
+        old_error = cartesian_pose_error(current, self.anchor_pose)
+        old_velocity = np.asarray(
+            getattr(self.admittance, "velocity", np.zeros(6)), dtype=float
+        )
+        self._set_subspace(current, axes, frame, frame_rotation)
+
+        retained_error = (
+            self.impedance_selection
+            @ old_impedance_selection
+            @ old_error
+        )
+        anchor = current.copy()
+        anchor[:3, :3] = (
+            rotation_from_vector(retained_error[:3]) @ current[:3, :3]
+        )
+        anchor[:3, 3] = current[:3, 3] + retained_error[3:]
+        self.anchor_pose = anchor
+        self.admittance.reset(current)
+        if hasattr(self.admittance, "velocity"):
+            self.admittance.velocity = (
+                self.admittance_selection @ old_velocity
+            )
+
     def reset(self, state):
         """Capture one nominal pose shared by both complementary subspaces."""
         if state.joint_count != self.joint_count or not state.position_valid:
             raise ValueError("hybrid reset requires complete joint position")
         self.anchor_position = state.position.copy()
-        self.anchor_pose = self.model.forward_kinematics(state.position)
+        self.anchor_pose = transform_matrix(
+            self.model.forward_kinematics(state.position), "anchor_pose"
+        ).copy()
+        self._set_subspace(self.anchor_pose)
         self.admittance.reset(self.anchor_pose)
         self.measured_velocity_guard.reset()
         self.mit_envelope.reset(
@@ -212,6 +323,8 @@ class HybridCartesianController:
             self.impedance_stiffness,
             self.impedance_damping,
             model_torque_override=np.zeros(self.joint_count),
+            maximum_force=self.maximum_force,
+            maximum_torque=self.maximum_torque,
             **nullspace,
         )
         compensation = self.model_compensator.evaluate(
@@ -234,9 +347,20 @@ class HybridCartesianController:
         signals = {
             "admittance_axis_mask": self.admittance_axis_mask,
             "impedance_axis_mask": self.impedance_axis_mask,
+            "admittance_selection": self.admittance_selection,
+            "impedance_selection": self.impedance_selection,
+            "compliance_frame_rotation": self.compliance_frame_rotation,
+            "compliance_frame": self.admittance_frame,
             "admittance_twist": admittance_twist,
             "desired_twist": admittance_twist,
             "joint_velocity": reference_velocity,
+            "jacobian_minimum_singular_value": (
+                self.velocity_ik.last_minimum_singular_value
+            ),
+            "singularity_velocity_scale": (
+                self.velocity_ik.last_velocity_scale
+            ),
+            "velocity_ik_damping": self.velocity_ik.last_damping,
             "desired_pose": commanded_pose,
             "desired_wrench": self.desired_wrench,
             "wrench_error": wrench_error,
@@ -258,6 +382,8 @@ class HybridCartesianController:
             "pose_error": impedance.pose_error,
             "measured_twist": impedance.measured_twist,
             "commanded_wrench": impedance.commanded_wrench,
+            "raw_commanded_wrench": impedance.raw_commanded_wrench,
+            "wrench_limited": impedance.wrench_limited,
             "task_torque": impedance.task_torque,
             "nullspace_torque": impedance.nullspace_torque,
         }

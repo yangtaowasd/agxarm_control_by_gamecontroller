@@ -22,7 +22,8 @@ class ExperimentRecorderNode(Node):
         self.declare_parameter("sample_topic", "/arm_control_sample")
         self.declare_parameter("event_topic", "/arm_control_event")
         self.declare_parameter(
-            "output_directory", "~/.ros/armbycontroller/experiments"
+            "output_directory",
+            "~/.ros/agxarm_control_by_gamecontroller/experiments",
         )
         self.declare_parameter("experiment_name", "manual_control")
         self.declare_parameter("robot_model", "unknown")

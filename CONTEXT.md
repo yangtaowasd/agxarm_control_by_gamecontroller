@@ -53,6 +53,15 @@ validation, and `tau=Jg.T F` virtual-work mapping shared by impedance and
 admittance; it contains no K/D/M from either control law.
 _Avoid_: impedance geometry, admittance Jacobian helper
 
+**笛卡尔柔顺子空间 / Cartesian Compliance Subspace**:
+在 `base`、进入模式时捕获的 `tool` 或自定义旋转参考系中，以正交投影矩阵划分导纳
+和互补阻抗方向；重配置时投影虚拟速度，并只为新增刚性方向捕获实测位姿。 / An
+orthogonal projector partitions admittance and complementary impedance
+directions in the `base`, mode-entry `tool`, or a custom rotated frame;
+reconfiguration projects virtual velocity and captures measured pose only for
+newly rigid directions.
+_Avoid_: axis mask, mixed force mode
+
 **受限旋量速度 IK / Bounded Screw Velocity IK**:
 从共享 PoE 模型取得空间 Jacobian，转换为工具原点几何 Jacobian，并用带关节速度、
 预测位置和任务权重约束的 DLS 将导纳 twist 映射为关节速度参考。 / Uses the

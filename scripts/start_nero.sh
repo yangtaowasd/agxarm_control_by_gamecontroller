@@ -25,7 +25,7 @@ else
   echo "Error: ROS workspace setup.bash was not found." >&2
   echo "Build the workspace first:" >&2
   echo "  cd ${SOURCE_WORKSPACE_DIRECTORY}" >&2
-  echo "  colcon build --packages-up-to armbycontroller" >&2
+  echo "  colcon build --packages-up-to agxarm_control_by_gamecontroller" >&2
   exit 1
 fi
 readonly WORKSPACE_SETUP
@@ -35,7 +35,7 @@ set +u
 source "${WORKSPACE_SETUP}"
 set -u
 
-exec ros2 launch armbycontroller keyboard_control.launch.py \
+exec ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=nero \
   execute_motion:=true \
   can_interface:=can0 \

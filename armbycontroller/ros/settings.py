@@ -160,7 +160,9 @@ class ControllerSettings:
                 value("firmware_reconnect_delay")
             ),
             nero_mount=str(value("nero_mount")).strip().lower(),
-            tool_configuration=str(value("tool_configuration")).strip().lower(),
+            tool_configuration=(
+                str(value("tool_configuration")).strip().lower()
+            ),
             nero_velocity_estimation_enabled=bool(
                 value("nero_velocity_estimation_enabled")
             ),

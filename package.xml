@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="3">
-  <name>armbycontroller</name>
+  <name>agxarm_control_by_gamecontroller</name>
   <version>0.0.0</version>
   <description>Joint and Cartesian keyboard control for Piper, NERO, and Revo2.</description>
 
