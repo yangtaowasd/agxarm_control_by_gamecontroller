@@ -2,6 +2,7 @@
 
 from collections import deque
 import importlib.util
+import json
 import math
 from pathlib import Path
 import subprocess
@@ -12,9 +13,11 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
+from armbycontroller.api import InteractionModeRequestResult
 from armbycontroller.control import ControlResult
 from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import INTERACTION_TORQUE_LIMIT_MAX
+from armbycontroller.control import InteractionModeLifecycle
 from armbycontroller.control import InteractionSafetyLimits
 from armbycontroller.control import MitCommand
 from armbycontroller.ik.core import AgxIkEngine
@@ -103,6 +106,19 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert module.COMMON[
         "external_torque_topic"
     ] == "/arm_external_joint_torque"
+    assert module.COMMON[
+        "interaction_state_topic"
+    ] == "/arm/interaction_state"
+    assert module.COMMON[
+        "normal_mode_service"
+    ] == "/arm/set_normal_mode"
+    assert module.COMMON[
+        "impedance_mode_service"
+    ] == "/arm/set_impedance_mode"
+    assert module.COMMON[
+        "admittance_mode_service"
+    ] == "/arm/set_admittance_mode"
+    assert "hybrid_mode_service" not in module.COMMON
     assert module.OBSERVER["momentum_observer_enabled"] == "true"
     assert "momentum_observer_rate" in (
         module.CONFIGURED_OBSERVER_PARAMETERS
@@ -1364,6 +1380,71 @@ def test_shared_velocity_guard_covers_impedance_mode(monkeypatch):
         feedback, "impedance"
     )
     assert estops == [True]
+
+
+def test_public_ros_service_serializes_transport_neutral_result():
+    published = []
+    controller = object.__new__(ArmKeyboardController)
+    controller.public_interaction_mode_interface = SimpleNamespace(
+        request=lambda mode, source: InteractionModeRequestResult(
+            True,
+            mode,
+            mode,
+            True,
+            f"set by {source}",
+        )
+    )
+    controller._publish_interaction_state = (
+        lambda reason: published.append(reason)
+    )
+    response = SimpleNamespace(success=False, message="")
+
+    returned = controller._impedance_mode_service_callback(
+        SimpleNamespace(), response
+    )
+    payload = json.loads(response.message)
+
+    assert returned is response
+    assert response.success
+    assert payload["schema_version"] == 1
+    assert payload["requested_mode"] == "impedance"
+    assert payload["active_mode"] == "impedance"
+    assert published == ["ros_service requested impedance"]
+
+
+def test_interaction_state_topic_is_ui_ready_but_hybrid_is_not_requestable():
+    class FakePublisher:
+        def __init__(self):
+            self.messages = []
+
+        def publish(self, message):
+            self.messages.append(message)
+
+    publisher = FakePublisher()
+    controller = object.__new__(ArmKeyboardController)
+    controller.interaction_state_publisher = publisher
+    controller.interaction_lifecycle = InteractionModeLifecycle("hybrid")
+    controller.impedance_enabled = False
+    controller.admittance_enabled = False
+    controller.hybrid_enabled = True
+    controller.robot_model = "nero"
+    controller.control_mode = "ik"
+    controller.impedance_backend = "cartesian"
+    controller.admittance_mode = "zero_force"
+    controller.arm_ready = True
+    controller.arm_connected = True
+    controller.emergency_stopped = False
+    controller.execute_motion = True
+
+    controller._publish_interaction_state("test")
+    payload = json.loads(publisher.messages[0].data)
+
+    assert payload["interaction_mode"] == "hybrid"
+    assert payload["available_modes"] == [
+        "normal", "impedance", "admittance"
+    ]
+    assert payload["reason"] == "test"
+    assert payload["arm_ready"]
 
 
 def test_impedance_entry_exits_admittance_first(monkeypatch):

@@ -14,15 +14,22 @@ import rclpy
 from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy
+from rclpy.qos import QoSProfile
+from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Int32MultiArray
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 
 from pyAgxArm import AgxArmFactory, ArmModel, NeroFW, PiperFW
 from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
+from armbycontroller.api import interaction_state_payload
+from armbycontroller.api import InteractionModeInterface
+from armbycontroller.api import InteractionModeRequestResult
 from armbycontroller.admittance import ADMITTANCE_MODES
 from armbycontroller.admittance import create_cartesian_admittance
 from armbycontroller.admittance.controller import CartesianAdmittanceController
@@ -534,6 +541,18 @@ class ArmKeyboardController(Node):
         )
         self.declare_parameter("control_sample_topic", "/arm_control_sample")
         self.declare_parameter("control_event_topic", "/arm_control_event")
+        self.declare_parameter(
+            "interaction_state_topic", "/arm/interaction_state"
+        )
+        self.declare_parameter(
+            "normal_mode_service", "/arm/set_normal_mode"
+        )
+        self.declare_parameter(
+            "impedance_mode_service", "/arm/set_impedance_mode"
+        )
+        self.declare_parameter(
+            "admittance_mode_service", "/arm/set_admittance_mode"
+        )
         self.declare_parameter("mit_kp", default_mit_kp)
         self.declare_parameter("mit_kd", default_mit_kd)
         self.declare_parameter(
@@ -820,6 +839,18 @@ class ArmKeyboardController(Node):
         )
         self.control_event_topic = str(
             self.get_parameter("control_event_topic").value
+        )
+        self.interaction_state_topic = str(
+            self.get_parameter("interaction_state_topic").value
+        )
+        self.normal_mode_service_name = str(
+            self.get_parameter("normal_mode_service").value
+        )
+        self.impedance_mode_service_name = str(
+            self.get_parameter("impedance_mode_service").value
+        )
+        self.admittance_mode_service_name = str(
+            self.get_parameter("admittance_mode_service").value
         )
         self.mit_kp = expand_joint_values(
             self.get_parameter("mit_kp").value, self.joint_count, "mit_kp"
@@ -1306,6 +1337,12 @@ class ArmKeyboardController(Node):
         self.admittance_enabled = False
         self.hybrid_enabled = False
         self.interaction_lifecycle = InteractionModeLifecycle()
+        self.public_interaction_mode_interface = InteractionModeInterface(
+            current_mode=self._current_interaction_mode,
+            enter_normal=self._enter_normal_interaction_mode,
+            enter_impedance=self._enter_public_impedance,
+            enter_admittance=self._enter_public_admittance,
+        )
         self.admittance_previous_control_mode = "joint"
         self.last_admittance_tick_time = None
         self.last_hybrid_tick_time = None
@@ -1330,6 +1367,29 @@ class ArmKeyboardController(Node):
         self.control_event_publisher = self.create_publisher(
             String, self.control_event_topic, 20
         )
+        interaction_state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.interaction_state_publisher = self.create_publisher(
+            String, self.interaction_state_topic, interaction_state_qos
+        )
+        self.normal_mode_service_server = self.create_service(
+            Trigger,
+            self.normal_mode_service_name,
+            self._normal_mode_service_callback,
+        )
+        self.impedance_mode_service_server = self.create_service(
+            Trigger,
+            self.impedance_mode_service_name,
+            self._impedance_mode_service_callback,
+        )
+        self.admittance_mode_service_server = self.create_service(
+            Trigger,
+            self.admittance_mode_service_name,
+            self._admittance_mode_service_callback,
+        )
         self.external_torque_sub = self.create_subscription(
             JointState,
             self.external_torque_topic,
@@ -1340,6 +1400,7 @@ class ArmKeyboardController(Node):
         self.mit_trajectory.reset(self.jog.target_joints)
         if start_in_impedance:
             self.toggle_impedance()
+        self._publish_interaction_state("startup")
         self.timer = self.create_timer(
             1.0 / self.control_rate, self.control_tick
         )
@@ -1644,6 +1705,109 @@ class ArmKeyboardController(Node):
             sort_keys=True,
         )
         publisher.publish(message)
+
+    def _current_interaction_mode(self):
+        """Return the one synchronized interaction mode."""
+        return self._check_interaction_mode_invariant()
+
+    def _publish_interaction_state(self, reason):
+        """Publish one latched UI-facing interaction-state snapshot."""
+        publisher = getattr(self, "interaction_state_publisher", None)
+        if publisher is None:
+            return
+        payload = interaction_state_payload(
+            self._current_interaction_mode(),
+            timestamp=time.monotonic(),
+            robot_model=getattr(self, "robot_model", "unknown"),
+            control_mode=getattr(self, "control_mode", "joint"),
+            impedance_backend=getattr(
+                self, "impedance_backend", "unknown"
+            ),
+            admittance_mode=getattr(
+                self, "admittance_mode", "unknown"
+            ),
+            arm_ready=bool(getattr(self, "arm_ready", False)),
+            arm_connected=bool(getattr(self, "arm_connected", False)),
+            emergency_stopped=bool(
+                getattr(self, "emergency_stopped", False)
+            ),
+            execute_motion=bool(getattr(self, "execute_motion", False)),
+            mode_services={
+                "normal": getattr(
+                    self, "normal_mode_service_name", ""
+                ),
+                "impedance": getattr(
+                    self, "impedance_mode_service_name", ""
+                ),
+                "admittance": getattr(
+                    self, "admittance_mode_service_name", ""
+                ),
+            },
+            reason=str(reason),
+        )
+        message = String()
+        message.data = json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        publisher.publish(message)
+
+    def _public_mode_service(self, target, response):
+        """Adapt one standard Trigger call to the transport-neutral API."""
+        source = "ros_service"
+        try:
+            result = self.public_interaction_mode_interface.request(
+                target, source=source
+            )
+        except Exception as error:
+            try:
+                active = self._current_interaction_mode()
+            except Exception:
+                active = "normal"
+            result = InteractionModeRequestResult(
+                False,
+                str(target),
+                active,
+                False,
+                f"interaction mode request failed: {error}",
+            )
+        response.success = result.success
+        response.message = json.dumps(
+            result.to_payload(),
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        self._publish_interaction_state(
+            f"{source} requested {target}"
+        )
+        return response
+
+    def _normal_mode_service_callback(self, request, response):
+        del request
+        return self._public_mode_service("normal", response)
+
+    def _impedance_mode_service_callback(self, request, response):
+        del request
+        return self._public_mode_service("impedance", response)
+
+    def _admittance_mode_service_callback(self, request, response):
+        del request
+        return self._public_mode_service("admittance", response)
+
+    def _enter_public_impedance(self, reason):
+        """Enter impedance from normal for a public set-mode request."""
+        del reason
+        self.toggle_impedance()
+        return self._current_interaction_mode() == "impedance"
+
+    def _enter_public_admittance(self, reason):
+        """Enter admittance from normal for a public set-mode request."""
+        del reason
+        self.toggle_admittance()
+        return self._current_interaction_mode() == "admittance"
 
     def _send_control_result(self, result):
         command = result.command
@@ -2047,6 +2211,7 @@ class ArmKeyboardController(Node):
             self.get_logger().info(
                 f"mode=JOINT: 1-{self.joint_count} select, A/D jog"
             )
+        self._publish_interaction_state("control_mode_changed")
 
     def toggle_impedance(self):
         """Switch between planned motion and the selected MIT backend."""
@@ -2269,6 +2434,7 @@ class ArmKeyboardController(Node):
         velocity_guard = getattr(self, "interaction_velocity_guard", None)
         if velocity_guard is not None:
             velocity_guard.reset()
+        self._publish_interaction_state("mode_committed")
         return active
 
     def toggle_admittance(self):
@@ -2424,6 +2590,7 @@ class ArmKeyboardController(Node):
         self.get_logger().info(
             "Cartesian admittance MIT exited; backend=planned position"
         )
+        self._publish_interaction_state("mode_exit_complete")
         return True
 
     def toggle_hybrid(self):
@@ -2568,6 +2735,7 @@ class ArmKeyboardController(Node):
         self.get_logger().info(
             "Cartesian hybrid MIT exited; backend=planned position"
         )
+        self._publish_interaction_state("mode_exit_complete")
         return True
 
     def external_torque_callback(self, message):
@@ -3265,6 +3433,7 @@ class ArmKeyboardController(Node):
         self.arm_ready = False
         self.get_logger().error("ELECTRONIC EMERGENCY STOP requested")
         self._publish_control_event("emergency_stop")
+        self._publish_interaction_state("emergency_stop")
         if self.execute_motion and self.arm_connected:
             try:
                 self.arm.electronic_emergency_stop()

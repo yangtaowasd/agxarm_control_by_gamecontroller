@@ -618,7 +618,16 @@ profile is used.
 19. controller 使能、退出和急停作为离散 `Control Event` 发布到
     `/arm_control_event`。 / Controller enable, exit, and emergency stop are
     published as discrete Control Events on `/arm_control_event`.
-20. 可选 recorder 进程订阅两个 JSON topic，流式写入 `samples.jsonl` 和
+20. 传输无关的 `InteractionModeInterface` 将外部 `normal/impedance/admittance`
+    请求规范化为幂等 set-mode 操作，并强制跨模式先提交 `normal`；ROS adapter
+    通过三个 `std_srvs/Trigger` 服务接入，并把 schema-v1 状态发布到
+    `/arm/interaction_state`。公开能力不包含 `hybrid`。 / The
+    transport-neutral `InteractionModeInterface` normalizes external
+    `normal/impedance/admittance` requests into idempotent set-mode operations
+    and commits `normal` before every cross-mode transition. Thin ROS adapters
+    expose three `std_srvs/Trigger` services and publish schema-v1 state on
+    `/arm/interaction_state`; public capabilities exclude `hybrid`.
+21. 可选 recorder 进程订阅两个 JSON topic，流式写入 `samples.jsonl` 和
     `events.jsonl`；启动/收尾原子写 `manifest.json` 与 `summary.json`。 /
     The optional recorder process subscribes to both JSON topics, streams
     `samples.jsonl` and `events.jsonl`, and atomically writes `manifest.json`
@@ -637,6 +646,7 @@ profile is used.
 | `armbycontroller/admittance/controller.py` | 导纳 twist 到受限旋量速度 IK、实测位置重锚定和低增益 MIT 的 controller adapter / Controller adapter from admittance twist to bounded screw velocity IK, measured-position reanchoring, and low-gain MIT |
 | `armbycontroller/hybrid/selection.py` | 按项目 `[rx,ry,rz,x,y,z]` 顺序解析固定基座轴并生成任务选择 mask / Parses fixed base-frame axes in project order and creates task-selection masks |
 | `armbycontroller/hybrid/controller.py` | 单一所有者的互补混合 adapter：选中轴导纳 Twist、其余轴阻抗 wrench、受限旋量 IK、模型补偿和一个 MIT 包络 / One-owner complementary hybrid adapter: selected-axis admittance Twist, remaining-axis impedance wrench, bounded screw IK, model compensation, and one MIT envelope |
+| `armbycontroller/api/interaction.py` | 面向 UI/前端且与传输无关的幂等普通/阻抗/导纳 set-mode 合同、结果 schema 和状态 schema；不开放混合命令 / Transport-neutral idempotent normal/impedance/admittance set-mode contract, result schema, and state schema for UI/frontends; no hybrid command is public |
 | `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
 | `armbycontroller/control/model_compensation.py` | 阻抗、导纳与混合共享的重力、偏置和完整逆动力学模型补偿 / Gravity, bias, and full inverse-dynamics Model Compensation shared by impedance, admittance, and hybrid control |
 | `armbycontroller/control/mit.py` | 统一 MIT Safety Envelope、总力矩可行性和力矩分解诊断 / Shared MIT Safety Envelope, total-torque feasibility, and torque-decomposition diagnostics |
@@ -742,6 +752,10 @@ implementation.
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
 | `control_sample_topic` | string | — | `/arm_control_sample`; schema-v1 JSON `std_msgs/String` |
 | `control_event_topic` | string | — | `/arm_control_event`; JSON `std_msgs/String` |
+| `interaction_state_topic` | string | — | `/arm/interaction_state`; transient-local schema-v1 JSON `std_msgs/String`，供 UI 读取当前状态 / current UI-facing state |
+| `normal_mode_service` | string | — | `/arm/set_normal_mode`; idempotent `std_srvs/srv/Trigger` |
+| `impedance_mode_service` | string | — | `/arm/set_impedance_mode`; idempotent `std_srvs/srv/Trigger` |
+| `admittance_mode_service` | string | — | `/arm/set_admittance_mode`; idempotent `std_srvs/srv/Trigger` |
 | `experiment_recording_enabled` | bool | — | `false`; 是否启动独立 recorder / whether to launch the separate recorder |
 | `experiment_output_directory` | path | — | `~/.ros/armbycontroller/experiments` |
 | `experiment_name` | string | — | `manual_control` |
@@ -851,6 +865,13 @@ in joint space before the total torque clip.
   restore normal planned-position control and hold the current position before
   entering its target; requesting two or three modes together leaves the
   current mode unchanged.
+- UI 公开接口只允许幂等请求 `normal/impedance/admittance`，且复用同一生命周期
+  与 normal 中间态，不提供进入 `hybrid` 的服务。状态 topic 仍如实报告键盘进入
+  的 `hybrid`，避免前端误判。 / The public UI API only accepts idempotent
+  `normal/impedance/admittance` requests, reuses the same lifecycle and normal
+  intermediate state, and provides no service that enters `hybrid`. The state
+  topic still reports keyboard-entered `hybrid` so a frontend cannot mistake
+  the actual robot mode.
 - 所有 `I/O/H` 模式的参考关节速度统一受
   `interaction_reference_joint_velocity_limit=1.0 rad/s` 限制，并在 ROS 硬件
   adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.0 rad/s` 连续三个
@@ -1066,6 +1087,31 @@ colcon test --packages-select armbycontroller
 colcon test-result --verbose
 ```
 
+### UI/前端模式接口 / UI and frontend mode API
+
+三个服务是幂等 set-mode，不是 toggle。重复请求当前模式返回成功且
+`changed=false`；阻抗与导纳之间的切换仍自动经过普通态。服务的 `success` 是
+标准字段，`message` 是 schema-v1 JSON。混合模式没有公开服务。 / These three
+services are idempotent set-mode commands, not toggles. Repeating the active
+mode succeeds with `changed=false`; impedance/admittance cross-transitions
+still pass through normal automatically. `success` is the standard service
+field and `message` contains schema-v1 JSON. Hybrid has no public service.
+
+```bash
+ros2 service call /arm/set_normal_mode std_srvs/srv/Trigger '{}'
+ros2 service call /arm/set_impedance_mode std_srvs/srv/Trigger '{}'
+ros2 service call /arm/set_admittance_mode std_srvs/srv/Trigger '{}'
+ros2 topic echo /arm/interaction_state
+```
+
+`/arm/interaction_state` 使用 reliable + transient-local QoS；后启动的 UI 也会
+收到最近快照。`available_modes` 是可请求能力，固定不含 `hybrid`；
+`interaction_mode` 是实机真实状态，因此键盘按 `H` 后可报告 `hybrid`。 /
+`/arm/interaction_state` uses reliable, transient-local QoS so a UI started
+later receives the latest snapshot. `available_modes` lists requestable
+capabilities and never includes `hybrid`; `interaction_mode` reports the real
+robot state and may therefore show keyboard-entered `hybrid`.
+
 ### 实验记录 / Experiment recording
 
 默认不启动 recorder。显式启用会为每次 launch 创建新的 run directory；不会覆盖
@@ -1259,6 +1305,16 @@ electronic-stop reset after every formal connection, before motor enable and
 mode confirmation. The decision does not rely on possibly stale cached status
 at connection time.
 
+UI 服务返回 `success=false` 时，先解析 response `message` 中的 schema-v1 JSON，
+再查看 `/arm/interaction_state` 的 `interaction_mode`、`arm_ready`、
+`emergency_stopped` 和 `reason`。服务拒绝不会绕过原有 preflight、反馈完整性、
+wrench freshness 或 normal 中间态。 / When a UI service returns
+`success=false`, parse the schema-v1 JSON in response `message`, then inspect
+`interaction_mode`, `arm_ready`, `emergency_stopped`, and `reason` on
+`/arm/interaction_state`. A rejected service never bypasses the existing
+preflight, feedback-completeness, wrench-freshness, or normal-intermediate
+checks.
+
 1. `T` 是否为合法 SE(3)。 / Is `T` valid SE(3)?
 2. `J_s` 是否为 `6×n` 且顺序为 `[角; 线]`。 / Is `J_s` `6×n` and ordered
    `[angular; linear]`?
@@ -1421,6 +1477,7 @@ at connection time.
 | 柔顺零力 | Soft zero force | Near-zero desired wrench with weak holding, damping, and stick/slip anti-drift resistance |
 | 阻力导纳 | Resistive admittance | Positive damping and stiffness resist motion and restore the anchor |
 | 互锁 | Interlock | Normal/impedance/admittance/hybrid are mutually exclusive and every cross-mode switch passes through normal |
+| 公开交互模式接口 | Public interaction-mode API | 与 ROS/Web/GUI 传输无关的幂等普通/阻抗/导纳 set-mode 合同；不公开进入混合模式 / Transport-neutral idempotent normal/impedance/admittance set-mode contract with no public hybrid entry |
 | 空间雅可比 | Space Jacobian | PoE space-twist Jacobian `[omega; v]` |
 | 几何雅可比 | Geometric Jacobian | Tool-origin velocity Jacobian `[omega; p_dot]` |
 | wrench | Wrench | Moment-force vector `[M; F]` |

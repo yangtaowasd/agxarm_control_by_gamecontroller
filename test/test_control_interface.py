@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from armbycontroller.api import interaction_state_payload
+from armbycontroller.api import InteractionModeInterface
+from armbycontroller.api import PUBLIC_INTERACTION_MODES
 from armbycontroller.admittance.controller import (
     ADMITTANCE_MIT_TORQUE_LIMIT_MAX,
 )
@@ -266,6 +269,126 @@ def test_interaction_lifecycle_interlocks_three_interaction_controllers():
     lifecycle.commit("hybrid")
     with pytest.raises(RuntimeError, match="cannot be active together"):
         lifecycle.synchronize(True, False, True)
+
+
+def test_public_mode_interface_is_idempotent_and_excludes_hybrid():
+    active = ["normal"]
+    calls = []
+
+    def enter(mode):
+        def callback(reason):
+            calls.append((mode, reason))
+            active[0] = mode
+            return True
+
+        return callback
+
+    interface = InteractionModeInterface(
+        current_mode=lambda: active[0],
+        enter_normal=enter("normal"),
+        enter_impedance=enter("impedance"),
+        enter_admittance=enter("admittance"),
+    )
+
+    changed = interface.request("impedance", source="ui")
+    unchanged = interface.request("impedance", source="ui")
+
+    assert changed.success
+    assert changed.changed
+    assert changed.active_mode == "impedance"
+    assert changed.to_payload()["requested_mode"] == "impedance"
+    assert unchanged.success
+    assert not unchanged.changed
+    assert calls == [("impedance", "ui requested impedance")]
+    assert PUBLIC_INTERACTION_MODES == (
+        "normal", "impedance", "admittance"
+    )
+    with pytest.raises(ValueError, match="public interaction mode"):
+        interface.request("hybrid", source="ui")
+
+
+def test_public_mode_interface_forces_normal_and_stops_on_failed_exit():
+    active = ["impedance"]
+    calls = []
+
+    def enter_normal(reason):
+        calls.append(("normal", reason))
+        active[0] = "normal"
+        return True
+
+    def enter_admittance(reason):
+        calls.append(("admittance", reason))
+        active[0] = "admittance"
+        return True
+
+    interface = InteractionModeInterface(
+        current_mode=lambda: active[0],
+        enter_normal=enter_normal,
+        enter_impedance=lambda reason: False,
+        enter_admittance=enter_admittance,
+    )
+
+    result = interface.request("admittance", source="frontend")
+
+    assert result.success
+    assert result.active_mode == "admittance"
+    assert [mode for mode, _ in calls] == ["normal", "admittance"]
+
+    active[0] = "impedance"
+    calls.clear()
+
+    def fail_normal(reason):
+        calls.append(("normal", reason))
+        return False
+
+    blocked = InteractionModeInterface(
+        current_mode=lambda: active[0],
+        enter_normal=fail_normal,
+        enter_impedance=lambda reason: True,
+        enter_admittance=enter_admittance,
+    ).request("admittance", source="frontend")
+
+    assert not blocked.success
+    assert not blocked.changed
+    assert blocked.active_mode == "impedance"
+    assert [mode for mode, _ in calls] == ["normal"]
+
+
+def test_public_mode_interface_normalizes_controller_exceptions():
+    def fail_entry(reason):
+        raise RuntimeError(f"preflight rejected: {reason}")
+
+    interface = InteractionModeInterface(
+        current_mode=lambda: "normal",
+        enter_normal=lambda reason: True,
+        enter_impedance=fail_entry,
+        enter_admittance=lambda reason: True,
+    )
+
+    result = interface.request("impedance", source="frontend")
+
+    assert not result.success
+    assert not result.changed
+    assert result.active_mode == "normal"
+    assert "preflight rejected" in result.message
+
+
+def test_public_state_payload_reports_hybrid_without_exposing_its_command():
+    payload = interaction_state_payload(
+        "hybrid",
+        timestamp=12.5,
+        robot_model="nero",
+        arm_ready=True,
+    )
+
+    assert payload == {
+        "schema_version": 1,
+        "timestamp": 12.5,
+        "robot_model": "nero",
+        "interaction_mode": "hybrid",
+        "available_modes": ["normal", "impedance", "admittance"],
+        "arm_ready": True,
+    }
 
 
 def sample(position=None, target=None, wrench=None, velocity=None):

@@ -212,6 +212,25 @@ transmission, and emergency stop. Each executed cycle is published as schema
 version 1 JSON on `/arm_control_sample`; enable/disable and emergency-stop
 events are published on `/arm_control_event`.
 
+The UI-facing interaction API is transport-neutral in
+`armbycontroller/api/interaction.py` and has thin ROS adapters. These standard
+`std_srvs/srv/Trigger` services set modes idempotently:
+
+```bash
+ros2 service call /arm/set_normal_mode std_srvs/srv/Trigger '{}'
+ros2 service call /arm/set_impedance_mode std_srvs/srv/Trigger '{}'
+ros2 service call /arm/set_admittance_mode std_srvs/srv/Trigger '{}'
+```
+
+Each response uses `success` plus a schema-v1 JSON `message` containing
+`requested_mode`, `active_mode`, `changed`, and a human-readable message.
+Cross-mode requests retain the normal-mode intermediate transition. There is
+deliberately no public hybrid-mode service. A transient-local schema-v1 JSON
+snapshot on `/arm/interaction_state` exposes the actual mode, public
+`available_modes`, configured service names, backend selections, readiness,
+connection, emergency-stop, and dry-run state. It may report `hybrid` when the
+keyboard entered that mode, but `hybrid` is never listed as requestable.
+
 The low-gain MIT reference path is based on the hardware-validated
 `nero_admittance_mit` chain:
 `wrench -> admittance twist -> bounded screw-Jacobian velocity IK ->
