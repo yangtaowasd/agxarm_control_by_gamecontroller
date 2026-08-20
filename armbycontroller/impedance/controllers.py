@@ -38,6 +38,7 @@ class JointMitController:
         dynamics_model=None,
         model_scale=1.0,
         position_tolerance=0.0,
+        torque_rate_limit=None,
     ):
         self.joint_count = int(joint_count)
         self.kp = _joint_vector(kp, self.joint_count, "kp")
@@ -65,7 +66,7 @@ class JointMitController:
             )
         )
         self.mit_envelope = MitTorqueEnvelope(
-            self.kp, self.kd, self.torque_limit
+            self.kp, self.kd, self.torque_limit, torque_rate_limit
         )
         self.cycle_guard = ControlCycleGuard(
             self.joint_count,
@@ -78,6 +79,9 @@ class JointMitController:
     def reset(self, state):
         if state.joint_count != self.joint_count:
             raise ValueError("joint controller reset size mismatch")
+        self.mit_envelope.reset(
+            state.effort if state.effort_valid else None
+        )
 
     def step(self, sample):
         self.cycle_guard.validate(sample)
@@ -102,6 +106,7 @@ class JointMitController:
             state.velocity,
             model_torque,
             reject_infeasible=combined_limit_active,
+            period=sample.period,
         )
         signals = {
             "model_torque": model_torque,
@@ -139,6 +144,7 @@ class CartesianImpedanceController:
         damping,
         torque_limit,
         *,
+        torque_rate_limit=None,
         nullspace_stiffness=None,
         nullspace_damping=None,
         nullspace_enabled=False,
@@ -175,6 +181,7 @@ class CartesianImpedanceController:
             np.zeros(self.joint_count),
             np.zeros(self.joint_count),
             self.torque_limit,
+            torque_rate_limit,
         )
         self.cycle_guard = ControlCycleGuard(
             self.joint_count,
@@ -224,6 +231,9 @@ class CartesianImpedanceController:
         self._reference_position = None
         self._reference_pose = None
         self._reference_jacobian = None
+        self.mit_envelope.reset(
+            state.effort if state.effort_valid else None
+        )
 
     def step(self, sample):
         state = sample.state
@@ -283,6 +293,7 @@ class CartesianImpedanceController:
             state.position,
             state.velocity,
             raw_command_torque,
+            period=sample.period,
         )
         signals = {
             "pose_error": raw.pose_error,

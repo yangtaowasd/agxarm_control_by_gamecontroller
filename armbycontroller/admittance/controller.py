@@ -49,6 +49,7 @@ class CartesianAdmittanceController:
         kd,
         torque_limit,
         *,
+        torque_rate_limit=None,
         model_scale=1.0,
         joint_count=None,
         measured_velocity_limit=None,
@@ -94,7 +95,7 @@ class CartesianAdmittanceController:
             self.model_scale,
         )
         self.mit_envelope = MitTorqueEnvelope(
-            self.kp, self.kd, self.torque_limit
+            self.kp, self.kd, self.torque_limit, torque_rate_limit
         )
         self.cycle_guard = ControlCycleGuard(
             self.joint_count,
@@ -124,6 +125,9 @@ class CartesianAdmittanceController:
             )
         self.admittance.reset(self.model.forward_kinematics(state.position))
         self.measured_velocity_guard.reset()
+        self.mit_envelope.reset(
+            state.effort if state.effort_valid else None
+        )
 
     def step(self, sample):
         state = sample.state
@@ -151,6 +155,7 @@ class CartesianAdmittanceController:
             state.position,
             state.velocity,
             compensation.requested_torque,
+            period=sample.period,
         )
         commanded_pose = self.model.forward_kinematics(reference_position)
         command = torque.command

@@ -22,6 +22,7 @@ class InteractionSafetyLimits:
         measured_velocity_hard_limit,
         measured_velocity_violation_cycles,
         joint_limit_margin,
+        torque_rate_limit=None,
     ):
         torque = np.asarray(torque_limit, dtype=float)
         if torque.ndim != 1 or torque.size < 1:
@@ -34,6 +35,11 @@ class InteractionSafetyLimits:
             raise ValueError(
                 "interaction torque limits must be in (0, 8] N.m"
             )
+        self.torque_rate_limit = self._positive_vector(
+            np.full(self.joint_count, 20.0)
+            if torque_rate_limit is None else torque_rate_limit,
+            "torque_rate_limit",
+        )
         self.reference_velocity_limit = self._positive_vector(
             reference_velocity_limit, "reference_velocity_limit"
         )

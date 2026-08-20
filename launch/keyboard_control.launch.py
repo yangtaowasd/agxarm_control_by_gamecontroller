@@ -14,6 +14,7 @@ from armbycontroller.modeling.screw_model import project_gravity_vector
 COMMON = {
     "can_interface": "can0",
     "execute_motion": "true",
+    "disable_arm_on_shutdown": "false",
     "dynamics_state_topic": "/arm_dynamics_state",
     "external_torque_topic": "/arm_external_joint_torque",
     "control_sample_topic": "/arm_control_sample",
@@ -24,7 +25,7 @@ COMMON = {
     "admittance_mode_service": "/arm/set_admittance_mode",
     "joint_acc_timeout": "2.0",
     "position_mode_timeout": "2.0",
-    "reset_emergency_stop_on_start": "true",
+    "reset_emergency_stop_on_start": "false",
     "emergency_reset_timeout": "5.0",
 }
 OBSERVER = {
@@ -41,7 +42,7 @@ OPTIONAL = {
     "gravity_urdf_path": "",
 }
 STARTUP = {
-    "move_home_on_start": "true",
+    "move_home_on_start": "false",
     "startup_home_timeout": "30.0",
     "startup_home_tolerance": "0.01",
 }
@@ -67,6 +68,7 @@ CONFIGURED_PARAMETERS = {
     "mit_gravity_compensation_enabled",
     "mit_gravity_scale",
     "interaction_torque_limit",
+    "interaction_torque_rate_limit",
     "interaction_reference_joint_velocity_limit",
     "interaction_measured_joint_velocity_stop_limit",
     "interaction_measured_joint_velocity_hard_limit",

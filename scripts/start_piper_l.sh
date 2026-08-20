@@ -41,5 +41,5 @@ exec ros2 launch armbycontroller keyboard_control.launch.py \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
   move_home_on_start:=false \
-  reset_emergency_stop_on_start:=true \
+  reset_emergency_stop_on_start:=false \
   "$@"

@@ -81,7 +81,20 @@ if(BUILD_TESTING)
   # carry separate LICENSE/CONTRIBUTING files. Keep functional/style linters
   # enabled while skipping the file-presence copyright linter.
   set(ament_cmake_copyright_FOUND TRUE)
+  # Register the C/CMake linters with explicit source paths. This prevents an
+  # in-source colcon build directory from being mistaken for project source.
+  set(AMENT_LINT_AUTO_EXCLUDE
+    ament_cmake_cpplint
+    ament_cmake_lint_cmake
+    ament_cmake_uncrustify
+  )
   ament_lint_auto_find_test_dependencies()
+  find_package(ament_cmake_cpplint REQUIRED)
+  find_package(ament_cmake_lint_cmake REQUIRED)
+  find_package(ament_cmake_uncrustify REQUIRED)
+  ament_cpplint(src)
+  ament_lint_cmake(CMakeLists.txt)
+  ament_uncrustify(src)
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   ament_add_pytest_test(arm_control_test
     test/test_arm_control.py

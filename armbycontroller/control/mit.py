@@ -86,6 +86,8 @@ class MitTorqueResult:
     feasible: bool
     saturation_reason: str
     torque_limit: np.ndarray
+    rate_limited: bool = False
+    torque_rate_limit: np.ndarray | None = None
 
     def signals(
         self,
@@ -134,13 +136,15 @@ class MitTorqueResult:
             "torque_saturated": self.saturated,
             "torque_feasible": self.feasible,
             "torque_saturation_reason": self.saturation_reason,
+            "torque_rate_limited": self.rate_limited,
+            "torque_rate_limit": self.torque_rate_limit,
         }
 
 
 class MitTorqueEnvelope:
-    """Build MIT commands under one absolute estimated-torque limit."""
+    """Build MIT commands under absolute and optional torque-rate limits."""
 
-    def __init__(self, kp, kd, torque_limit):
+    def __init__(self, kp, kd, torque_limit, torque_rate_limit=None):
         kp = np.asarray(kp, dtype=float)
         if kp.ndim != 1 or kp.size < 1:
             raise ValueError("kp must be a finite joint vector")
@@ -158,6 +162,35 @@ class MitTorqueEnvelope:
             raise ValueError(
                 "MIT gains must be nonnegative and torque limits positive"
             )
+        self.torque_rate_limit = (
+            None
+            if torque_rate_limit is None
+            else _joint_vector(
+                torque_rate_limit, self.joint_count, "torque_rate_limit"
+            )
+        )
+        if (
+            self.torque_rate_limit is not None
+            and np.any(self.torque_rate_limit <= 0.0)
+        ):
+            raise ValueError("MIT torque-rate limits must be positive")
+        self.previous_torque = None
+
+    def reset(self, initial_torque=None):
+        """Reset rate history from measured torque or a zero-torque start."""
+        if self.torque_rate_limit is None:
+            self.previous_torque = None
+            return
+        initial = (
+            np.zeros(self.joint_count)
+            if initial_torque is None
+            else _joint_vector(
+                initial_torque, self.joint_count, "initial_torque"
+            )
+        )
+        self.previous_torque = np.clip(
+            initial, -self.torque_limit, self.torque_limit
+        )
 
     def command(
         self,
@@ -168,6 +201,7 @@ class MitTorqueEnvelope:
         feedforward,
         *,
         reject_infeasible=True,
+        period=None,
     ):
         """Return one bounded MIT command and its torque decomposition."""
         size = self.joint_count
@@ -201,21 +235,61 @@ class MitTorqueEnvelope:
             self.kd,
             self.torque_limit,
         )
-        feasible = bool(np.all(
+        absolute_feasible = bool(np.all(
             np.abs(estimated) <= self.torque_limit + 1e-9
         ))
-        saturated = bool(not np.allclose(
+        absolute_saturated = bool(not np.allclose(
             bounded_feedforward, feedforward, atol=1e-12, rtol=0.0
         ))
-        reason = (
-            "none"
-            if not saturated
-            else "total_limit" if feasible else "feedback_uncontrollable"
-        )
-        if reject_infeasible and not feasible:
+        if reject_infeasible and not absolute_feasible:
             raise ControlSafetyError(
                 "MIT feedback alone exceeds the torque limit"
             )
+        rate_limited = False
+        rate_feasible = True
+        if self.torque_rate_limit is not None:
+            if period is None or not np.isfinite(period) or period <= 0.0:
+                raise ValueError(
+                    "period must be finite and positive with torque-rate limits"
+                )
+            if self.previous_torque is None:
+                self.reset()
+            delta = self.torque_rate_limit * float(period)
+            rate_target = np.clip(
+                estimated,
+                self.previous_torque - delta,
+                self.previous_torque + delta,
+            )
+            rate_limited = bool(not np.allclose(
+                rate_target, estimated, atol=1e-12, rtol=0.0
+            ))
+            bounded_feedforward = np.clip(
+                rate_target - feedback,
+                -self.torque_limit,
+                self.torque_limit,
+            )
+            estimated = feedback + bounded_feedforward
+            rate_feasible = bool(np.all(
+                np.abs(estimated - self.previous_torque) <= delta + 1e-9
+            ))
+            if reject_infeasible and not rate_feasible:
+                raise ControlSafetyError(
+                    "MIT feedback alone exceeds the torque-rate limit",
+                    reason="torque_rate_infeasible",
+                )
+            self.previous_torque = estimated.copy()
+        feasible = absolute_feasible and rate_feasible
+        saturated = absolute_saturated or rate_limited
+        if not feasible:
+            reason = "feedback_uncontrollable"
+        elif absolute_saturated and rate_limited:
+            reason = "total_and_rate_limit"
+        elif absolute_saturated:
+            reason = "total_limit"
+        elif rate_limited:
+            reason = "torque_rate_limit"
+        else:
+            reason = "none"
         command = MitCommand(
             reference_position,
             reference_velocity,
@@ -233,4 +307,6 @@ class MitTorqueEnvelope:
             feasible,
             reason,
             self.torque_limit,
+            rate_limited,
+            None if self.torque_rate_limit is None else self.torque_rate_limit,
         )

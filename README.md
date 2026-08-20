@@ -78,10 +78,10 @@ remains unchanged.
 
 `model_scale` is a scalar or per-joint vector in `[0, 1]`; it is independent
 from task/nullspace/posture gains and defaults to `1.0`. `tau_cmd` is the
-immediate, stateless equation result. The MIT adapter applies only a per-joint
-absolute limit (±8 N·m by default, including model support and posture
-torque). It does not apply a previous-cycle torque-rate limiter (`delta_tau`
-or `delta_tau_max`).
+immediate formula result. The shared MIT envelope applies a per-joint absolute
+limit (±8 N·m by default, including model support and posture torque) and an
+estimated-total-torque slew limit (`interaction_torque_rate_limit`, default
+`20 N·m/s`). Rate history is reset from measured motor torque on mode entry.
 
 ## Passive momentum observer and Cartesian admittance
 
@@ -124,7 +124,10 @@ pullback toward an old joint target. `dq_ref` is capped at `1.0 rad/s` per
 joint. On Nero, measured speed above `2.0 rad/s` for three consecutive 100 Hz
 cycles, or above the `2.5 rad/s` hard limit once, triggers the electronic stop
 (Piper-L keeps a `1.5 rad/s` sustained threshold).
-Estimated MIT total torque is capped at `8 N·m`. The separate
+Estimated MIT total torque is capped at `8 N·m` and slewed at `20 N·m/s` by
+default. If observer wrench data or its source timestamp exceeds the `0.10 s`
+freshness window, admittance or hybrid control exits to a measured-position
+hold; failure to confirm that handoff triggers the electronic stop. The separate
 `armbycontroller/admittance/`
 package provides two explicit modes:
 
@@ -151,8 +154,9 @@ one command stream. `hybrid_desired_wrench` uses
 
 All MIT interaction modes now use the same `interaction_*` joint-safety
 configuration. The shared defaults are an `8 N.m` estimated-total-torque
-limit, `1.0 rad/s` reference-speed limit, `2.5 rad/s` immediate measured-speed
-stop, three-cycle sustained-speed debounce, and `0.03 rad` joint-limit margin.
+limit, `20 N.m/s` estimated-total-torque rate limit, `1.0 rad/s`
+reference-speed limit, `2.5 rad/s` immediate measured-speed stop, three-cycle
+sustained-speed debounce, and `0.03 rad` joint-limit margin.
 The sustained measured-speed threshold is `2.0 rad/s` on Nero and `1.5 rad/s`
 on Piper-L. Admittance-specific wrench, virtual Twist, and offset bounds remain
 separate because they are task-space control-law parameters.
@@ -168,7 +172,8 @@ validation, tool-origin geometric Jacobian, and `tau=Jg.T*wrench` mappings.
 Model Compensation selects gravity, bias, or full inverse dynamics.
 Interaction Safety Limits validates the shared torque, speed, and joint-limit
 boundaries once. The MIT Safety Envelope checks feedback feasibility and caps
-feedforward against the estimated total-torque limit. The Control Cycle Guard
+feedforward against both estimated total-torque and torque-rate limits. The
+Control Cycle Guard
 validates feedback, period, position, and velocity. The Interaction Mode
 Lifecycle enforces the normal-mode intermediate transition. The bounded
 screw-Jacobian velocity IK lives beside the full-pose solver in
@@ -178,7 +183,8 @@ All MIT adapters expose the same torque diagnostics:
 `torque_feedback`, `torque_model_requested`, `torque_task_requested`,
 `torque_auxiliary_requested`, `torque_feedforward_requested`,
 `torque_feedforward_sent`, `torque_total_requested`,
-`torque_total_estimated`, and `torque_saturation_reason`. Joint MIT requests
+`torque_total_estimated`, `torque_rate_limited`, `torque_rate_limit`, and
+`torque_saturation_reason`. Joint MIT requests
 full inverse dynamics, Cartesian impedance requests bias compensation, and
 Cartesian admittance requests gravity compensation.
 
@@ -285,9 +291,10 @@ Start the required robot directly:
 ./scripts/start_piper_l.sh
 ```
 
-The robot scripts configure CAN but do not automatically move home. For the
-explicit real-hardware workflow they reset a latched electronic stop before
-enabling; physically inspect the arm and clear its workspace before starting.
+The robot scripts configure CAN but do not automatically move home or reset a
+latched electronic stop. If the arm reports an electronic stop, startup remains
+disabled until the operator inspects the arm and explicitly adds
+`reset_emergency_stop_on_start:=true`.
 CAN setup uses `sudo` when the current user is not root. The scripts use the
 interactive terminal to select either the X11 keyboard backend for NoMachine
 or a local `/dev/input/eventN` evdev keyboard. In non-interactive use they
@@ -295,7 +302,7 @@ default to X11. Pass `device:=x11` or `device:=/dev/input/eventN` to skip the
 menu. Local evdev selection accepts `3`, `event3`, or `/dev/input/event3`;
 `device:=3` is also expanded to `/dev/input/event3`. Any launch setting can be
 overridden as a trailing argument, for example
-`./scripts/start_nero.sh reset_emergency_stop_on_start:=false`.
+`./scripts/start_nero.sh reset_emergency_stop_on_start:=true`.
 
 ## Build
 
@@ -352,8 +359,9 @@ The Cartesian backend uses the SDK equation
 firmware does not add a second joint spring or damper. `tau_null` is nonzero
 only for Nero; the unprojected `tau_posture` is configured only on Nero
 J2/J3/J4. A continuous joint reference supplies the target pose, target twist,
-nullspace posture, and joint-posture reference; this reference continuity is
-not a torque-rate limiter.
+nullspace posture, and joint-posture reference. The shared MIT envelope then
+applies the independent torque-rate limit; reference continuity remains
+necessary and is not replaced by that final safety bound.
 
 Piper-L kinematics and inverse dynamics both use
 `piper_l_with_gripper_description.xacro`. Accessory joints are fixed at their
@@ -411,7 +419,7 @@ ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=nero device:=/dev/input/event3 \
   can_interface:=can0 execute_motion:=true \
   nero_mount:=horizontal \
-  move_home_on_start:=false reset_emergency_stop_on_start:=true
+  move_home_on_start:=false reset_emergency_stop_on_start:=false
 ```
 
 The YAML default remains the project's `pitch=-90°` side-mount convention
@@ -463,17 +471,21 @@ Acceleration limits are written and verified one joint at a time because the
 Piper S-V1.8-8 batch (`joint_index=255`) ACK path is unreliable.
 The controller also waits for `CAN_CTRL/MOVE_J` feedback before sending the
 first startup target so Piper does not discard it during a mode transition.
-Real-hardware launch explicitly resets a latched electronic stop, enables the
-joints, and forces them to zero strictly in joint order from 1 through the
-final joint. Each joint must reach zero before the next command is sent. Use
-`reset_emergency_stop_on_start:=false move_home_on_start:=false` to preserve
-the current state instead. Only use automatic homing when the complete path to
-zero is clear. `firmware:=auto` uses the two-stage hardware result. An explicit
+Real-hardware launch preserves a latched electronic stop and the current joint
+position by default. Explicit automatic homing moves joints to zero strictly in
+order and refuses to start if feedback is outside configured soft limits; it
+never disables joint limits. Only use it when the complete path to zero is
+clear. Any homing timeout triggers the electronic stop. `firmware:=auto` uses
+the two-stage hardware result. An explicit
 firmware argument is checked and reported, but the detected hardware profile
 wins for the formal connection; it remains the profile used by dry-run mode.
 If the arm reports a latched electronic emergency stop, normal startup refuses
 to move. After physically checking the arm, explicitly add
 `reset_emergency_stop_on_start:=true` to reset the controller before enabling.
+Initialization failures after an enable request actively disable the arm, and
+homing timeouts trigger the electronic stop. Graceful shutdown disconnects
+without sending `disable()` so another controller can take over. Set
+`disable_arm_on_shutdown:=true` when shutdown must explicitly disable the arm.
 
 ## RViz pose simulation
 

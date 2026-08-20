@@ -66,6 +66,7 @@ class HybridCartesianController:
         kd,
         torque_limit,
         *,
+        torque_rate_limit=None,
         admittance_axes="z",
         desired_wrench=None,
         model_scale=1.0,
@@ -111,7 +112,9 @@ class HybridCartesianController:
         )
         if np.any(torque_limit > HYBRID_MIT_TORQUE_LIMIT_MAX):
             raise ValueError("hybrid torque limits must be in (0, 8] N.m")
-        self.mit_envelope = MitTorqueEnvelope(kp, kd, torque_limit)
+        self.mit_envelope = MitTorqueEnvelope(
+            kp, kd, torque_limit, torque_rate_limit
+        )
         self.model_compensator = ModelCompensator(
             model, self.joint_count, "bias", model_scale
         )
@@ -161,6 +164,9 @@ class HybridCartesianController:
         self.anchor_pose = self.model.forward_kinematics(state.position)
         self.admittance.reset(self.anchor_pose)
         self.measured_velocity_guard.reset()
+        self.mit_envelope.reset(
+            state.effort if state.effort_valid else None
+        )
 
     def step(self, sample):
         """Evaluate one Twist-admittance and complementary-impedance cycle."""
@@ -222,6 +228,7 @@ class HybridCartesianController:
             state.position,
             state.velocity,
             feedforward,
+            period=sample.period,
         )
         commanded_pose = self.model.forward_kinematics(reference_position)
         signals = {

@@ -485,13 +485,14 @@ class ArmKeyboardController(Node):
         self.declare_parameter("keyboard_timeout", 0.3)
         self.declare_parameter("enable_timeout", 5.0)
         self.declare_parameter("feedback_timeout", 3.0)
-        self.declare_parameter("move_home_on_start", True)
+        self.declare_parameter("move_home_on_start", False)
         self.declare_parameter("startup_home_timeout", 30.0)
         self.declare_parameter("startup_home_tolerance", 0.01)
         self.declare_parameter("clear_errors_on_enable", True)
-        self.declare_parameter("reset_emergency_stop_on_start", True)
+        self.declare_parameter("reset_emergency_stop_on_start", False)
         self.declare_parameter("emergency_reset_timeout", 5.0)
         self.declare_parameter("execute_motion", True)
+        self.declare_parameter("disable_arm_on_shutdown", False)
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("tip_link", "")
@@ -513,6 +514,9 @@ class ArmKeyboardController(Node):
         scalar_or_array = ParameterDescriptor(dynamic_typing=True)
         self.declare_parameter(
             "interaction_torque_limit", [8.0], scalar_or_array
+        )
+        self.declare_parameter(
+            "interaction_torque_rate_limit", [20.0], scalar_or_array
         )
         self.declare_parameter(
             "interaction_reference_joint_velocity_limit",
@@ -743,6 +747,9 @@ class ArmKeyboardController(Node):
             self.get_parameter("emergency_reset_timeout").value
         )
         self.execute_motion = bool(self.get_parameter("execute_motion").value)
+        self.disable_arm_on_shutdown = bool(
+            self.get_parameter("disable_arm_on_shutdown").value
+        )
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tip_link = (
             str(self.get_parameter("tip_link").value)
@@ -794,6 +801,11 @@ class ArmKeyboardController(Node):
                 self.get_parameter("interaction_torque_limit").value,
                 self.joint_count,
                 "interaction_torque_limit",
+            ),
+            torque_rate_limit=expand_joint_values(
+                self.get_parameter("interaction_torque_rate_limit").value,
+                self.joint_count,
+                "interaction_torque_rate_limit",
             ),
             reference_velocity_limit=expand_joint_values(
                 self.get_parameter(
@@ -1333,6 +1345,9 @@ class ArmKeyboardController(Node):
         self.arm_connected = False
         self.arm_ready = False
         self.emergency_stopped = False
+        self.interaction_transitioning = False
+        self.interaction_transition_target = ""
+        self.interaction_fault_reason = ""
         self.last_mit_tick_time = None
         self.admittance_enabled = False
         self.hybrid_enabled = False
@@ -1351,6 +1366,7 @@ class ArmKeyboardController(Node):
         self.feedback_previous_time = None
         self.latest_external_wrench = np.zeros(6)
         self.latest_external_wrench_received_at = -math.inf
+        self.latest_external_wrench_source_time = -math.inf
 
         self.keyboard_sub = self.create_subscription(
             Int32MultiArray,
@@ -1458,6 +1474,11 @@ class ArmKeyboardController(Node):
                     "joint_limit_margin",
                     0.0,
                 ),
+                torque_rate_limit=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "torque_rate_limit",
+                    None,
+                ),
             ))
 
         model = getattr(self, "gravity_model", None)
@@ -1476,6 +1497,11 @@ class ArmKeyboardController(Node):
                 self.cartesian_stiffness,
                 self.cartesian_damping,
                 self.cartesian_torque_limit,
+                torque_rate_limit=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "torque_rate_limit",
+                    None,
+                ),
                 nullspace_stiffness=getattr(
                     self, "cartesian_nullspace_stiffness", None
                 ),
@@ -1533,6 +1559,11 @@ class ArmKeyboardController(Node):
                 self.admittance_mit_kp,
                 self.admittance_mit_kd,
                 self.admittance_mit_torque_limit,
+                torque_rate_limit=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "torque_rate_limit",
+                    None,
+                ),
                 model_scale=getattr(
                     self, "admittance_mit_model_scale", 1.0
                 ),
@@ -1577,6 +1608,11 @@ class ArmKeyboardController(Node):
                 self.admittance_mit_kp,
                 self.admittance_mit_kd,
                 self.admittance_mit_torque_limit,
+                torque_rate_limit=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "torque_rate_limit",
+                    None,
+                ),
                 admittance_axes=self.hybrid_admittance_axes,
                 desired_wrench=self.hybrid_desired_wrench,
                 model_scale=self.cartesian_model_scale,
@@ -1731,6 +1767,15 @@ class ArmKeyboardController(Node):
             emergency_stopped=bool(
                 getattr(self, "emergency_stopped", False)
             ),
+            interaction_transitioning=bool(
+                getattr(self, "interaction_transitioning", False)
+            ),
+            interaction_transition_target=str(
+                getattr(self, "interaction_transition_target", "")
+            ),
+            interaction_fault_reason=str(
+                getattr(self, "interaction_fault_reason", "")
+            ),
             execute_motion=bool(getattr(self, "execute_motion", False)),
             mode_services={
                 "normal": getattr(
@@ -1832,6 +1877,7 @@ class ArmKeyboardController(Node):
 
     def connect_arm(self):
         self.device_firmware_info = {}
+        enabled = False
 
         if not self.execute_motion:
             config = create_agx_arm_config(
@@ -1883,7 +1929,9 @@ class ArmKeyboardController(Node):
                 return
             if not self.enable_arm():
                 self.get_logger().error("enable timed out; motion is disabled")
+                self._disable_after_initialization_failure("enable timeout")
                 return
+            enabled = True
             limits_ok, failed_joint = set_joint_acceleration_limits(
                 self.arm,
                 self.joint_count,
@@ -1894,6 +1942,9 @@ class ArmKeyboardController(Node):
                 self.get_logger().error(
                     "failed to set/read back acceleration limit for joint "
                     f"{failed_joint}"
+                )
+                self._disable_after_initialization_failure(
+                    "joint acceleration limit verification failed"
                 )
                 return
             self.get_logger().info(
@@ -1907,6 +1958,9 @@ class ArmKeyboardController(Node):
                 self.get_logger().error(
                     "CAN_CTRL/MOVE_J mode timed out; motion is disabled"
                 )
+                self._disable_after_initialization_failure(
+                    "planned joint mode was not confirmed"
+                )
                 return
             self.get_logger().info(
                 "planned joint mode confirmed: CAN_CTRL/MOVE_J"
@@ -1916,6 +1970,9 @@ class ArmKeyboardController(Node):
                 self.get_logger().error(
                     f"no complete {self.joint_count}-joint feedback; "
                     "motion is disabled for safety"
+                )
+                self._disable_after_initialization_failure(
+                    "complete startup feedback is unavailable"
                 )
                 return
             self.jog.sync_target(joints, clamp_to_limits=False)
@@ -1940,6 +1997,9 @@ class ArmKeyboardController(Node):
                 self.get_logger().error(
                     "startup home was not reached; keyboard motion is disabled"
                 )
+                self._disable_after_initialization_failure(
+                    "startup home was not reached"
+                )
                 return
             self.arm_ready = True
         except Exception as exc:
@@ -1947,6 +2007,32 @@ class ArmKeyboardController(Node):
             self.get_logger().error(
                 f"failed to initialize {self.robot_model}: {exc}"
             )
+            if enabled:
+                self._disable_after_initialization_failure(
+                    f"initialization exception: {exc}"
+                )
+
+    def _disable_after_initialization_failure(self, reason):
+        """Fail closed after a formal arm instance may have been enabled."""
+        self.arm_ready = False
+        if (
+            not self.execute_motion
+            or self.arm is None
+            or getattr(self, "emergency_stopped", False)
+        ):
+            return
+        try:
+            disabled = self.arm.disable()
+            if disabled is False:
+                raise RuntimeError("arm.disable() returned false")
+            self.get_logger().warning(
+                f"arm disabled after initialization failure: {reason}"
+            )
+        except Exception as error:
+            self.get_logger().error(
+                f"disable failed after initialization failure: {error}"
+            )
+            self.trigger_emergency_stop()
 
     def arm_reports_emergency_stop(self):
         status = self.arm.get_arm_status()
@@ -2027,9 +2113,15 @@ class ArmKeyboardController(Node):
         return None
 
     def move_home_and_wait(self):
-        joints = extract_joint_angles(
-            self.arm.get_joint_angles(), self.joint_count
-        )
+        try:
+            joints = extract_joint_angles(
+                self.arm.get_joint_angles(), self.joint_count
+            )
+        except Exception as error:
+            self.get_logger().error(
+                f"cannot read feedback before startup zeroing: {error}"
+            )
+            return False
         if joints is None:
             self.get_logger().error(
                 "cannot start sequential zeroing without joint feedback"
@@ -2037,10 +2129,20 @@ class ArmKeyboardController(Node):
             return False
 
         target = list(joints)
-        limits_were_enabled = self.arm.get_joint_limits_enabled()
-        # Preserve every non-active joint at its raw feedback position, even
-        # when startup begins slightly outside the configured soft limits.
-        self.arm.set_joint_limits_enabled(False)
+        outside = [
+            index
+            for index, (value, (low, high)) in enumerate(
+                zip(joints, self.joint_limits), start=1
+            )
+            if value < low or value > high
+        ]
+        if outside:
+            self.get_logger().error(
+                "startup zeroing refused because feedback is outside soft "
+                f"limits on joints {outside}"
+            )
+            return False
+        motion_started = False
         try:
             for index in range(self.joint_count):
                 target[index] = 0.0
@@ -2049,6 +2151,7 @@ class ArmKeyboardController(Node):
                     f"{self.joint_count}: "
                     f"{[round(value, 4) for value in target]}"
                 )
+                motion_started = True
                 self.arm.move_j(list(target))
                 deadline = time.monotonic() + self.startup_home_timeout
 
@@ -2069,14 +2172,18 @@ class ArmKeyboardController(Node):
                     self.get_logger().error(
                         f"joint {index + 1} sequential zero timed out"
                     )
+                    self.trigger_emergency_stop()
                     return False
 
             home = [0.0] * self.joint_count
             self.jog.sync_target(home)
             self.get_logger().info("sequential startup zero complete")
             return True
-        finally:
-            self.arm.set_joint_limits_enabled(limits_were_enabled)
+        except Exception as error:
+            self.get_logger().error(f"startup zeroing failed: {error}")
+            if motion_started:
+                self.trigger_emergency_stop()
+            return False
 
     def control_tick(self):
         keys = self.key_state
@@ -2112,6 +2219,8 @@ class ArmKeyboardController(Node):
             self.trigger_emergency_stop()
             return
         if self.emergency_stopped:
+            return
+        if getattr(self, "interaction_transitioning", False):
             return
 
         interaction_requests = sum((
@@ -2230,25 +2339,21 @@ class ArmKeyboardController(Node):
             )
             return
         backend = getattr(self, "impedance_backend", "joint")
+        feedback = None
         if self.execute_motion:
             if not self.arm_ready:
                 self.get_logger().error(
                     "cannot enter MIT: arm is not ready"
                 )
                 return
-            joints = None
-            try:
-                joints = extract_joint_angles(
-                    self.arm.get_joint_angles(), self.joint_count
-                )
-            except Exception:
-                pass
-            velocities = self.read_joint_velocities()
-            if joints is None or velocities is None:
+            feedback = self.read_motor_feedback()
+            if feedback is None:
                 self.get_logger().error(
-                    "cannot enter MIT: complete q/dq feedback is required"
+                    "cannot enter MIT: complete q/dq/torque feedback is required"
                 )
                 return
+            joints = feedback.position
+            velocities = feedback.velocity
             if self.gravity_model is None:
                 self.get_logger().error(
                     "cannot enter MIT: URDF inverse dynamics is unavailable"
@@ -2321,10 +2426,12 @@ class ArmKeyboardController(Node):
         ):
             state = ControlState(
                 joints,
-                np.zeros(self.joint_count),
-                np.zeros(self.joint_count),
-                velocity_valid=False,
-                effort_valid=False,
+                feedback.velocity
+                if feedback is not None else np.zeros(self.joint_count),
+                feedback.torque
+                if feedback is not None else np.zeros(self.joint_count),
+                velocity_valid=feedback is not None,
+                effort_valid=feedback is not None,
             )
             self._get_control_engine(selected).reset(selected, state)
         if backend == "cartesian":
@@ -2355,20 +2462,29 @@ class ArmKeyboardController(Node):
         )
         self.mit_tick()
 
-    def _exit_impedance(self, reason):
+    def _exit_impedance(self, reason, feedback=None):
         """Restore planned control before committing the normal mode."""
         if not getattr(self, "impedance_enabled", False):
             return True
-        joints = self.current_or_target_joints()
-        self.jog.sync_target(joints, clamp_to_limits=False)
-        if self.execute_motion and not prepare_planned_joint_mode(
-            self.arm, self.position_mode_timeout
-        ):
-            self.get_logger().error(
-                "failed to restore planned joint mode after MIT exit"
-            )
+        self._begin_interaction_transition("normal", reason)
+        joints = self._interaction_exit_joints("impedance", feedback)
+        if joints is None:
             return False
+        self.jog.sync_target(joints, clamp_to_limits=False)
+        try:
+            restored = not self.execute_motion or prepare_planned_joint_mode(
+                self.arm, self.position_mode_timeout
+            )
+        except Exception as error:
+            return self._fail_interaction_transition(
+                f"planned joint mode failed during impedance exit: {error}"
+            )
+        if not restored:
+            return self._fail_interaction_transition(
+                "planned joint mode was not confirmed after impedance exit"
+            )
         self._commit_interaction_mode("normal")
+        self._complete_interaction_transition()
         self._check_interaction_mode_invariant()
         backend = getattr(self, "impedance_backend", "joint")
         self.get_logger().info("backend=planned position control")
@@ -2378,6 +2494,7 @@ class ArmKeyboardController(Node):
             reason=str(reason),
         )
         self.send_target(f"MIT exit hold ({reason})")
+        self._publish_interaction_state("mode_exit_complete")
         return True
 
     def _enter_normal_interaction_mode(self, reason):
@@ -2399,6 +2516,58 @@ class ArmKeyboardController(Node):
                 self._check_interaction_mode_invariant()
             return restored
         return True
+
+    def _begin_interaction_transition(self, target, reason):
+        """Suppress control output while hardware mode ownership changes."""
+        self.interaction_transitioning = True
+        self.interaction_transition_target = str(target)
+        self._publish_control_event(
+            "mode_transition_started", target=str(target), reason=str(reason)
+        )
+        self._publish_interaction_state("mode_transition_started")
+
+    def _complete_interaction_transition(self):
+        self.interaction_transitioning = False
+        self.interaction_transition_target = ""
+        self.interaction_fault_reason = ""
+
+    def _fail_interaction_transition(self, reason):
+        """Latch an ambiguous transition as a fault and stop the hardware."""
+        self.interaction_transitioning = False
+        self.interaction_fault_reason = str(reason)
+        self.get_logger().error(str(reason))
+        self._publish_control_event(
+            "mode_transition_failed",
+            target=getattr(self, "interaction_transition_target", ""),
+            reason=str(reason),
+        )
+        self.trigger_emergency_stop()
+        return False
+
+    def _interaction_exit_joints(self, mode, feedback=None):
+        """Require a fresh complete sample before handing MIT back to MOVE_J."""
+        if not self.execute_motion:
+            return self.current_or_target_joints()
+        sample = feedback if feedback is not None else self.read_motor_feedback()
+        if sample is None:
+            self._fail_interaction_transition(
+                f"cannot exit {mode}: fresh q/dq/torque feedback is unavailable"
+            )
+            return None
+        arrays = tuple(
+            np.asarray(getattr(sample, name), dtype=float)
+            for name in ("position", "velocity", "torque")
+        )
+        if any(
+            values.shape != (self.joint_count,)
+            or not np.all(np.isfinite(values))
+            for values in arrays
+        ):
+            self._fail_interaction_transition(
+                f"cannot exit {mode}: feedback sample is incomplete"
+            )
+            return None
+        return arrays[0].copy()
 
     def _check_interaction_mode_invariant(self):
         lifecycle = getattr(self, "interaction_lifecycle", None)
@@ -2434,6 +2603,7 @@ class ArmKeyboardController(Node):
         velocity_guard = getattr(self, "interaction_velocity_guard", None)
         if velocity_guard is not None:
             velocity_guard.reset()
+        self.interaction_fault_reason = ""
         self._publish_interaction_state("mode_committed")
         return active
 
@@ -2471,11 +2641,7 @@ class ArmKeyboardController(Node):
                 "is required"
             )
             return
-        if (
-            self.execute_motion
-            and time.monotonic() - self.latest_external_wrench_received_at
-            > self.admittance_wrench_timeout
-        ):
+        if self.execute_motion and not self._external_wrench_is_fresh():
             self.get_logger().error(
                 "cannot enter admittance: momentum-observer wrench is stale; "
                 "check /arm_external_joint_torque"
@@ -2527,8 +2693,6 @@ class ArmKeyboardController(Node):
         self.remember_ik_valid(
             self.ik_target_position, self.ik_target_rotation, joints
         )
-        self.latest_external_wrench = np.zeros(6)
-        self.latest_external_wrench_received_at = time.monotonic()
         self.last_admittance_tick_time = None
         self._commit_interaction_mode("admittance")
         self._check_interaction_mode_invariant()
@@ -2550,21 +2714,29 @@ class ArmKeyboardController(Node):
         if feedback is not None:
             self._admittance_tick(feedback)
 
-    def _exit_admittance(self, reason):
+    def _exit_admittance(self, reason, feedback=None):
         """Restore planned control before committing the normal mode."""
         if not getattr(self, "admittance_enabled", False):
             return True
-        joints = self.current_or_target_joints()
-        self.jog.sync_target(joints, clamp_to_limits=False)
-        if self.execute_motion and not prepare_planned_joint_mode(
-            self.arm, self.position_mode_timeout
-        ):
-            self.get_logger().error(
-                "failed to restore planned joint mode after admittance MIT "
-                "exit"
-            )
+        self._begin_interaction_transition("normal", reason)
+        joints = self._interaction_exit_joints("admittance", feedback)
+        if joints is None:
             return False
+        self.jog.sync_target(joints, clamp_to_limits=False)
+        try:
+            restored = not self.execute_motion or prepare_planned_joint_mode(
+                self.arm, self.position_mode_timeout
+            )
+        except Exception as error:
+            return self._fail_interaction_transition(
+                f"planned joint mode failed during admittance exit: {error}"
+            )
+        if not restored:
+            return self._fail_interaction_transition(
+                "planned joint mode was not confirmed after admittance exit"
+            )
         self._commit_interaction_mode("normal")
+        self._complete_interaction_transition()
         self.last_admittance_tick_time = None
         model = getattr(self, "gravity_model", None)
         if model is not None:
@@ -2627,11 +2799,7 @@ class ArmKeyboardController(Node):
                 "required"
             )
             return
-        if (
-            self.execute_motion
-            and time.monotonic() - self.latest_external_wrench_received_at
-            > self.admittance_wrench_timeout
-        ):
+        if self.execute_motion and not self._external_wrench_is_fresh():
             self.get_logger().error(
                 "cannot enter hybrid: momentum-observer wrench is stale; "
                 "check /arm_external_joint_torque"
@@ -2683,8 +2851,6 @@ class ArmKeyboardController(Node):
         self.remember_ik_valid(
             self.ik_target_position, self.ik_target_rotation, joints
         )
-        self.latest_external_wrench = np.zeros(6)
-        self.latest_external_wrench_received_at = time.monotonic()
         self.last_hybrid_tick_time = None
         self._commit_interaction_mode("hybrid")
         self._check_interaction_mode_invariant()
@@ -2701,20 +2867,29 @@ class ArmKeyboardController(Node):
         if feedback is not None:
             self._hybrid_tick(feedback)
 
-    def _exit_hybrid(self, reason):
+    def _exit_hybrid(self, reason, feedback=None):
         """Restore planned control before committing the normal mode."""
         if not getattr(self, "hybrid_enabled", False):
             return True
-        joints = self.current_or_target_joints()
-        self.jog.sync_target(joints, clamp_to_limits=False)
-        if self.execute_motion and not prepare_planned_joint_mode(
-            self.arm, self.position_mode_timeout
-        ):
-            self.get_logger().error(
-                "failed to restore planned joint mode after hybrid MIT exit"
-            )
+        self._begin_interaction_transition("normal", reason)
+        joints = self._interaction_exit_joints("hybrid", feedback)
+        if joints is None:
             return False
+        self.jog.sync_target(joints, clamp_to_limits=False)
+        try:
+            restored = not self.execute_motion or prepare_planned_joint_mode(
+                self.arm, self.position_mode_timeout
+            )
+        except Exception as error:
+            return self._fail_interaction_transition(
+                f"planned joint mode failed during hybrid exit: {error}"
+            )
+        if not restored:
+            return self._fail_interaction_transition(
+                "planned joint mode was not confirmed after hybrid exit"
+            )
         self._commit_interaction_mode("normal")
+        self._complete_interaction_transition()
         self.last_hybrid_tick_time = None
         model = getattr(self, "gravity_model", None)
         if model is not None:
@@ -2744,6 +2919,30 @@ class ArmKeyboardController(Node):
         if model is None:
             return
         try:
+            stamp = getattr(getattr(message, "header", None), "stamp", None)
+            source_time = (
+                0.0
+                if stamp is None
+                else float(stamp.sec) + 1e-9 * float(stamp.nanosec)
+            )
+            if source_time > 0.0:
+                previous_source_time = float(getattr(
+                    self, "latest_external_wrench_source_time", -math.inf
+                ))
+                if source_time <= previous_source_time:
+                    raise ValueError("external torque timestamp is not newer")
+                clock = getattr(self, "get_clock", None)
+                if callable(clock):
+                    ros_now = float(clock().now().nanoseconds) * 1e-9
+                    source_age = ros_now - source_time
+                    if (
+                        source_age > self.admittance_wrench_timeout
+                        or source_age < -0.05
+                    ):
+                        raise ValueError(
+                            "external torque timestamp is outside the freshness "
+                            "window"
+                        )
             joints = np.asarray(message.position, dtype=float)
             external_torque = np.asarray(message.effort, dtype=float)
             if (
@@ -2767,6 +2966,20 @@ class ArmKeyboardController(Node):
             return
         self.latest_external_wrench = wrench
         self.latest_external_wrench_received_at = time.monotonic()
+        if source_time > 0.0:
+            self.latest_external_wrench_source_time = source_time
+
+    def _external_wrench_is_fresh(self, now=None):
+        """Distinguish a recent valid sample from a synthetic zero wrench."""
+        checked_at = time.monotonic() if now is None else float(now)
+        received_at = float(getattr(
+            self, "latest_external_wrench_received_at", -math.inf
+        ))
+        age = checked_at - received_at
+        return bool(
+            math.isfinite(age)
+            and 0.0 <= age <= self.admittance_wrench_timeout
+        )
 
     def read_motor_feedback(self):
         """Read one complete cached q/dq/motor-torque sample."""
@@ -2938,6 +3151,8 @@ class ArmKeyboardController(Node):
         """Publish one sample, then run the one active interaction mode."""
         if self.emergency_stopped:
             return
+        if getattr(self, "interaction_transitioning", False):
+            return
         if not self.execute_motion:
             self.get_logger().info(
                 "dry-run interaction backend active",
@@ -3096,12 +3311,13 @@ class ArmKeyboardController(Node):
             ))
         )
         self.last_hybrid_tick_time = now
-        wrench_age = now - self.latest_external_wrench_received_at
-        wrench = (
-            self.latest_external_wrench
-            if wrench_age <= self.admittance_wrench_timeout
-            else np.zeros(6)
-        )
+        if not self._external_wrench_is_fresh(now):
+            self.get_logger().error(
+                "hybrid external wrench timed out; leaving interaction mode"
+            )
+            self._exit_hybrid("external wrench timeout", feedback)
+            return
+        wrench = self.latest_external_wrench
         control_state = ControlState(
             feedback.position, feedback.velocity, feedback.torque
         )
@@ -3203,12 +3419,13 @@ class ArmKeyboardController(Node):
             ))
         )
         self.last_admittance_tick_time = now
-        wrench_age = now - self.latest_external_wrench_received_at
-        wrench = (
-            self.latest_external_wrench
-            if wrench_age <= self.admittance_wrench_timeout
-            else np.zeros(6)
-        )
+        if not self._external_wrench_is_fresh(now):
+            self.get_logger().error(
+                "admittance external wrench timed out; leaving interaction mode"
+            )
+            self._exit_admittance("external wrench timeout", feedback)
+            return
+        wrench = self.latest_external_wrench
         control_state = ControlState(
             feedback.position, feedback.velocity, feedback.torque
         )
@@ -3434,7 +3651,7 @@ class ArmKeyboardController(Node):
         self.get_logger().error("ELECTRONIC EMERGENCY STOP requested")
         self._publish_control_event("emergency_stop")
         self._publish_interaction_state("emergency_stop")
-        if self.execute_motion and self.arm_connected:
+        if self.execute_motion and getattr(self, "arm_connected", False):
             try:
                 self.arm.electronic_emergency_stop()
             except Exception as exc:
@@ -3444,11 +3661,21 @@ class ArmKeyboardController(Node):
 
     def destroy_node(self):
         if self.arm is not None and self.arm_connected:
-            try:
+            if getattr(self, "disable_arm_on_shutdown", False):
+                try:
+                    self.get_logger().info(
+                        "shutdown: disabling arm before disconnect"
+                    )
+                    self.arm.disable()
+                except Exception as exc:
+                    self.get_logger().error(
+                        f"failed to disable {self.robot_model}: {exc}"
+                    )
+            else:
                 self.get_logger().info(
-                    "Ctrl-C shutdown: disconnecting without motion or "
-                    "enable/disable commands"
+                    "shutdown: leaving arm enabled for external takeover"
                 )
+            try:
                 self.arm.disconnect()
             except Exception as exc:
                 self.get_logger().error(

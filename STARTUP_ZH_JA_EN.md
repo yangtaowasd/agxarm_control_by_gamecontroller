@@ -32,8 +32,9 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 选择 `2` 后，设备提示可输入编号（如 `3`）、事件名（如 `event3`）或完整路径
 （如 `/dev/input/event3`）。
 
-直接按回车默认选择 X11。脚本会自动配置 `can0`、检测固件、解除电子急停并使能
-机械臂。启动前请释放物理急停，并确保机械臂周围没有人员或障碍物。
+直接按回车默认选择 X11。脚本会自动配置 `can0`、检测固件，但不会解除已锁存的
+电子急停或自动回零。检查故障原因和机械臂周围环境后，只有明确需要复位时才追加
+`reset_emergency_stop_on_start:=true`。
 
 ### 键盘控制
 
@@ -49,6 +50,7 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 | `PageUp` / `PageDown` | 末端左右倾斜 |
 | `I` | 开关阻抗控制 |
 | `O` | 开关导纳控制 |
+| `H` | 开关混合控制 |
 | `SPACE` | 机械臂回零 |
 | `E` | 电子急停 |
 
@@ -59,14 +61,16 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 - 导纳控制（`O`）：估算外力先生成末端速度，经 PoE 旋量 Jacobian 和工具几何
   Jacobian 的受限加权 DLS 转成关节速度，再由
   低增益 MIT 跟踪。每周期从实测关节位置重新锚定；参考关节速度上限为
-  `0.5 rad/s`，共享重力补偿已开启，估算总力矩上限为 `8 N·m`。Nero 实测关节
-  速度超过 `1.5 rad/s` 连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子
-  急停；Piper-L 的持续阈值为 `1.0 rad/s`。
-- `I` 和 `O` 不能同时开启。阻抗与导纳之间切换时，控制器严格执行
+  `1.0 rad/s`，共享重力补偿已开启，估算总力矩上限为 `8 N·m`，变化率上限为
+  `20 N·m/s`。Nero 实测关节速度超过 `2.0 rad/s` 连续三个控制周期，或任一
+  机械臂单周期超过 `2.5 rad/s`，触发电子急停；Piper-L 的持续阈值为
+  `1.5 rad/s`。力数据超过 `0.10 s` 未更新时，导纳/混合退出到实测位置保持。
+- `I`、`O` 和 `H` 不能同时开启。交互模式之间切换时，控制器严格执行
   `当前模式 -> 普通 planned-position 模式 -> 目标模式`；如果回到普通模式失败，
   则拒绝进入目标模式。再次按下当前模式的按键会回到普通模式。
 
-按 `Ctrl-C` 停止程序。
+按 `Ctrl-C` 默认只断开本控制节点，不发送失能命令，以便远程控制器接管。需要
+退出时明确失能可追加 `disable_arm_on_shutdown:=true`。
 
 ---
 
@@ -103,10 +107,10 @@ Piper-L を起動します。
 `2` を選択した後、デバイス番号（例：`3`）、イベント名（例：`event3`）、
 または完全なパス（例：`/dev/input/event3`）を入力できます。
 
-何も入力せず Enter を押すと X11 が選択されます。スクリプトは `can0` の設定、
-ファームウェア検出、電子非常停止の解除、アームの有効化を自動で行います。
-起動前に物理非常停止を解除し、アームの周囲に人や障害物がないことを確認して
-ください。
+何も入力せず Enter を押すと X11 が選択されます。スクリプトは `can0` の設定と
+ファームウェア検出を行いますが、ラッチされた電子非常停止の解除や自動ゼロ復帰
+は行いません。原因と周囲を確認した後、必要な場合だけ
+`reset_emergency_stop_on_start:=true` を追加してください。
 
 ### キーボード操作
 
@@ -122,6 +126,7 @@ Piper-L を起動します。
 | `PageUp` / `PageDown` | エンドエフェクタを左右に傾ける |
 | `I` | インピーダンス制御のオン／オフ |
 | `O` | アドミッタンス制御のオン／オフ |
+| `H` | ハイブリッド制御のオン／オフ |
 | `SPACE` | アームをゼロ位置へ戻す |
 | `E` | 電子非常停止 |
 
@@ -133,16 +138,19 @@ Piper-L を起動します。
 - アドミッタンス制御（`O`）：推定外力から手先速度を生成し、PoE スクリュー
   Jacobian から工具幾何 Jacobian を構成した制限付き重み付き DLS で
   関節速度へ変換して低ゲイン MIT で追従します。各周期で実測関節位置へ
-  再アンカーします。関節参照速度上限は `0.5 rad/s`、推定総トルク上限は
-  `8 N·m` です。共有重力補償を使用し、Nero の実測関節速度が `1.5 rad/s` を
-  3制御周期連続で超えるか、1周期でも `2.0 rad/s` を超えると電子非常停止
-  します。Piper-L の連続超過しきい値は `1.0 rad/s` です。
-- `I` と `O` は同時に有効化できません。インピーダンスとアドミッタンスを
+  再アンカーします。関節参照速度上限は `1.0 rad/s`、推定総トルク上限は
+  `8 N·m`、変化率上限は `20 N·m/s` です。Nero の実測関節速度が
+  `2.0 rad/s` を3制御周期連続で超えるか、いずれかのアームで1周期でも
+  `2.5 rad/s` を超えると電子非常停止します。Piper-L の連続超過しきい値は
+  `1.5 rad/s` です。力データが `0.10 s` 更新されない場合は通常保持へ戻ります。
+- `I`、`O`、`H` は同時に有効化できません。各相互作用モードを
   切り替えるときは、必ず `現在のモード -> 通常 planned-position モード ->
   目的のモード` の順で遷移します。通常モードへの復帰に失敗した場合、目的の
   モードには入りません。現在のモードのキーをもう一度押すと通常モードへ戻ります。
 
-`Ctrl-C` でプログラムを停止します。
+`Ctrl-C` では既定で、この制御ノードだけを切断し、外部コントローラへの引継ぎ
+のため無効化コマンドは送りません。終了時に明示的に無効化する場合は
+`disable_arm_on_shutdown:=true` を追加します。
 
 ---
 
@@ -179,10 +187,10 @@ Select the keyboard input during startup:
 After selecting `2`, enter an event number such as `3`, an event name such as
 `event3`, or a full path such as `/dev/input/event3`.
 
-Press Enter to select X11 by default. The script automatically configures
-`can0`, detects the firmware, resets the electronic emergency stop, and enables
-the arm. Before starting, release the physical emergency stop and make sure
-there are no people or obstacles around the arm.
+Press Enter to select X11 by default. The script configures `can0` and detects
+firmware, but it does not reset a latched electronic stop or move home
+automatically. Inspect the fault and workspace first, then add
+`reset_emergency_stop_on_start:=true` only for an intentional reset.
 
 ### Keyboard controls
 
@@ -198,6 +206,7 @@ there are no people or obstacles around the arm.
 | `PageUp` / `PageDown` | Tilt the end effector left/right |
 | `I` | Toggle impedance control |
 | `O` | Toggle admittance control |
+| `H` | Toggle hybrid control |
 | `SPACE` | Return the arm to zero |
 | `E` | Electronic emergency stop |
 
@@ -212,13 +221,16 @@ there are no people or obstacles around the arm.
   velocity with weighted DLS, and tracks it with low-gain MIT. Shared gravity
   compensation is enabled. The joint
   reference is reanchored to measured position every cycle. Reference joint
-  speed is capped at `0.5 rad/s` and estimated total torque at `8 N·m`.
-  On Nero, measured joint speed above `1.5 rad/s` for three consecutive control
-  cycles, or above `2.0 rad/s` once, triggers the electronic stop. Piper-L
-  retains a `1.0 rad/s` sustained threshold.
-- `I` and `O` cannot be enabled together. Switching between impedance and
-  admittance strictly follows `current mode -> normal planned-position mode ->
+  speed is capped at `1.0 rad/s`, estimated total torque at `8 N·m`, and its
+  rate at `20 N·m/s`. On Nero, measured joint speed above `2.0 rad/s` for three
+  consecutive cycles, or above `2.5 rad/s` once on either arm, triggers the
+  electronic stop. Piper-L retains a `1.5 rad/s` sustained threshold. A wrench
+  stream gap above `0.10 s` returns admittance/hybrid to measured-position hold.
+- `I`, `O`, and `H` cannot be enabled together. Switching interaction modes
+  strictly follows `current mode -> normal planned-position mode ->
   target mode`; failure to restore normal mode rejects the target transition.
   Press the active mode key again to return to normal mode.
 
-Press `Ctrl-C` to stop the program.
+By default, `Ctrl-C` disconnects this controller without sending `disable()`,
+allowing an external controller to take over. Add
+`disable_arm_on_shutdown:=true` when shutdown must explicitly disable the arm.

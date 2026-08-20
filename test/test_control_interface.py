@@ -52,6 +52,7 @@ class IdentityModel:
 def test_interaction_safety_limits_are_one_validated_source():
     limits = InteractionSafetyLimits(
         torque_limit=np.ones(6) * 8.0,
+        torque_rate_limit=np.ones(6) * 20.0,
         reference_velocity_limit=np.ones(6) * 1.0,
         measured_velocity_stop_limit=np.ones(6) * 2.0,
         measured_velocity_hard_limit=np.ones(6) * 2.5,
@@ -68,6 +69,7 @@ def test_interaction_safety_limits_are_one_validated_source():
     with pytest.raises(ValueError, match=r"\(0, 8\] N.m"):
         InteractionSafetyLimits(
             torque_limit=np.ones(6) * 8.01,
+            torque_rate_limit=np.ones(6) * 20.0,
             reference_velocity_limit=np.ones(6) * 1.0,
             measured_velocity_stop_limit=np.ones(6) * 2.0,
             measured_velocity_hard_limit=np.ones(6) * 2.5,
@@ -163,6 +165,47 @@ def test_shared_mit_envelope_reports_one_torque_decomposition():
     assert signals["torque_saturated"]
     assert signals["torque_saturation_reason"] == "total_limit"
     assert signals["torque_total_estimated"] == pytest.approx([4.0, -1.0])
+
+
+def test_shared_mit_envelope_limits_torque_change_per_cycle():
+    envelope = MitTorqueEnvelope(
+        kp=np.zeros(2),
+        kd=np.zeros(2),
+        torque_limit=[8.0, 8.0],
+        torque_rate_limit=[10.0, 20.0],
+    )
+    envelope.reset([0.0, 0.0])
+
+    result = envelope.command(
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [5.0, -5.0],
+        period=0.01,
+    )
+
+    assert result.command.estimated_torque == pytest.approx([0.1, -0.2])
+    assert result.command.feedforward == pytest.approx([0.1, -0.2])
+    assert result.rate_limited
+    assert result.saturation_reason == "torque_rate_limit"
+
+
+def test_shared_mit_envelope_rejects_uncontrollable_torque_rate():
+    envelope = MitTorqueEnvelope(
+        kp=[10.0],
+        kd=[0.0],
+        torque_limit=[8.0],
+        torque_rate_limit=[10.0],
+    )
+    envelope.reset([0.0])
+
+    with pytest.raises(ControlSafetyError) as captured:
+        envelope.command(
+            [1.0], [0.0], [0.0], [0.0], [0.0], period=0.01
+        )
+
+    assert captured.value.reason == "torque_rate_infeasible"
 
 
 def test_bounded_screw_velocity_ik_uses_model_jacobian_and_caps_speed():
