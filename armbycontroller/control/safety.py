@@ -7,6 +7,92 @@ import numpy as np
 from armbycontroller.control.core import ControlSafetyError
 
 
+INTERACTION_TORQUE_LIMIT_MAX = 8.0
+
+
+class InteractionSafetyLimits:
+    """One validated source for every MIT interaction-mode boundary."""
+
+    def __init__(
+        self,
+        *,
+        torque_limit,
+        reference_velocity_limit,
+        measured_velocity_stop_limit,
+        measured_velocity_hard_limit,
+        measured_velocity_violation_cycles,
+        joint_limit_margin,
+    ):
+        torque = np.asarray(torque_limit, dtype=float)
+        if torque.ndim != 1 or torque.size < 1:
+            raise ValueError("interaction torque limit must be a joint vector")
+        self.joint_count = torque.size
+        self.torque_limit = self._positive_vector(
+            torque, "torque_limit"
+        )
+        if np.any(self.torque_limit > INTERACTION_TORQUE_LIMIT_MAX):
+            raise ValueError(
+                "interaction torque limits must be in (0, 8] N.m"
+            )
+        self.reference_velocity_limit = self._positive_vector(
+            reference_velocity_limit, "reference_velocity_limit"
+        )
+        self.measured_velocity_stop_limit = self._positive_vector(
+            measured_velocity_stop_limit,
+            "measured_velocity_stop_limit",
+        )
+        self.measured_velocity_hard_limit = self._positive_vector(
+            measured_velocity_hard_limit,
+            "measured_velocity_hard_limit",
+        )
+        if np.any(
+            self.measured_velocity_stop_limit
+            <= self.reference_velocity_limit
+        ) or np.any(
+            self.measured_velocity_hard_limit
+            <= self.measured_velocity_stop_limit
+        ):
+            raise ValueError(
+                "measured stop limits must exceed reference limits and "
+                "hard limits must exceed stop limits"
+            )
+        self.measured_velocity_violation_cycles = int(
+            measured_velocity_violation_cycles
+        )
+        if self.measured_velocity_violation_cycles < 1:
+            raise ValueError(
+                "measured_velocity_violation_cycles must be positive"
+            )
+        self.joint_limit_margin = float(joint_limit_margin)
+        if (
+            not math.isfinite(self.joint_limit_margin)
+            or self.joint_limit_margin < 0.0
+        ):
+            raise ValueError(
+                "joint_limit_margin must be finite and nonnegative"
+            )
+
+    def _positive_vector(self, values, name):
+        result = np.asarray(values, dtype=float)
+        if (
+            result.shape != (self.joint_count,)
+            or not np.all(np.isfinite(result))
+            or np.any(result <= 0.0)
+        ):
+            raise ValueError(
+                f"{name} must contain {self.joint_count} positive values"
+            )
+        return result.copy()
+
+    def velocity_guard(self):
+        """Create independent violation history under shared thresholds."""
+        return SustainedVelocityGuard(
+            self.measured_velocity_stop_limit,
+            self.measured_velocity_hard_limit,
+            self.measured_velocity_violation_cycles,
+        )
+
+
 class SustainedVelocityGuard:
     """Debounce tracking overspeed while retaining an immediate hard stop."""
 

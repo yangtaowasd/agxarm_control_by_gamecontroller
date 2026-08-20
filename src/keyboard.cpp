@@ -70,11 +70,11 @@ private:
       {KEY_5, 4}, {KEY_6, 5}, {KEY_7, 6}, {KEY_A, 7},
       {KEY_D, 8}, {KEY_SPACE, 9}, {KEY_E, 10}, {KEY_P, 11},
       {KEY_W, 12}, {KEY_S, 13}, {KEY_Z, 14}, {KEY_X, 15},
-      {KEY_I, 16}, {KEY_O, 23},
+      {KEY_I, 16}, {KEY_O, 23}, {KEY_H, 24},
       {KEY_UP, 17}, {KEY_DOWN, 18}, {KEY_LEFT, 19}, {KEY_RIGHT, 20},
       {KEY_PAGEUP, 21}, {KEY_PAGEDOWN, 22},
     };
-    states_.assign(24, 0);
+    states_.assign(25, 0);
   }
 
   void configure_x11()
@@ -92,7 +92,7 @@ private:
       {XK_5, 4}, {XK_6, 5}, {XK_7, 6}, {XK_a, 7},
       {XK_d, 8}, {XK_space, 9}, {XK_e, 10}, {XK_p, 11},
       {XK_w, 12}, {XK_s, 13}, {XK_z, 14}, {XK_x, 15},
-      {XK_i, 16}, {XK_o, 23},
+      {XK_i, 16}, {XK_o, 23}, {XK_h, 24},
       {XK_Up, 17}, {XK_Down, 18}, {XK_Left, 19}, {XK_Right, 20},
       {XK_Page_Up, 21}, {XK_Page_Down, 22},
     };

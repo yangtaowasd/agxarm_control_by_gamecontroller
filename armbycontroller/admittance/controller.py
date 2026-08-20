@@ -8,11 +8,12 @@ from armbycontroller.control.core import ControlResult
 from armbycontroller.control.mit import MitTorqueEnvelope
 from armbycontroller.control.model_compensation import ModelCompensator
 from armbycontroller.control.safety import ControlCycleGuard
+from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control.safety import SustainedVelocityGuard
 from armbycontroller.ik.screw import BoundedScrewVelocityIk
 
 
-ADMITTANCE_MIT_TORQUE_LIMIT_MAX = 8.0
+ADMITTANCE_MIT_TORQUE_LIMIT_MAX = INTERACTION_TORQUE_LIMIT_MAX
 
 
 def _vector(values, size, name, *, positive=False, nonnegative=False):

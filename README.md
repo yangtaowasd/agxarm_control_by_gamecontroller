@@ -138,20 +138,41 @@ package provides two explicit modes:
 
 Nero defaults to `admittance_mode:=zero_force`; Piper-L defaults to
 `admittance_mode:=resistive`. Each robot has independent mass, damping,
-stiffness, deadband, and motion limits in its own YAML file. `I` and `O` are
-strictly interlocked. Every cross-mode transition follows `current interaction
-mode -> normal planned-position mode -> target interaction mode`. The target
-mode is rejected if restoring normal planned-position control fails.
+stiffness, deadband, and motion limits in its own YAML file.
 
-The interaction controllers share five ROS/CAN-free control modules. Cartesian
+`H` toggles one-owner hybrid Cartesian control. Its default base-frame
+selection is `hybrid_admittance_axes:=z`, which means the project-order mask
+`[rx,ry,rz,x,y,z]=[0,0,0,0,0,1]`: Z follows the admittance Twist, while the
+other five axes use Cartesian impedance about the pose captured on entry.
+Both paths are combined inside `HybridCartesianController` and sent through
+one bounded screw-velocity IK, model compensation, low-gain MIT envelope, and
+one command stream. `hybrid_desired_wrench` uses
+`[Mx,My,Mz,Fx,Fy,Fz]` and defaults to zero.
+
+All MIT interaction modes now use the same `interaction_*` joint-safety
+configuration. The shared defaults are an `8 N.m` estimated-total-torque
+limit, `0.5 rad/s` reference-speed limit, `2.0 rad/s` immediate measured-speed
+stop, three-cycle sustained-speed debounce, and `0.03 rad` joint-limit margin.
+The sustained measured-speed threshold is `1.5 rad/s` on Nero and `1.0 rad/s`
+on Piper-L. Admittance-specific wrench, virtual Twist, and offset bounds remain
+separate because they are task-space control-law parameters.
+
+`I`, `O`, and `H` are strictly interlocked. Every cross-mode transition follows
+`current interaction mode -> normal planned-position mode -> target interaction
+mode`. The target mode is rejected if restoring normal planned-position
+control fails.
+
+The interaction controllers share six ROS/CAN-free control modules. Cartesian
 task geometry owns the base-frame `[angular; linear]` convention, SE(3)
 validation, tool-origin geometric Jacobian, and `tau=Jg.T*wrench` mappings.
-Model Compensation selects gravity, bias, or full inverse dynamics. The MIT
-Safety Envelope checks feedback feasibility and caps feedforward against the
-estimated total-torque limit. The Control Cycle Guard validates feedback,
-period, position, and velocity. The Interaction Mode Lifecycle enforces the
-normal-mode intermediate transition. The bounded screw-Jacobian velocity IK
-lives beside the full-pose solver in `armbycontroller/ik/screw.py`.
+Model Compensation selects gravity, bias, or full inverse dynamics.
+Interaction Safety Limits validates the shared torque, speed, and joint-limit
+boundaries once. The MIT Safety Envelope checks feedback feasibility and caps
+feedforward against the estimated total-torque limit. The Control Cycle Guard
+validates feedback, period, position, and velocity. The Interaction Mode
+Lifecycle enforces the normal-mode intermediate transition. The bounded
+screw-Jacobian velocity IK lives beside the full-pose solver in
+`armbycontroller/ik/screw.py`.
 
 All MIT adapters expose the same torque diagnostics:
 `torque_feedback`, `torque_model_requested`, `torque_task_requested`,
@@ -175,7 +196,7 @@ explicitly rejected instead of silently using a pseudoinverse. See
 
 ## Unified controller interface and experiments
 
-All three in-tree interaction algorithms now run behind the same ROS/CAN-free
+All four in-tree interaction adapters now run behind the same ROS/CAN-free
 controller seam:
 
 ```text
@@ -184,8 +205,8 @@ ControlInput(state, reference, wrench, timestamp, period)
     -> ControlResult(MIT command, diagnostic signals)
 ```
 
-`joint_impedance`, `cartesian_impedance`, and the current
-`cartesian_admittance` are adapters registered with `ControlEngine`. The ROS
+`joint_impedance`, `cartesian_impedance`, `cartesian_admittance`, and
+`hybrid_cartesian` are adapters registered with `ControlEngine`. The ROS
 node remains responsible for mode interlocks, feedback acquisition, command
 transmission, and emergency stop. Each executed cycle is published as schema
 version 1 JSON on `/arm_control_sample`; enable/disable and emergency-stop
@@ -292,6 +313,7 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - `I`: switch between planned position control and the selected MIT impedance
   backend (Cartesian by default)
 - `O`: toggle the selected low-gain MIT Cartesian admittance mode
+- `H`: toggle hybrid control; default Z admittance plus five-axis impedance
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
@@ -412,8 +434,9 @@ The controller defaults to 100 Hz IK/control scheduling. Per-tick keyboard
 increments are scaled so the original Cartesian, orientation, and joint jog
 speeds are preserved at the higher rate. The MIT reference generator defaults
 to 0.5 rad/s velocity, 1 rad/s² acceleration, and 5 rad/s³ jerk limits, exposed
-as `mit_trajectory_max_velocity`, `mit_trajectory_max_acceleration`, and
-`mit_trajectory_max_jerk`. Planned mode retains 20 percent speed and 1 rad/s²
+as `interaction_reference_joint_velocity_limit`,
+`mit_trajectory_max_acceleration`, and `mit_trajectory_max_jerk`. Planned mode
+retains 20 percent speed and 1 rad/s²
 maximum joint acceleration. IK keeps the tool
 local `+Z` axis pointing toward `base_link -Z`; rotation around that axis is
 free. It retains ten verified states and pauses for two seconds after recovery.

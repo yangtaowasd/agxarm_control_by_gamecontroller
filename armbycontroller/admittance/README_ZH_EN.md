@@ -36,27 +36,29 @@ pose construction.
   shared Model Compensation supplies gravity and the shared MIT Safety
   Envelope protects estimated total torque.
 
-关节参考速度和实测失控保护使用不同阈值：旋量速度 IK 用
-`admittance_joint_velocity_limit=0.5 rad/s` 饱和参考速度；Nero 实测速度超过
-`admittance_measured_joint_velocity_stop_limit=1.5 rad/s` 连续三个控制周期，或
-单周期超过 `admittance_measured_joint_velocity_hard_limit=2.0 rad/s`，ROS 硬件
-adapter 才触发电子急停；Piper-L 的持续阈值仍为 `1.0 rad/s`。导纳 MIT 估算
-总力矩不得超过 `8 N·m`。 /
-Reference speed and measured-runaway protection use separate thresholds. Screw
-velocity IK saturates the reference at
-`admittance_joint_velocity_limit=0.5 rad/s`; the ROS hardware adapter triggers
-the electronic stop on Nero when measured speed exceeds
-`admittance_measured_joint_velocity_stop_limit=1.5 rad/s` for three consecutive
-control cycles, or exceeds the immediate
-`admittance_measured_joint_velocity_hard_limit=2.0 rad/s`. Piper-L retains a
-`1.0 rad/s` sustained threshold. Estimated total admittance MIT torque may not
-exceed `8 N·m`.
+关节级安全边界与阻抗、混合共用：旋量速度 IK 用
+`interaction_reference_joint_velocity_limit=0.5 rad/s` 饱和参考速度；Nero 实测
+速度超过 `interaction_measured_joint_velocity_stop_limit=1.5 rad/s` 连续三个
+控制周期，或单周期超过
+`interaction_measured_joint_velocity_hard_limit=2.0 rad/s`，ROS 硬件 adapter
+触发电子急停；Piper-L 的持续阈值为 `1.0 rad/s`。所有 MIT 交互模式的估算总力矩
+由 `interaction_torque_limit=8 N·m` 统一限制。导纳自己的 wrench、Twist 和位移
+边界仍独立。 / Joint-level boundaries are shared with impedance and hybrid
+control. Screw velocity IK saturates the reference at
+`interaction_reference_joint_velocity_limit=0.5 rad/s`; the ROS hardware
+adapter triggers the electronic stop on Nero when measured speed exceeds
+`interaction_measured_joint_velocity_stop_limit=1.5 rad/s` for three
+consecutive cycles or exceeds the immediate
+`interaction_measured_joint_velocity_hard_limit=2.0 rad/s`. Piper-L uses a
+`1.0 rad/s` sustained threshold. `interaction_torque_limit=8 N.m` bounds
+estimated total torque in every MIT interaction mode. Admittance-specific
+wrench, Twist, and offset bounds remain independent.
 
-三个 MIT controller 使用同一组诊断字段，包括 `torque_feedback`、
+四个 MIT controller adapter 使用同一组诊断字段，包括 `torque_feedback`、
 `torque_model_requested`、`torque_task_requested`、
 `torque_feedforward_requested/sent`、`torque_total_requested/estimated` 和
-`torque_saturation_reason`。 / All three MIT controllers use the same torque
-diagnostics, including feedback, requested model/task/feedforward, sent
+`torque_saturation_reason`。 / All four MIT controller adapters use the same
+torque diagnostics, including feedback, requested model/task/feedforward, sent
 feedforward, requested/estimated total torque, and saturation reason.
 
 阻抗和导纳真正共用的坐标、tool-origin Jacobian、SE(3) 校验及虚功映射位于

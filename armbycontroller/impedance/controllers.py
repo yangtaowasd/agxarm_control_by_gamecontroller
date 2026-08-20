@@ -7,6 +7,7 @@ from armbycontroller.control.core import ControlResult
 from armbycontroller.control.mit import MitTorqueEnvelope
 from armbycontroller.control.model_compensation import ModelCompensator
 from armbycontroller.control.safety import ControlCycleGuard
+from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.impedance.cartesian import cartesian_impedance_command
 
 
@@ -36,6 +37,7 @@ class JointMitController:
         torque_limit,
         dynamics_model=None,
         model_scale=1.0,
+        position_tolerance=0.0,
     ):
         self.joint_count = int(joint_count)
         self.kp = _joint_vector(kp, self.joint_count, "kp")
@@ -46,6 +48,8 @@ class JointMitController:
         self.torque_limit = _joint_vector(
             torque_limit, self.joint_count, "torque_limit", positive=True
         )
+        if np.any(self.torque_limit > INTERACTION_TORQUE_LIMIT_MAX):
+            raise ValueError("torque_limit values must be in (0, 8] N.m")
         if np.any(self.kp < 0.0) or np.any(self.kd < 0.0):
             raise ValueError("MIT gains must be nonnegative")
         self.dynamics_model = dynamics_model
@@ -68,6 +72,7 @@ class JointMitController:
             require_position=False,
             require_velocity=False,
             joint_limits=getattr(dynamics_model, "joint_limits", None),
+            position_tolerance=position_tolerance,
         )
 
     def reset(self, state):
@@ -140,6 +145,7 @@ class CartesianImpedanceController:
         joint_posture_stiffness=None,
         joint_posture_damping=None,
         model_scale=1.0,
+        position_tolerance=0.0,
     ):
         self.model = model
         self.stiffness = np.asarray(stiffness, dtype=float).copy()
@@ -148,6 +154,8 @@ class CartesianImpedanceController:
         self.torque_limit = _joint_vector(
             torque_limit, self.joint_count, "torque_limit", positive=True
         )
+        if np.any(self.torque_limit > INTERACTION_TORQUE_LIMIT_MAX):
+            raise ValueError("torque_limit values must be in (0, 8] N.m")
         self.nullspace_enabled = bool(nullspace_enabled)
         scale = np.asarray(model_scale, dtype=float)
         if scale.ndim == 0 or scale.size == 1:
@@ -171,6 +179,7 @@ class CartesianImpedanceController:
         self.cycle_guard = ControlCycleGuard(
             self.joint_count,
             joint_limits=getattr(self.model, "joint_limits", None),
+            position_tolerance=position_tolerance,
         )
         self.nullspace_stiffness = _joint_vector(
             np.zeros(self.joint_count)

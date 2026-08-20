@@ -19,6 +19,8 @@ from armbycontroller.control import MitCommand
 from armbycontroller.control import MitTorqueEnvelope
 from armbycontroller.control import ModelCompensator
 from armbycontroller.control import InteractionModeLifecycle
+from armbycontroller.control import InteractionSafetyLimits
+from armbycontroller.control import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control import SustainedVelocityGuard
 from armbycontroller.control import control_sample
 from armbycontroller.impedance.controllers import CartesianImpedanceController
@@ -42,6 +44,58 @@ class IdentityModel:
     def inverse_dynamics(self, position, velocity, acceleration):
         del position, velocity, acceleration
         return np.arange(1.0, 7.0)
+
+
+def test_interaction_safety_limits_are_one_validated_source():
+    limits = InteractionSafetyLimits(
+        torque_limit=np.ones(6) * 8.0,
+        reference_velocity_limit=np.ones(6) * 0.5,
+        measured_velocity_stop_limit=np.ones(6) * 1.5,
+        measured_velocity_hard_limit=np.ones(6) * 2.0,
+        measured_velocity_violation_cycles=3,
+        joint_limit_margin=0.03,
+    )
+
+    assert limits.joint_count == 6
+    assert limits.torque_limit == pytest.approx([8.0] * 6)
+    assert limits.reference_velocity_limit == pytest.approx([0.5] * 6)
+    assert limits.velocity_guard().violation_cycles == 3
+    assert INTERACTION_TORQUE_LIMIT_MAX == 8.0
+
+    with pytest.raises(ValueError, match=r"\(0, 8\] N.m"):
+        InteractionSafetyLimits(
+            torque_limit=np.ones(6) * 8.01,
+            reference_velocity_limit=np.ones(6) * 0.5,
+            measured_velocity_stop_limit=np.ones(6) * 1.5,
+            measured_velocity_hard_limit=np.ones(6) * 2.0,
+            measured_velocity_violation_cycles=3,
+            joint_limit_margin=0.03,
+        )
+
+
+@pytest.mark.parametrize(
+    "controller_factory",
+    [
+        lambda: JointMitController(
+            6,
+            kp=np.zeros(6),
+            kd=np.zeros(6),
+            feedforward=np.zeros(6),
+            torque_limit=np.ones(6) * 8.01,
+        ),
+        lambda: CartesianImpedanceController(
+            IdentityModel(),
+            stiffness=np.zeros(6),
+            damping=np.zeros(6),
+            torque_limit=np.ones(6) * 8.01,
+        ),
+    ],
+)
+def test_impedance_adapters_cannot_bypass_shared_torque_cap(
+    controller_factory,
+):
+    with pytest.raises(ValueError, match=r"\(0, 8\] N.m"):
+        controller_factory()
 
 
 def test_shared_model_compensator_selects_gravity_bias_and_dynamics():
@@ -202,6 +256,16 @@ def test_interaction_lifecycle_requires_normal_cross_transition():
     lifecycle.commit("normal")
     lifecycle.commit("admittance")
     assert lifecycle.active == "admittance"
+
+
+def test_interaction_lifecycle_interlocks_three_interaction_controllers():
+    lifecycle = InteractionModeLifecycle("impedance")
+
+    assert lifecycle.plan("hybrid").path == ("normal", "hybrid")
+    lifecycle.commit("normal")
+    lifecycle.commit("hybrid")
+    with pytest.raises(RuntimeError, match="cannot be active together"):
+        lifecycle.synchronize(True, False, True)
 
 
 def sample(position=None, target=None, wrench=None, velocity=None):
@@ -564,7 +628,7 @@ def test_admittance_rejects_torque_limit_above_eight_newton_metres():
 def test_control_sample_is_stable_json_compatible_schema():
     control_input = sample(target=np.ones(6))
     result = JointMitController(
-        6, np.ones(6), np.zeros(6), np.zeros(6), np.ones(6) * 10.0
+        6, np.ones(6), np.zeros(6), np.zeros(6), np.ones(6) * 8.0
     ).step(control_input)
 
     value = control_sample(

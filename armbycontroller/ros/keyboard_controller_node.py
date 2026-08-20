@@ -24,7 +24,6 @@ from pyAgxArm import create_agx_arm_config
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
 from armbycontroller.admittance import ADMITTANCE_MODES
-from armbycontroller.admittance import ADMITTANCE_MIT_TORQUE_LIMIT_MAX
 from armbycontroller.admittance import create_cartesian_admittance
 from armbycontroller.admittance.controller import CartesianAdmittanceController
 from armbycontroller.cartesian import geometric_jacobian
@@ -34,6 +33,7 @@ from armbycontroller.control import ControlInput
 from armbycontroller.control import ControlReference
 from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import ControlState
+from armbycontroller.control import InteractionSafetyLimits
 from armbycontroller.control import InteractionModeLifecycle
 from armbycontroller.control import MitCommand
 from armbycontroller.control import PositionCommand
@@ -59,6 +59,8 @@ from armbycontroller.ik.core import resolve_firmware_name
 from armbycontroller.ik.core import resolve_tool_urdf_path
 from armbycontroller.ik.core import set_joint_acceleration_limits
 from armbycontroller.ik.screw import BoundedScrewVelocityIk
+from armbycontroller.hybrid import HybridCartesianController
+from armbycontroller.hybrid import task_axis_mask
 from armbycontroller.modeling.screw_model import project_gravity_vector
 
 
@@ -71,7 +73,8 @@ KEY_ARROW_UP, KEY_ARROW_DOWN = 17, 18
 KEY_ARROW_LEFT, KEY_ARROW_RIGHT = 19, 20
 KEY_ROLL_LEFT, KEY_ROLL_RIGHT = 21, 22
 KEY_ADMITTANCE_TOGGLE = 23
-KEY_COUNT = 24
+KEY_HYBRID_TOGGLE = 24
+KEY_COUNT = 25
 
 
 def clamp(value, low, high):
@@ -88,6 +91,7 @@ class JogUpdate:
     mode_toggle_requested: bool = False
     impedance_toggle_requested: bool = False
     admittance_toggle_requested: bool = False
+    hybrid_toggle_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,11 +187,18 @@ class ArmJointJogState:
         toggle = rising[KEY_MODE_TOGGLE]
         impedance_toggle = rising[KEY_IMPEDANCE_TOGGLE]
         admittance_toggle = rising[KEY_ADMITTANCE_TOGGLE]
+        hybrid_toggle = rising[KEY_HYBRID_TOGGLE]
         changed = False
         if home:
             target = [clamp(0.0, low, high) for low, high in self.joint_limits]
             changed, self.target_joints = target != self.target_joints, target
-        elif not any((estop, toggle, impedance_toggle, admittance_toggle)):
+        elif not any((
+            estop,
+            toggle,
+            impedance_toggle,
+            admittance_toggle,
+            hybrid_toggle,
+        )):
             direction = pressed[KEY_INCREASE] - pressed[KEY_DECREASE]
             if direction:
                 low, high = self.joint_limits[self.selected_joint]
@@ -216,6 +227,7 @@ class ArmJointJogState:
             toggle,
             impedance_toggle,
             admittance_toggle,
+            hybrid_toggle,
         )
 
 
@@ -491,6 +503,29 @@ class ArmKeyboardController(Node):
         self.declare_parameter("impedance_enabled", False)
         self.declare_parameter("impedance_backend", "cartesian")
         self.declare_parameter("mit_command_rate", 100.0)
+        scalar_or_array = ParameterDescriptor(dynamic_typing=True)
+        self.declare_parameter(
+            "interaction_torque_limit", [8.0], scalar_or_array
+        )
+        self.declare_parameter(
+            "interaction_reference_joint_velocity_limit",
+            [0.5],
+            scalar_or_array,
+        )
+        self.declare_parameter(
+            "interaction_measured_joint_velocity_stop_limit",
+            [1.0],
+            scalar_or_array,
+        )
+        self.declare_parameter(
+            "interaction_measured_joint_velocity_hard_limit",
+            [2.0],
+            scalar_or_array,
+        )
+        self.declare_parameter(
+            "interaction_measured_velocity_violation_cycles", 3
+        )
+        self.declare_parameter("interaction_joint_limit_margin", 0.03)
         self.declare_parameter(
             "dynamics_state_topic", "/arm_dynamics_state"
         )
@@ -501,16 +536,12 @@ class ArmKeyboardController(Node):
         self.declare_parameter("control_event_topic", "/arm_control_event")
         self.declare_parameter("mit_kp", default_mit_kp)
         self.declare_parameter("mit_kd", default_mit_kd)
-        scalar_or_array = ParameterDescriptor(dynamic_typing=True)
         self.declare_parameter(
             "mit_feedforward", default_mit_feedforward_values
         )
         self.declare_parameter("mit_gravity_compensation_enabled", True)
         self.declare_parameter("gravity_urdf_path", "")
         self.declare_parameter("mit_gravity_scale", 1.0)
-        self.declare_parameter(
-            "mit_gravity_torque_limit", [10.0], scalar_or_array
-        )
         self.declare_parameter(
             "cartesian_impedance_rotation_stiffness", 0.4
         )
@@ -545,9 +576,6 @@ class ArmKeyboardController(Node):
             "cartesian_impedance_joint_posture_damping",
             [0.0],
             scalar_or_array,
-        )
-        self.declare_parameter(
-            "cartesian_impedance_torque_limit", [8.0], scalar_or_array
         )
         self.declare_parameter(
             "cartesian_impedance_model_scale", [1.0], scalar_or_array
@@ -605,38 +633,15 @@ class ArmKeyboardController(Node):
         self.declare_parameter(
             "admittance_mit_kd", admittance_mit_profile["kd"]
         )
-        self.declare_parameter(
-            "admittance_mit_torque_limit",
-            [ADMITTANCE_MIT_TORQUE_LIMIT_MAX],
-            scalar_or_array,
-        )
         self.declare_parameter("admittance_mit_model_scale", 1.0)
-        self.declare_parameter(
-            "admittance_joint_velocity_limit", [0.5], scalar_or_array
-        )
-        self.declare_parameter(
-            "admittance_measured_joint_velocity_stop_limit",
-            [1.0],
-            scalar_or_array,
-        )
-        self.declare_parameter(
-            "admittance_measured_joint_velocity_hard_limit",
-            [2.0],
-            scalar_or_array,
-        )
-        self.declare_parameter(
-            "admittance_measured_velocity_violation_cycles", 3
-        )
         self.declare_parameter(
             "admittance_task_weights",
             [0.4, 0.4, 0.4, 1.0, 1.0, 1.0],
         )
         self.declare_parameter("admittance_velocity_dls_damping", 0.02)
-        self.declare_parameter("admittance_joint_limit_margin", 0.03)
+        self.declare_parameter("hybrid_admittance_axes", "z")
+        self.declare_parameter("hybrid_desired_wrench", [0.0] * 6)
         self.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
-        self.declare_parameter(
-            "mit_trajectory_max_velocity", [0.5], scalar_or_array
-        )
         self.declare_parameter(
             "mit_trajectory_max_acceleration", [1.0], scalar_or_array
         )
@@ -765,6 +770,45 @@ class ArmKeyboardController(Node):
         self.mit_command_rate = float(
             self.get_parameter("mit_command_rate").value
         )
+        self.interaction_safety = InteractionSafetyLimits(
+            torque_limit=expand_joint_values(
+                self.get_parameter("interaction_torque_limit").value,
+                self.joint_count,
+                "interaction_torque_limit",
+            ),
+            reference_velocity_limit=expand_joint_values(
+                self.get_parameter(
+                    "interaction_reference_joint_velocity_limit"
+                ).value,
+                self.joint_count,
+                "interaction_reference_joint_velocity_limit",
+            ),
+            measured_velocity_stop_limit=expand_joint_values(
+                self.get_parameter(
+                    "interaction_measured_joint_velocity_stop_limit"
+                ).value,
+                self.joint_count,
+                "interaction_measured_joint_velocity_stop_limit",
+            ),
+            measured_velocity_hard_limit=expand_joint_values(
+                self.get_parameter(
+                    "interaction_measured_joint_velocity_hard_limit"
+                ).value,
+                self.joint_count,
+                "interaction_measured_joint_velocity_hard_limit",
+            ),
+            measured_velocity_violation_cycles=int(
+                self.get_parameter(
+                    "interaction_measured_velocity_violation_cycles"
+                ).value
+            ),
+            joint_limit_margin=float(
+                self.get_parameter("interaction_joint_limit_margin").value
+            ),
+        )
+        self.interaction_velocity_guard = (
+            self.interaction_safety.velocity_guard()
+        )
         self.dynamics_state_topic = str(
             self.get_parameter("dynamics_state_topic").value
         )
@@ -797,10 +841,8 @@ class ArmKeyboardController(Node):
         self.mit_gravity_scale = float(
             self.get_parameter("mit_gravity_scale").value
         )
-        self.mit_gravity_torque_limit = expand_joint_values(
-            self.get_parameter("mit_gravity_torque_limit").value,
-            self.joint_count,
-            "mit_gravity_torque_limit",
+        self.mit_gravity_torque_limit = (
+            self.interaction_safety.torque_limit.tolist()
         )
         rotation_stiffness = float(
             self.get_parameter(
@@ -877,15 +919,8 @@ class ArmKeyboardController(Node):
             ),
             dtype=float,
         )
-        self.cartesian_torque_limit = np.asarray(
-            expand_joint_values(
-                self.get_parameter(
-                    "cartesian_impedance_torque_limit"
-                ).value,
-                self.joint_count,
-                "cartesian_impedance_torque_limit",
-            ),
-            dtype=float,
+        self.cartesian_torque_limit = (
+            self.interaction_safety.torque_limit.copy()
         )
         self.cartesian_model_scale = np.asarray(
             expand_joint_values(
@@ -942,41 +977,23 @@ class ArmKeyboardController(Node):
             self.joint_count,
             "admittance_mit_kd",
         )
-        self.admittance_mit_torque_limit = expand_joint_values(
-            self.get_parameter("admittance_mit_torque_limit").value,
-            self.joint_count,
-            "admittance_mit_torque_limit",
+        self.admittance_mit_torque_limit = (
+            self.interaction_safety.torque_limit.tolist()
         )
         self.admittance_mit_model_scale = float(
             self.get_parameter("admittance_mit_model_scale").value
         )
-        self.admittance_joint_velocity_limit = expand_joint_values(
-            self.get_parameter("admittance_joint_velocity_limit").value,
-            self.joint_count,
-            "admittance_joint_velocity_limit",
+        self.admittance_joint_velocity_limit = (
+            self.interaction_safety.reference_velocity_limit.tolist()
         )
         self.admittance_measured_joint_velocity_stop_limit = (
-            expand_joint_values(
-                self.get_parameter(
-                    "admittance_measured_joint_velocity_stop_limit"
-                ).value,
-                self.joint_count,
-                "admittance_measured_joint_velocity_stop_limit",
-            )
+            self.interaction_safety.measured_velocity_stop_limit.tolist()
         )
         self.admittance_measured_joint_velocity_hard_limit = (
-            expand_joint_values(
-                self.get_parameter(
-                    "admittance_measured_joint_velocity_hard_limit"
-                ).value,
-                self.joint_count,
-                "admittance_measured_joint_velocity_hard_limit",
-            )
+            self.interaction_safety.measured_velocity_hard_limit.tolist()
         )
-        self.admittance_measured_velocity_violation_cycles = int(
-            self.get_parameter(
-                "admittance_measured_velocity_violation_cycles"
-            ).value
+        self.admittance_measured_velocity_violation_cycles = (
+            self.interaction_safety.measured_velocity_violation_cycles
         )
         self.admittance_task_weights = np.asarray(
             expand_joint_values(
@@ -989,11 +1006,22 @@ class ArmKeyboardController(Node):
         self.admittance_velocity_dls_damping = float(
             self.get_parameter("admittance_velocity_dls_damping").value
         )
-        self.admittance_joint_limit_margin = float(
-            self.get_parameter("admittance_joint_limit_margin").value
+        self.admittance_joint_limit_margin = (
+            self.interaction_safety.joint_limit_margin
         )
-        self.admittance_controller = create_cartesian_admittance(
-            self.admittance_mode,
+        self.hybrid_admittance_axes = str(
+            self.get_parameter("hybrid_admittance_axes").value
+        ).strip().lower()
+        task_axis_mask(self.hybrid_admittance_axes)
+        self.hybrid_desired_wrench = np.asarray(
+            expand_joint_values(
+                self.get_parameter("hybrid_desired_wrench").value,
+                6,
+                "hybrid_desired_wrench",
+            ),
+            dtype=float,
+        )
+        admittance_factory_settings = dict(
             virtual_mass=admittance_values["admittance_virtual_mass"],
             zero_force_damping=admittance_values[
                 "admittance_zero_force_damping"
@@ -1023,6 +1051,14 @@ class ArmKeyboardController(Node):
             ],
             wrench_filter_hz=self.admittance_wrench_filter_hz,
         )
+        self.admittance_controller = create_cartesian_admittance(
+            self.admittance_mode,
+            **admittance_factory_settings,
+        )
+        self.hybrid_admittance_controller = create_cartesian_admittance(
+            self.admittance_mode,
+            **admittance_factory_settings,
+        )
         configured_gravity = self.get_parameter("gravity_vector").value
         if self.robot_model == "nero" and self.nero_mount:
             self.gravity_vector = np.asarray(
@@ -1032,10 +1068,8 @@ class ArmKeyboardController(Node):
             self.gravity_vector = np.asarray(
                 configured_gravity, dtype=float
             )
-        self.mit_trajectory_max_velocity = expand_joint_values(
-            self.get_parameter("mit_trajectory_max_velocity").value,
-            self.joint_count,
-            "mit_trajectory_max_velocity",
+        self.mit_trajectory_max_velocity = (
+            self.interaction_safety.reference_velocity_limit.tolist()
         )
         self.mit_trajectory_max_acceleration = expand_joint_values(
             self.get_parameter("mit_trajectory_max_acceleration").value,
@@ -1109,11 +1143,9 @@ class ArmKeyboardController(Node):
             self.admittance_wrench_dls_damping <= 0.0
             or self.admittance_wrench_timeout <= 0.0
             or self.admittance_velocity_dls_damping <= 0.0
-            or self.admittance_joint_limit_margin < 0.0
         ):
             raise ValueError(
-                "admittance DLS damping and wrench timeout must be positive; "
-                "joint-limit margin must be nonnegative"
+                "admittance DLS damping and wrench timeout must be positive"
             )
         if any(
             not 0.0 <= value <= 500.0
@@ -1125,43 +1157,12 @@ class ArmKeyboardController(Node):
             for value in self.admittance_mit_kd
         ):
             raise ValueError("admittance_mit_kd values must be in [0, 5]")
-        if any(
-            not 0.0 < value <= ADMITTANCE_MIT_TORQUE_LIMIT_MAX
-            for value in self.admittance_mit_torque_limit
-        ):
-            raise ValueError(
-                "admittance MIT torque limits must be in (0, 8] N.m"
-            )
         if not 0.0 <= self.admittance_mit_model_scale <= 1.0:
             raise ValueError(
                 "admittance_mit_model_scale must be in [0, 1]"
             )
-        if any(
-            value <= 0.0 for value in self.admittance_joint_velocity_limit
-        ) or np.any(self.admittance_task_weights <= 0.0):
-            raise ValueError(
-                "admittance joint velocity limits and task weights must be "
-                "positive"
-            )
-        reference_velocity_limit = np.asarray(
-            self.admittance_joint_velocity_limit, dtype=float
-        )
-        measured_stop_limit = np.asarray(
-            self.admittance_measured_joint_velocity_stop_limit, dtype=float
-        )
-        measured_hard_limit = np.asarray(
-            self.admittance_measured_joint_velocity_hard_limit, dtype=float
-        )
-        if (
-            np.any(measured_stop_limit <= reference_velocity_limit)
-            or np.any(measured_hard_limit <= measured_stop_limit)
-            or self.admittance_measured_velocity_violation_cycles < 1
-        ):
-            raise ValueError(
-                "admittance measured velocity stop limits must exceed "
-                "reference limits, hard limits must exceed stop limits, "
-                "and violation cycles must be positive"
-            )
+        if np.any(self.admittance_task_weights <= 0.0):
+            raise ValueError("admittance task weights must be positive")
         if self.impedance_backend not in ("joint", "cartesian"):
             raise ValueError(
                 "impedance_backend must be joint or cartesian"
@@ -1180,13 +1181,6 @@ class ArmKeyboardController(Node):
             raise ValueError(
                 "mit_feedforward values must be in [-10, 10] N·m"
             )
-        if any(
-            not 0.0 < value <= 10.0
-            for value in self.mit_gravity_torque_limit
-        ):
-            raise ValueError(
-                "MIT model torque limits must be in (0, 10] N·m"
-            )
         if (
             not np.all(np.isfinite(self.cartesian_stiffness))
             or not np.all(np.isfinite(self.cartesian_damping))
@@ -1200,14 +1194,6 @@ class ArmKeyboardController(Node):
             raise ValueError(
                 "Cartesian, nullspace, and joint-posture gains must be "
                 "nonnegative"
-            )
-        if (
-            not np.all(np.isfinite(self.cartesian_torque_limit))
-            or np.any(self.cartesian_torque_limit <= 0.0)
-            or np.any(self.cartesian_torque_limit > 10.0)
-        ):
-            raise ValueError(
-                "Cartesian absolute torque limits must be in (0, 10] N·m"
             )
         if (
             not np.all(np.isfinite(self.cartesian_model_scale))
@@ -1318,9 +1304,11 @@ class ArmKeyboardController(Node):
         self.emergency_stopped = False
         self.last_mit_tick_time = None
         self.admittance_enabled = False
+        self.hybrid_enabled = False
         self.interaction_lifecycle = InteractionModeLifecycle()
         self.admittance_previous_control_mode = "joint"
         self.last_admittance_tick_time = None
+        self.last_hybrid_tick_time = None
         self.feedback_previous_position = None
         self.feedback_previous_velocity = np.zeros(self.joint_count)
         self.feedback_previous_time = None
@@ -1370,7 +1358,7 @@ class ArmKeyboardController(Node):
                 f"joint 1-{self.joint_count}+A/D; "
                 "IK W/S+A/D+Z/X; I="
                 f"{self.impedance_backend} impedance via MIT; "
-                "O=admittance; SPACE=home; E=E-stop"
+                "O=admittance; H=hybrid; SPACE=home; E=E-stop"
             )
 
     def keyboard_callback(self, message):
@@ -1400,10 +1388,15 @@ class ArmKeyboardController(Node):
                 getattr(
                     self,
                     "mit_gravity_torque_limit",
-                    [10.0] * joint_count,
+                    [8.0] * joint_count,
                 ),
                 dynamics_model=getattr(self, "gravity_model", None),
                 model_scale=getattr(self, "mit_gravity_scale", 1.0),
+                position_tolerance=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "joint_limit_margin",
+                    0.0,
+                ),
             ))
 
         model = getattr(self, "gravity_model", None)
@@ -1442,6 +1435,11 @@ class ArmKeyboardController(Node):
                     "cartesian_model_scale",
                     np.ones(joint_count),
                 ),
+                position_tolerance=getattr(
+                    getattr(self, "interaction_safety", None),
+                    "joint_limit_margin",
+                    0.0,
+                ),
             ))
         admittance_settings = (
             "admittance_mit_kp",
@@ -1478,6 +1476,54 @@ class ArmKeyboardController(Node):
                     self, "admittance_mit_model_scale", 1.0
                 ),
                 joint_count=joint_count,
+                measured_velocity_limit=(
+                    self.admittance_measured_joint_velocity_stop_limit
+                ),
+                measured_velocity_hard_limit=(
+                    self.admittance_measured_joint_velocity_hard_limit
+                ),
+                measured_velocity_violation_cycles=(
+                    self.admittance_measured_velocity_violation_cycles
+                ),
+            ))
+        hybrid_settings = admittance_settings + (
+            "cartesian_stiffness",
+            "cartesian_damping",
+            "cartesian_model_scale",
+            "cartesian_nullspace_stiffness",
+            "cartesian_nullspace_damping",
+            "hybrid_admittance_axes",
+            "hybrid_desired_wrench",
+        )
+        if (
+            model is not None
+            and hasattr(self, "hybrid_admittance_controller")
+            and all(hasattr(self, name) for name in hybrid_settings)
+        ):
+            hybrid_velocity_ik = BoundedScrewVelocityIk(
+                model,
+                self.admittance_joint_velocity_limit,
+                damping=self.admittance_velocity_dls_damping,
+                task_weights=self.admittance_task_weights,
+                joint_limit_margin=self.admittance_joint_limit_margin,
+            )
+            controllers.append(HybridCartesianController(
+                model,
+                self.hybrid_admittance_controller,
+                hybrid_velocity_ik,
+                self.cartesian_stiffness,
+                self.cartesian_damping,
+                self.admittance_mit_kp,
+                self.admittance_mit_kd,
+                self.admittance_mit_torque_limit,
+                admittance_axes=self.hybrid_admittance_axes,
+                desired_wrench=self.hybrid_desired_wrench,
+                model_scale=self.cartesian_model_scale,
+                nullspace_stiffness=self.cartesian_nullspace_stiffness,
+                nullspace_damping=self.cartesian_nullspace_damping,
+                nullspace_enabled=(
+                    getattr(self, "robot_model", "piper_l") == "nero"
+                ),
                 measured_velocity_limit=(
                     self.admittance_measured_joint_velocity_stop_limit
                 ),
@@ -1874,11 +1920,15 @@ class ArmKeyboardController(Node):
             keys = [0] * KEY_COUNT
 
         state_keys = list(keys)
-        if self.admittance_enabled:
+        if (
+            getattr(self, "admittance_enabled", False)
+            or getattr(self, "hybrid_enabled", False)
+        ):
             permitted = {
                 KEY_ESTOP,
                 KEY_IMPEDANCE_TOGGLE,
                 KEY_ADMITTANCE_TOGGLE,
+                KEY_HYBRID_TOGGLE,
             }
             state_keys = [
                 value if index in permitted else 0
@@ -1900,13 +1950,20 @@ class ArmKeyboardController(Node):
         if self.emergency_stopped:
             return
 
-        if (
-            update.impedance_toggle_requested
-            and update.admittance_toggle_requested
-        ):
+        interaction_requests = sum((
+            update.impedance_toggle_requested,
+            update.admittance_toggle_requested,
+            update.hybrid_toggle_requested,
+        ))
+        if interaction_requests > 1:
             self.get_logger().warning(
-                "I and O were pressed together; interaction mode unchanged"
+                "I, O, and H are mutually exclusive; interaction mode "
+                "unchanged"
             )
+            return
+
+        if update.hybrid_toggle_requested:
+            self.toggle_hybrid()
             return
 
         if update.admittance_toggle_requested:
@@ -1917,7 +1974,10 @@ class ArmKeyboardController(Node):
             self.toggle_impedance()
             return
 
-        if self.admittance_enabled:
+        if (
+            getattr(self, "admittance_enabled", False)
+            or getattr(self, "hybrid_enabled", False)
+        ):
             return
 
         if update.mode_toggle_requested:
@@ -1940,9 +2000,18 @@ class ArmKeyboardController(Node):
         self.send_target(f"joint {update.selected_joint + 1} jog")
 
     def toggle_control_mode(self):
-        if self.admittance_enabled:
+        if (
+            getattr(self, "admittance_enabled", False)
+            or getattr(self, "hybrid_enabled", False)
+        ):
+            active = (
+                "hybrid"
+                if getattr(self, "hybrid_enabled", False)
+                else "admittance"
+            )
+            key = "H" if active == "hybrid" else "O"
             self.get_logger().warning(
-                "P is locked while admittance is active; press O to exit"
+                f"P is locked while {active} is active; press {key} to exit"
             )
             return
         if self.control_mode == "joint":
@@ -2149,6 +2218,11 @@ class ArmKeyboardController(Node):
     def _enter_normal_interaction_mode(self, reason):
         """Exit the active interaction controller and hold in planned mode."""
         self._check_interaction_mode_invariant()
+        if getattr(self, "hybrid_enabled", False):
+            restored = self._exit_hybrid(reason)
+            if restored:
+                self._check_interaction_mode_invariant()
+            return restored
         if getattr(self, "admittance_enabled", False):
             restored = self._exit_admittance(reason)
             if restored:
@@ -2169,6 +2243,7 @@ class ArmKeyboardController(Node):
         return lifecycle.synchronize(
             getattr(self, "impedance_enabled", False),
             getattr(self, "admittance_enabled", False),
+            getattr(self, "hybrid_enabled", False),
         )
 
     def _plan_interaction_mode(self, target):
@@ -2184,11 +2259,16 @@ class ArmKeyboardController(Node):
             lifecycle.synchronize(
                 getattr(self, "impedance_enabled", False),
                 getattr(self, "admittance_enabled", False),
+                getattr(self, "hybrid_enabled", False),
             )
             self.interaction_lifecycle = lifecycle
         active = lifecycle.commit(mode)
         self.impedance_enabled = active == "impedance"
         self.admittance_enabled = active == "admittance"
+        self.hybrid_enabled = active == "hybrid"
+        velocity_guard = getattr(self, "interaction_velocity_guard", None)
+        if velocity_guard is not None:
+            velocity_guard.reset()
         return active
 
     def toggle_admittance(self):
@@ -2343,6 +2423,150 @@ class ArmKeyboardController(Node):
         )
         self.get_logger().info(
             "Cartesian admittance MIT exited; backend=planned position"
+        )
+        return True
+
+    def toggle_hybrid(self):
+        """Toggle complementary Cartesian impedance/admittance control."""
+        transition = self._plan_interaction_mode("hybrid")
+        if transition.target == "normal":
+            self._enter_normal_interaction_mode("H toggle")
+            return
+        if (
+            transition.path[0] == "normal"
+            and not self._enter_normal_interaction_mode(
+                "switching to hybrid"
+            )
+        ):
+            self.get_logger().error(
+                "cannot enter hybrid: normal mode was not reached"
+            )
+            return
+        if self.execute_motion and not self.arm_ready:
+            self.get_logger().error(
+                "cannot enter hybrid: arm is not ready"
+            )
+            return
+        model = getattr(self, "gravity_model", None)
+        if model is None:
+            self.get_logger().error(
+                "cannot enter hybrid: URDF screw model is unavailable"
+            )
+            return
+        feedback = self.read_motor_feedback() if self.execute_motion else None
+        if self.execute_motion and feedback is None:
+            self.get_logger().error(
+                "cannot enter hybrid: complete q/dq/torque feedback is "
+                "required"
+            )
+            return
+        if (
+            self.execute_motion
+            and time.monotonic() - self.latest_external_wrench_received_at
+            > self.admittance_wrench_timeout
+        ):
+            self.get_logger().error(
+                "cannot enter hybrid: momentum-observer wrench is stale; "
+                "check /arm_external_joint_torque"
+            )
+            return
+        joints = (
+            feedback.position
+            if feedback is not None
+            else self.current_or_target_joints()
+        )
+        pose = model.forward_kinematics(joints)
+        joint_count = int(getattr(
+            self, "joint_count", len(self.jog.target_joints)
+        ))
+        state = ControlState(
+            joints,
+            feedback.velocity
+            if feedback is not None else np.zeros(joint_count),
+            feedback.torque
+            if feedback is not None else np.zeros(joint_count),
+            velocity_valid=feedback is not None,
+            effort_valid=feedback is not None,
+        )
+        try:
+            engine = self._get_control_engine("hybrid_cartesian")
+            engine.reset("hybrid_cartesian", state)
+            if feedback is not None:
+                preflight = ControlInput(
+                    time.monotonic(),
+                    1.0 / self.mit_command_rate,
+                    state,
+                    ControlReference.hold(joints, np.zeros(6)),
+                )
+                engine.step("hybrid_cartesian", preflight)
+                engine.reset("hybrid_cartesian", state)
+        except Exception as error:
+            self.get_logger().error(
+                "cannot enter hybrid MIT: formula preflight failed: "
+                f"{error}"
+            )
+            return
+        self.hybrid_previous_control_mode = self.control_mode
+        self.control_mode = "ik"
+        self.jog.sync_target(joints, clamp_to_limits=False)
+        self.mit_trajectory.reset(joints)
+        self.ik_target_position = np.asarray(pose[:3, 3], dtype=float)
+        self.ik_target_rotation = np.asarray(pose[:3, :3], dtype=float)
+        self.ik_valid_history.clear()
+        self.remember_ik_valid(
+            self.ik_target_position, self.ik_target_rotation, joints
+        )
+        self.latest_external_wrench = np.zeros(6)
+        self.latest_external_wrench_received_at = time.monotonic()
+        self.last_hybrid_tick_time = None
+        self._commit_interaction_mode("hybrid")
+        self._check_interaction_mode_invariant()
+        self.get_logger().warning(
+            "backend=low-gain MIT + control=Cartesian hybrid; "
+            f"admittance axes={self.hybrid_admittance_axes}; "
+            "I and O are interlocked; press H to exit"
+        )
+        self._publish_control_event(
+            "controller_enabled",
+            controller="hybrid_cartesian",
+            admittance_axes=self.hybrid_admittance_axes,
+        )
+        if feedback is not None:
+            self._hybrid_tick(feedback)
+
+    def _exit_hybrid(self, reason):
+        """Restore planned control before committing the normal mode."""
+        if not getattr(self, "hybrid_enabled", False):
+            return True
+        joints = self.current_or_target_joints()
+        self.jog.sync_target(joints, clamp_to_limits=False)
+        if self.execute_motion and not prepare_planned_joint_mode(
+            self.arm, self.position_mode_timeout
+        ):
+            self.get_logger().error(
+                "failed to restore planned joint mode after hybrid MIT exit"
+            )
+            return False
+        self._commit_interaction_mode("normal")
+        self.last_hybrid_tick_time = None
+        model = getattr(self, "gravity_model", None)
+        if model is not None:
+            pose = model.forward_kinematics(joints)
+            self.ik_target_position = np.asarray(pose[:3, 3], dtype=float)
+            self.ik_target_rotation = np.asarray(pose[:3, :3], dtype=float)
+        self.control_mode = getattr(
+            self, "hybrid_previous_control_mode", "joint"
+        )
+        self._check_interaction_mode_invariant()
+        self.send_target(f"hybrid exit hold ({reason})")
+        self._publish_control_event(
+            "controller_disabled",
+            controller="hybrid_cartesian",
+            admittance_axes=self.hybrid_admittance_axes,
+            reason=str(reason),
+        )
+        self.get_logger().info(
+            "Cartesian hybrid MIT exited; backend=planned position"
         )
         return True
 
@@ -2517,8 +2741,33 @@ class ArmKeyboardController(Node):
         message.effort = torque.tolist()
         publisher.publish(message)
 
+    def _validate_interaction_velocity(self, feedback, mode):
+        """Apply one shared measured-speed policy to every MIT mode."""
+        guard = getattr(self, "interaction_velocity_guard", None)
+        if guard is None:
+            return True
+        try:
+            guard.validate(feedback.velocity)
+        except (ControlSafetyError, ValueError) as error:
+            safety = getattr(self, "interaction_safety", None)
+            stop = getattr(
+                safety, "measured_velocity_stop_limit", guard.sustained_limits
+            )
+            hard = getattr(
+                safety, "measured_velocity_hard_limit", guard.hard_limits
+            )
+            self.get_logger().error(
+                f"{mode} measured joint velocity safety limit exceeded: "
+                f"dq={np.round(feedback.velocity, 3).tolist()}, "
+                f"stop={np.asarray(stop).tolist()}, "
+                f"hard={np.asarray(hard).tolist()} rad/s; {error}"
+            )
+            self.trigger_emergency_stop()
+            return False
+        return True
+
     def mit_tick(self):
-        """Publish one shared sample, then run admittance or MIT impedance."""
+        """Publish one sample, then run the one active interaction mode."""
         if self.emergency_stopped:
             return
         if not self.execute_motion:
@@ -2532,6 +2781,38 @@ class ArmKeyboardController(Node):
         feedback = self.read_motor_feedback()
         if feedback is not None:
             self._publish_dynamics_state(feedback)
+        active_mode = None
+        if getattr(self, "hybrid_enabled", False):
+            active_mode = "hybrid"
+        elif getattr(self, "admittance_enabled", False):
+            active_mode = "admittance"
+        elif self.impedance_enabled:
+            active_mode = "impedance"
+        if (
+            active_mode is not None
+            and getattr(self, "interaction_velocity_guard", None) is not None
+        ):
+            if feedback is None:
+                self.get_logger().warning(
+                    f"{active_mode} requires complete q/dq/torque feedback; "
+                    "holding",
+                    throttle_duration_sec=1.0,
+                )
+                return
+            if not self._validate_interaction_velocity(
+                feedback, active_mode
+            ):
+                return
+        if getattr(self, "hybrid_enabled", False):
+            if feedback is None:
+                self.get_logger().warning(
+                    "hybrid control requires complete q/dq/torque feedback; "
+                    "holding",
+                    throttle_duration_sec=1.0,
+                )
+                return
+            self._hybrid_tick(feedback)
+            return
         if getattr(self, "admittance_enabled", False):
             if feedback is None:
                 self.get_logger().warning(
@@ -2568,7 +2849,7 @@ class ArmKeyboardController(Node):
                 getattr(
                     self,
                     "mit_gravity_torque_limit",
-                    [10.0] * self.joint_count,
+                    [8.0] * self.joint_count,
                 ),
                 dtype=float,
             )
@@ -2631,6 +2912,113 @@ class ArmKeyboardController(Node):
         )
         self._send_control_result(result)
         self._publish_control_result(sample, result, "impedance")
+
+    def _hybrid_tick(self, feedback):
+        """Run complementary Twist admittance and Cartesian impedance."""
+        now = time.monotonic()
+        nominal_period = 1.0 / self.mit_command_rate
+        previous = self.last_hybrid_tick_time
+        period = (
+            nominal_period
+            if previous is None
+            else float(np.clip(
+                now - previous,
+                0.25 * nominal_period,
+                2.0 * nominal_period,
+            ))
+        )
+        self.last_hybrid_tick_time = now
+        wrench_age = now - self.latest_external_wrench_received_at
+        wrench = (
+            self.latest_external_wrench
+            if wrench_age <= self.admittance_wrench_timeout
+            else np.zeros(6)
+        )
+        control_state = ControlState(
+            feedback.position, feedback.velocity, feedback.torque
+        )
+        sample = ControlInput(
+            now,
+            period,
+            control_state,
+            ControlReference.hold(feedback.position, wrench),
+        )
+        try:
+            result = self._get_control_engine("hybrid_cartesian").step(
+                "hybrid_cartesian", sample
+            )
+        except (ControlSafetyError, ValueError) as error:
+            if isinstance(error, ControlSafetyError) and error.reason in (
+                "measured_velocity_limit",
+                "measured_velocity_hard_limit",
+            ):
+                hard_stop = error.reason == "measured_velocity_hard_limit"
+                limit = (
+                    self.admittance_measured_joint_velocity_hard_limit
+                    if hard_stop
+                    else self.admittance_measured_joint_velocity_stop_limit
+                )
+                limit_kind = (
+                    "hard limit" if hard_stop else "sustained limit"
+                )
+                self.get_logger().error(
+                    f"hybrid measured joint velocity {limit_kind} exceeded: "
+                    f"dq={np.round(feedback.velocity, 3).tolist()}, "
+                    "limit=%s rad/s"
+                    % np.asarray(limit, dtype=float).tolist()
+                )
+                self.trigger_emergency_stop()
+                return
+            self.get_logger().warning(
+                f"hybrid safety rejection; exiting to hold: {error}"
+            )
+            self._exit_hybrid("velocity IK or MIT safety rejection")
+            return
+        joints = result.command.position
+        desired_pose = np.asarray(result.signals["desired_pose"], dtype=float)
+        self.ik_target_position = desired_pose[:3, 3].copy()
+        self.ik_target_rotation = desired_pose[:3, :3].copy()
+        self.remember_ik_valid(
+            self.ik_target_position,
+            self.ik_target_rotation,
+            joints,
+        )
+        try:
+            self._send_control_result(result)
+        except Exception as error:
+            self.get_logger().error(f"hybrid MIT command failed: {error}")
+            self.trigger_emergency_stop()
+            return
+        self._publish_control_result(sample, result, "hybrid")
+        if result.signals.get("torque_saturated", False):
+            self.get_logger().warning(
+                "hybrid MIT torque envelope active: requested=%s, "
+                "sent=%s, reason=%s"
+                % (
+                    np.round(
+                        result.signals["torque_total_requested"], 3
+                    ).tolist(),
+                    np.round(
+                        result.signals["torque_total_estimated"], 3
+                    ).tolist(),
+                    result.signals["torque_saturation_reason"],
+                ),
+                throttle_duration_sec=1.0,
+            )
+        self.get_logger().info(
+            "hybrid axes=%s adm_twist=%s imp_wrench=%s model=%s "
+            "total=%s N.m"
+            % (
+                self.hybrid_admittance_axes,
+                np.round(result.signals["admittance_twist"], 4).tolist(),
+                np.round(result.signals["commanded_wrench"], 3).tolist(),
+                np.round(
+                    result.signals["torque_model_requested"], 3
+                ).tolist(),
+                np.round(result.command.estimated_torque, 3).tolist(),
+            ),
+            throttle_duration_sec=1.0,
+        )
 
     def _admittance_tick(self, feedback):
         """Advance admittance and send one bounded low-gain MIT command."""
@@ -2856,8 +3244,10 @@ class ArmKeyboardController(Node):
         )
         if not self.execute_motion:
             return
-        if self.impedance_enabled or getattr(
-            self, "admittance_enabled", False
+        if (
+            self.impedance_enabled
+            or getattr(self, "admittance_enabled", False)
+            or getattr(self, "hybrid_enabled", False)
         ):
             return
         if not self.arm_ready:

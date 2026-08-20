@@ -16,6 +16,8 @@ from armbycontroller.control.model_compensation import ModelCompensator
 from armbycontroller.control.mit import MitTorqueEnvelope
 from armbycontroller.control.mit import MitTorqueResult
 from armbycontroller.control.safety import ControlCycleGuard
+from armbycontroller.control.safety import InteractionSafetyLimits
+from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control.safety import SustainedVelocityGuard
 
 __all__ = [
@@ -27,7 +29,9 @@ __all__ = [
     "ControlSafetyError",
     "ControlState",
     "InteractionModeLifecycle",
+    "InteractionSafetyLimits",
     "InteractionTransition",
+    "INTERACTION_TORQUE_LIMIT_MAX",
     "MitCommand",
     "ModelCompensation",
     "ModelCompensator",

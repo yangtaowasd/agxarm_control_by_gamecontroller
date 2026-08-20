@@ -5,14 +5,16 @@
 本项目通过 ROS 2、键盘输入和 AGX SDK 控制 Nero 与 Piper-L。当前分支
 `feature/cartesian-impedance-step-by-step` 的目标，是从已经存在的关节 MIT
 阻抗出发，逐层建立公式清楚、坐标一致、可测试的空间笛卡尔阻抗，并为
-Nero/Piper-L 增加由动量观测外力驱动、分为零力和阻力两种的笛卡尔导纳模式。
+Nero/Piper-L 增加由动量观测外力驱动、分为零力和阻力两种的笛卡尔导纳模式，
+以及按任务方向互补分解的阻抗/导纳混合模式。
 
 This project controls Nero and Piper-L through ROS 2, keyboard input, and the
 AGX SDK. The goal of `feature/cartesian-impedance-step-by-step` is to start
 from the existing joint MIT impedance and build a formula-explicit,
 frame-consistent, testable Cartesian impedance controller in stages, plus
 zero-force and resistive Cartesian-admittance modes for Nero and Piper-L,
-driven by momentum-observer external torque.
+driven by momentum-observer external torque, and a direction-selective,
+complementary impedance/admittance hybrid mode.
 
 当前阶段已把纯数学核心接入 `mit_tick()` 和 AGX MIT/CAN。默认
 `impedance_backend:=cartesian`；设为 `joint` 可以保留旧关节 MIT 作为对照。
@@ -28,14 +30,16 @@ structure while retaining this project's two virtual laws, observer, and
 interlock. Passing software integration tests does not establish physical
 stability of the integrated controller on real hardware.
 
-交互后端严格互锁：`I` 切换阻抗，`O` 切换导纳；跨模式切换严格经过
+交互后端严格互锁：`I` 切换阻抗，`O` 切换导纳，`H` 切换混合；跨模式切换严格经过
 `当前模式 -> 普通 planned-position 模式 -> 目标模式`，普通模式恢复失败时拒绝
-进入目标模式，两者绝不同时运行。两种机械臂均支持导纳，但参数分别位于各自 YAML。 /
-Interaction backends are strictly interlocked: `I` toggles impedance and `O`
-toggles admittance. A cross-mode transition strictly follows `current mode ->
+进入目标模式，三个交互模式绝不同时运行。两种机械臂均支持导纳和混合，但机器人
+相关参数仍分别位于各自 YAML。 / Interaction backends are strictly
+interlocked: `I` toggles impedance, `O` toggles admittance, and `H` toggles
+hybrid control. A cross-mode transition strictly follows `current mode ->
 normal planned-position mode -> target mode`; failure to restore normal mode
-rejects the target mode, and impedance and admittance never run together.
-Both arms support admittance, with independent robot-specific YAML tuning.
+rejects the target mode, and the three interaction modes never run together.
+Both arms support admittance and hybrid control, with independent
+robot-specific YAML tuning.
 
 真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建探测
 实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
@@ -426,6 +430,49 @@ stays within each joint limit. If PD feedback alone
 cannot be counteracted within the allowed `tau_ff`, the cycle is rejected and
 the controller exits to a normal hold.
 
+### 5.10 Twist 层互补混合控制 / Complementary Twist-level hybrid control
+
+混合模式仍遵守本项目的六维顺序 `[rx,ry,rz,x,y,z]=[角;线]`。配置
+`hybrid_admittance_axes` 生成对角选择矩阵 `S_a`，互补阻抗选择矩阵严格取
+`S_i=I-S_a`，因此每个任务方向只有一个外环拥有。默认值 `z` 对应
+`S_a=diag(0,0,0,0,0,1)`：基座 Z 平移走导纳，其余五维围绕按 `H` 时捕获的
+末端位姿走阻抗。 / Hybrid mode retains the project ordering
+`[rx,ry,rz,x,y,z]=[angular;linear]`. `hybrid_admittance_axes` constructs the
+diagonal selection matrix `S_a`, and the complementary impedance selection is
+strictly `S_i=I-S_a`, so one outer loop owns each task direction. The default
+`z` gives `S_a=diag(0,0,0,0,0,1)`: base-frame Z translation is admittance,
+while the remaining five dimensions use impedance around the pose captured
+when `H` is pressed.
+
+```text
+W_a     = S_a (W_ext - W_des)
+V_a     = S_a Admittance(W_a)
+W_i     = S_i [K e_X + D (0 - V_measured)]
+dq_ref  = bounded_screw_velocity_IK(V_a)
+q_ref   = q_measured + dq_ref dt
+tau_ff  = Jg^T W_i + tau_null + C(q,dq)dq + g(q)
+tau_est = kp (q_ref-q) + kd (dq_ref-dq) + tau_ff
+```
+
+`hybrid_desired_wrench` 的顺序为 `[Mx,My,Mz,Fx,Fy,Fz]`，只有 `S_a` 选中的
+分量进入导纳。实现由一个 `HybridCartesianController` 独占输出：选择、导纳
+Twist、互补阻抗 wrench、受限旋量速度 IK、模型补偿和 MIT 包络在同一周期合成，
+不会同时启动原来的纯阻抗与纯导纳 controller。混合模式复用统一交互安全对象的
+参考/实测速度边界，并使用导纳低增益 MIT 参数；包含阻抗、零空间、模型和 PD 的估算总力矩实施逐关节
+最大 `8 N.m` 上限。当前选择轴固定表达在 `base_link`；曲面法向动态投影尚未实现。
+/
+`hybrid_desired_wrench` is ordered `[Mx,My,Mz,Fx,Fy,Fz]`, and only components
+selected by `S_a` enter admittance. One `HybridCartesianController` owns the
+output: selection, admittance Twist, complementary impedance wrench, bounded
+screw-velocity IK, model compensation, and the MIT envelope are combined in
+one cycle. The existing pure impedance and pure admittance controllers are not
+run simultaneously. Hybrid mode reuses the unified interaction reference and
+measured-speed limits plus admittance low-gain MIT tuning, and applies a
+per-joint maximum `8 N.m`
+estimated-total-torque envelope including impedance, nullspace, model, and PD
+terms. Selection axes are currently fixed in `base_link`; dynamic
+surface-normal projection is not yet implemented.
+
 ## 6. 架构 / Architecture
 
 ```text
@@ -435,18 +482,16 @@ Keyboard / IK reference       measured q/qdot/tau       observer wrench
                                        |
                                 ControlInput
                                        |
-              +------------------------+------------------------+
-              |                        |                        |
-       joint_impedance         cartesian_impedance     cartesian_admittance
-       controller adapter       controller adapter      controller adapter
-              |                        |                        |
-         MIT command          J^T F + null + model       admittance twist
-              |                  zero-gain MIT           + bounded screw IK
-              |                        |                 + low-gain MIT
-              +------------------------+------------------------+
-                                                   |
-                                              ControlResult
-                                                   |
+       +--------------+--------------+----------------+----------------+
+       |              |              |                |                |
+ joint_impedance  cartesian_imp.  cartesian_adm.  hybrid_cartesian    |
+       |              |              |           Sa Vadm + Si Wimp    |
+       |          J^T W + model   admittance Twist  + screw IK        |
+       |              |          + screw IK + MIT  + one MIT output   |
+       +--------------+--------------+----------------+----------------+
+                                      |
+                                 ControlResult
+                                      |
                        +---------------------------+-------------------+
                        |                                               |
                ROS/AGX hardware adapter                       control_sample
@@ -458,35 +503,36 @@ Keyboard / IK reference       measured q/qdot/tau       observer wrench
                                            manifest + samples + events + summary
 ```
 
-`ControlEngine` 只接受标准化 `ControlInput`，并返回 `ControlResult`；当前三个
+`ControlEngine` 只接受标准化 `ControlInput`，并返回 `ControlResult`；当前四个
 交互 adapter 都生成 MIT 命令。adapter 不访问 ROS、磁盘或 CAN；ROS 节点保留
 模式互锁、状态采集、安全检查和硬件发送。旧关节 MIT 路径仍可通过
 `impedance_backend:=joint` 选择，用于同机对照。
 
 `ControlEngine` consumes only normalized `ControlInput` and returns a
-`ControlResult`; all three current interaction adapters produce MIT commands.
+`ControlResult`; all four current interaction adapters produce MIT commands.
 The controller adapters do not access
 ROS, disk, or CAN; the ROS node retains interlocks, acquisition, safety checks,
 and hardware transmission. The old joint MIT path remains selectable with
 `impedance_backend:=joint` for comparison on the same arm.
 
-阻抗和导纳共用五个控制律之外的 deep module：笛卡尔任务几何、模型补偿、MIT
-安全包络、控制周期 guard 和交互模式生命周期。K/D/M、零空间、摩擦/保持及参考
-生成仍分别留在 `impedance/` 与 `admittance/`，因此共享安全语义不会混合两种
-手感。 / Impedance and admittance share five deep modules outside their
-control laws: Cartesian Task Geometry, Model Compensation, MIT Safety
-Envelope, Control Cycle Guard, and Interaction Mode Lifecycle. K/D/M laws,
-nullspace, friction/holding, and reference generation remain local to
-`impedance/` and `admittance/`, so shared safety semantics do not merge their
-feel.
+四个交互 adapter 共用六个控制律之外的 deep module：笛卡尔任务几何、模型补偿、
+交互安全边界、MIT 安全包络、控制周期 guard 和交互模式生命周期。K/D/M、零空间、
+摩擦/保持及参考生成仍分别留在 `impedance/`、`admittance/` 与 `hybrid/`，因此共享
+安全语义不会混合各控制模式的手感。 / The four interaction adapters share
+six deep modules outside their control laws: Cartesian Task Geometry, Model
+Compensation, Interaction Safety Limits, MIT Safety Envelope, Control Cycle
+Guard, and Interaction Mode Lifecycle. K/D/M laws, nullspace,
+friction/holding, and reference generation remain local to `impedance/`,
+`admittance/`, and `hybrid/`, so shared safety semantics do not merge their
+control feel.
 
 工作区的 `nero_admittance_mit` 是下游结构的实机验证基线。本仓库现已采用相同的
 `导纳速度 -> 受限旋量 Jacobian IK -> 实测 q 重锚定 -> 低增益 MIT`，但保留自己的
-`zero_force`/`resistive` 动力学、统一观测器、I/O 互锁和 8 N·m 安全上限。 /
+`zero_force`/`resistive` 动力学、统一观测器、I/O/H 互锁和 8 N·m 安全上限。 /
 The workspace's `nero_admittance_mit` is the hardware-validated downstream
 baseline. This repository now uses the same `admittance twist -> bounded
 screw-Jacobian IK -> measured-q reanchoring -> low-gain MIT` chain while retaining
-its own `zero_force`/`resistive` dynamics, shared observer, I/O interlock, and
+its own `zero_force`/`resistive` dynamics, shared observer, I/O/H interlock, and
 8 N·m safety ceiling.
 
 ## 7. 数据流 / Data flow
@@ -527,10 +573,10 @@ profile is used.
 12. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
     `move_mit(kp=0,kd=0,t_ff=tau_cmd)`.
 13. 控制器每个 100 Hz 周期读取一次 SDK 缓存的 `q/qdot/tau_motor`，并发布
-    `/arm_dynamics_state`；该流在 planned、阻抗和导纳模式都存在。 / Once per
+    `/arm_dynamics_state`；该流在 planned、阻抗、导纳和混合模式都存在。 / Once per
     100 Hz cycle, the controller reads cached SDK `q/qdot/tau_motor` and
     publishes `/arm_dynamics_state`; the stream exists in planned, impedance,
-    and admittance modes.
+    admittance, and hybrid modes.
 14. 独立观测器进程只订阅该 topic；它不连接 CAN，也不再次读取机械臂。 / The
     separate observer process only subscribes to that topic; it neither
     connects to CAN nor reads the arm again.
@@ -541,20 +587,26 @@ profile is used.
 15. 观测器发布 `/arm_external_joint_torque`；`JointState.effort` 是 `r`，单位
     N·m。 / The observer publishes `/arm_external_joint_torque`; its
     `JointState.effort` is `r` in N·m.
-16. 任一机械臂导纳开启时，共享笛卡尔任务几何使用
+16. 任一机械臂导纳或混合开启时，共享笛卡尔任务几何使用
     `tau_ext=J_g^T F_ext` 的阻尼最小二乘解估计 `F_ext`。`zero_force` 积分
     `M*xdd+D0*xd+Kh*x+Fstick/slip=F_ext`，`resistive` 积分
     `M*xdd+Dr*xd+Kr*x=F_ext`；两者输出连续导纳 twist，并保留有界 SE(3) 状态
     用于诊断和回中动力学。 /
-    With admittance active on either arm, a damped-least-squares solution of
+    With admittance or hybrid control active on either arm, a
+    damped-least-squares solution of
     `tau_ext=J_g^T F_ext` estimates `F_ext`. `zero_force` integrates
     `M*xdd+D0*xd+Kh*x+Fstick/slip=F_ext`, while `resistive` integrates
     `M*xdd+Dr*xd+Kr*x=F_ext`; both output a continuous admittance twist and
     retain bounded SE(3) state for diagnostics and restoring dynamics.
-17. 受限旋量速度 IK 从 PoE `J_s` 构造 `J_g` 并用加权 DLS 求 `dq_ref`，同时实施关节速度和预测位置边界；每周期令
+17. 纯导纳把全部 Twist 送入受限旋量速度 IK；混合先用 `S_a` 保留选中方向的
+    导纳 Twist，同时用 `S_i=I-S_a` 在其余方向生成阻抗 wrench。两者均从 PoE
+    `J_s` 构造 `J_g` 并用加权 DLS 求 `dq_ref`，同时实施关节速度和预测位置边界；每周期令
     `q_ref=q_measured+dq_ref*dt`，再以低增益 `kp/kd`、模型重力前馈和估算总力矩
-    上限发送 `move_mit`。 / Bounded Screw Velocity IK builds `J_g` from the PoE
-    `J_s` and solves weighted DLS for `dq_ref` while enforcing
+    上限发送 `move_mit`。 / Pure admittance sends the full Twist to Bounded
+    Screw Velocity IK; hybrid control first retains selected Twist directions
+    with `S_a` and creates impedance wrench on the complement
+    `S_i=I-S_a`. Both build `J_g` from PoE `J_s` and solve weighted DLS for
+    `dq_ref` while enforcing
     joint-velocity and predictive-position bounds. Each cycle sets
     `q_ref=q_measured+dq_ref*dt`, then sends `move_mit` with low `kp/kd`, model
     gravity feedforward, and an estimated-total-torque limit.
@@ -583,18 +635,20 @@ profile is used.
 | `armbycontroller/admittance/zero_force.py` | Nero 优先的弱保持、阻尼、粘/滑抗漂移柔顺零力 / Nero-first anti-drift soft zero force with weak holding, damping, and stick/slip resistance |
 | `armbycontroller/admittance/resistive.py` | 正阻尼和正回中刚度的阻力导纳 / Resistive admittance with positive damping and restoring stiffness |
 | `armbycontroller/admittance/controller.py` | 导纳 twist 到受限旋量速度 IK、实测位置重锚定和低增益 MIT 的 controller adapter / Controller adapter from admittance twist to bounded screw velocity IK, measured-position reanchoring, and low-gain MIT |
+| `armbycontroller/hybrid/selection.py` | 按项目 `[rx,ry,rz,x,y,z]` 顺序解析固定基座轴并生成任务选择 mask / Parses fixed base-frame axes in project order and creates task-selection masks |
+| `armbycontroller/hybrid/controller.py` | 单一所有者的互补混合 adapter：选中轴导纳 Twist、其余轴阻抗 wrench、受限旋量 IK、模型补偿和一个 MIT 包络 / One-owner complementary hybrid adapter: selected-axis admittance Twist, remaining-axis impedance wrench, bounded screw IK, model compensation, and one MIT envelope |
 | `armbycontroller/control/core.py` | 统一 `ControlInput -> ControlResult` interface、MIT/planned 命令类型、`ControlEngine` 与 schema v1 sample / Unified controller interface, command types, engine, and schema-v1 sample |
-| `armbycontroller/control/model_compensation.py` | 阻抗与导纳共享的重力、偏置和完整逆动力学模型补偿 / Gravity, bias, and full inverse-dynamics Model Compensation shared by impedance and admittance |
+| `armbycontroller/control/model_compensation.py` | 阻抗、导纳与混合共享的重力、偏置和完整逆动力学模型补偿 / Gravity, bias, and full inverse-dynamics Model Compensation shared by impedance, admittance, and hybrid control |
 | `armbycontroller/control/mit.py` | 统一 MIT Safety Envelope、总力矩可行性和力矩分解诊断 / Shared MIT Safety Envelope, total-torque feasibility, and torque-decomposition diagnostics |
-| `armbycontroller/control/safety.py` | controller adapter 共用的反馈完整性、实测位置/周期 guard，以及导纳持续/硬实测速度保护 / Shared feedback-completeness, measured-position/period guard, plus sustained/hard measured-velocity protection for admittance |
-| `armbycontroller/control/interaction.py` | `normal/impedance/admittance` 互锁和强制经过普通模式的迁移路径 / Normal/impedance/admittance interlock and normal-mediated transition paths |
+| `armbycontroller/control/safety.py` | `InteractionSafetyLimits` 统一四个 MIT adapter 的力矩、参考/实测速度和关节边界，并提供反馈完整性、周期及持续/硬速度 guard / `InteractionSafetyLimits` unifies torque, reference/measured speed, and joint boundaries for all four MIT adapters and provides feedback, period, and sustained/hard-speed guards |
+| `armbycontroller/control/interaction.py` | `normal/impedance/admittance/hybrid` 互锁和强制经过普通模式的迁移路径 / Normal/impedance/admittance/hybrid interlock and normal-mediated transition paths |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射、断开和 profile 化正式重连 / Shared DEFAULT probe, version mapping, disconnect, and profile-specific formal reconnect for Nero/Piper-L |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
 | `armbycontroller/ik/screw.py` | 完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK，共享 PoE 模型 / Full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over one PoE model |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
-| `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
+| `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O/H 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O/H interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
 | `armbycontroller/modeling/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
@@ -606,7 +660,8 @@ profile is used.
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
 | `test/test_momentum_observer.py` | 空间动量、动能梯度、残差收敛、离散稳定性及禁止 SDK/CAN 访问 / Spatial momentum, kinetic gradient, residual convergence, discrete stability, and forbidden SDK/CAN-access contracts |
 | `test/test_cartesian_admittance.py` | 抗漂移柔顺零力、阻力平衡、旋转向量、边界和重置契约 / Anti-drift soft-zero-force, resistive-equilibrium, rotation-vector, bound, and reset contracts |
-| `test/test_control_interface.py` | 三个 controller adapter 的共用 interface、命令和 sample schema 契约 / Shared interface, command, and sample-schema contracts for three adapters |
+| `test/test_control_interface.py` | 四种交互模式的共用 interface、命令、sample schema 和互锁契约 / Shared interface, command, sample-schema, and interlock contracts for four interaction modes |
+| `test/test_hybrid_control.py` | 任务顺序、互补选择、导纳目标力投影和阻抗/导纳输出解耦契约 / Task ordering, complementary selection, desired-wrench projection, and impedance/admittance output-decoupling contracts |
 | `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
 | `test/test_hardware_connection.py` | 两次连接顺序、探测数据保存、版本到 profile 映射和失败断开契约 / Two-connection ordering, saved probe data, version-to-profile mapping, and failure-disconnect contracts |
 
@@ -634,6 +689,12 @@ implementation.
 | `firmware_probe_poll_period` | scalar | s | `0.1`；无数据时的查询间隔 / retry interval while data is absent |
 | `firmware_reconnect_delay` | scalar | s | `0.5`；探测连接断开与正式连接创建之间的等待 / delay between probe disconnect and formal-connection creation |
 | `impedance_backend` | string | — | `cartesian` (`joint` 可对照 / for comparison) |
+| `interaction_torque_limit` | 1 or n | N·m | `8.0` per joint；关节阻抗、笛卡尔阻抗、导纳和混合共用的估算总力矩上限 / estimated-total-torque limit shared by joint/Cartesian impedance, admittance, and hybrid |
+| `interaction_reference_joint_velocity_limit` | 1 or n | rad/s | `0.5` per joint；阻抗轨迹和导纳/混合旋量速度 IK 共用 / shared by impedance trajectories and admittance/hybrid screw-velocity IK |
+| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`1.5`; Piper-L=`1.0` per joint；持续速度停止线 / sustained measured-speed stop threshold |
+| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.0` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
+| `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
+| `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
 | `cartesian_impedance_base_z_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`（无补强 / isotropic）；Piper-L=`4.0`（基座 Z 补强 / reinforced） |
 | `cartesian_impedance_translation_stiffness` | scalar | N/m | Nero=`70.0`; Piper-L=`10.0` |
@@ -643,7 +704,6 @@ implementation.
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_joint_posture_stiffness` | 1 or n | N·m/rad | Nero=`[0,0.5,0.5,0.6,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
-| `cartesian_impedance_torque_limit` | 1 or n | N·m | `8.0` per joint |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
 | `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
 | `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
@@ -673,15 +733,11 @@ implementation.
 | `admittance_wrench_timeout` | scalar | s | `0.10`; stale wrench becomes zero |
 | `admittance_mit_kp` | n | N·m/rad | Nero=`[0.32,0.24,0.32,0.24,0.32,0.28,0.28]`; Piper-L=`[0.3,0.5,0.5,0.5,1.0,0.3]` |
 | `admittance_mit_kd` | n | N·m·s/rad | Nero=`0.08`; Piper-L=`0.01` per joint |
-| `admittance_mit_torque_limit` | 1 or n | N·m | `8.0` per joint on both arms; estimated MIT total |
 | `admittance_mit_model_scale` | scalar | — | `1.0`, range `[0,1]`; gravity feedforward scale |
-| `admittance_joint_velocity_limit` | 1 or n | rad/s | `0.5` per joint; bounds only `dq_ref` from screw velocity IK |
-| `admittance_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`1.5`, Piper-L=`1.0` per joint; sustained measured-speed stop threshold |
-| `admittance_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.0` per joint; immediate measured-speed hard stop |
-| `admittance_measured_velocity_violation_cycles` | scalar | cycles | `3`; consecutive sustained-threshold violations before E-stop |
 | `admittance_task_weights` | 6 | — | `[0.4,0.4,0.4,1,1,1]` in `[angular;linear]` order |
 | `admittance_velocity_dls_damping` | scalar | — | `0.02` |
-| `admittance_joint_limit_margin` | scalar | rad | `0.03`; predictive margin and maximum guarded recovery band outside URDF position limits |
+| `hybrid_admittance_axes` | string | — | `z`; base-frame names from `rx,ry,rz,x,y,z`, comma/space separated |
+| `hybrid_desired_wrench` | 6 | N·m, N | `[0,0,0,0,0,0]` in `[Mx,My,Mz,Fx,Fy,Fz]` order; only selected admittance axes apply |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
 | `control_sample_topic` | string | — | `/arm_control_sample`; schema-v1 JSON `std_msgs/String` |
@@ -701,12 +757,12 @@ remains an explicit manual torque only for the joint comparison backend when
 URDF compensation is absent.
 
 `mit_kp/mit_kd` 只属于 `joint` 对照 backend。Cartesian 阻抗 backend 无条件向
-固件发送 `kp=kd=0`，防止关节 PD 与 `J^T F` 重复计算。导纳独立使用低增益
+固件发送 `kp=kd=0`，防止关节 PD 与 `J^T F` 重复计算。导纳与混合独立使用低增益
 `admittance_mit_kp/kd` 跟踪每周期重锚定的短期参考。
 
 `mit_kp/mit_kd` belong only to the `joint` comparison backend. Cartesian
 impedance always sends `kp=kd=0`, preventing native joint PD from
-double-counting `J^T F`. Admittance independently uses low
+double-counting `J^T F`. Admittance and hybrid control independently use low
 `admittance_mit_kp/kd` to track its one-cycle, measured-state-reanchored
 reference.
 
@@ -750,12 +806,14 @@ in joint space before the total torque clip.
   实机启动直接失败。 / Hardware startup fails closed when firmware data is
   absent, `software_version` cannot be parsed, or the detected profile is not
   supported by the installed SDK.
-- 笛卡尔阻抗公式不做饱和；其 MIT adapter 对包含模型补偿的总力矩实施默认
-  ±8 N·m 绝对上限。导纳在两种机械臂上也统一使用 ±8 N·m 上限；两条
-  路径都不实施力矩变化率限制。 / The Cartesian-impedance formula is
-  unsaturated; its MIT adapter applies a default ±8 N·m absolute limit to total
-  torque including model support. Admittance also uses ±8 N·m on both arms.
-  Neither path implements a torque-rate limiter.
+- 关节阻抗、笛卡尔阻抗、导纳和混合都从同一个
+  `interaction_torque_limit` 读取逐关节估算总力矩上限，默认 ±8 N·m，且包含
+  feedback、模型、任务和辅助项；任何模式都不能配置超过 `8 N·m`。这些路径
+  都不实施力矩变化率限制。 / Joint impedance, Cartesian impedance,
+  admittance, and hybrid control all read their per-joint estimated-total-
+  torque envelope from `interaction_torque_limit`, default ±8 N·m including
+  feedback, model, task, and auxiliary terms. No mode accepts a value above
+  `8 N·m`, and none implements a torque-rate limiter.
 - `Kx/Dx` 必须对称半正定，以避免明显的主动负刚度/负阻尼配置。 / `Kx/Dx`
   must be symmetric positive semidefinite, rejecting obvious active negative
   stiffness/damping.
@@ -784,33 +842,35 @@ in joint space before the total torque clip.
   `/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
   its only input is the controller's reused 100 Hz `/arm_dynamics_state`
   stream.
-- `I/O` 是互锁切换，不是叠加：导纳和阻抗各自运行 MIT；
+- `I/O/H` 是互锁切换，不是三个 controller 叠加：纯导纳、纯阻抗和混合各自运行
+  一份 MIT 输出；
   跨模式必须先成功回到普通 planned-position 并保持当前位置，再进入目标模式；
-  同时按下两个键会保持原模式。 / `I/O` are interlocked switches, not layers:
-  admittance and impedance each run MIT, and every cross-mode transition must
+  同时请求其中两个或三个模式会保持原模式。 / `I/O/H` are interlocked
+  switches, not three stacked controllers: pure admittance, pure impedance,
+  and hybrid control each own one MIT output. Every cross-mode transition must
   restore normal planned-position control and hold the current position before
-  entering its target; pressing both keys together leaves the current mode
-  unchanged.
-- 导纳同时限制 wrench、虚拟速度/位移、参考关节速度、预测关节位置、模型前馈和
-  MIT 估算总力矩；两种机械臂上限均为 ±8 N·m。旋量 IK 的 `dq_ref` 上限为
-  `0.5 rad/s`，它不再兼作实测急停线。Nero 实测任一关节速度超过 `1.5 rad/s`
-  连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子急停；Piper-L 的持续
-  阈值仍为 `1.0 rad/s`。该软件估算
-  仍不是驱动器电流硬限。 / Admittance bounds wrench, virtual velocity/offset,
-  reference joint velocity, predicted joint position, model feedforward, and
-  estimated total MIT torque. Both arms use ±8 N·m. The screw-IK `dq_ref` cap
-  is `0.5 rad/s` and is no longer reused as a measured-speed stop threshold.
-  On Nero, measured speed above `1.5 rad/s` on any joint for three consecutive
-  control cycles, or above `2.0 rad/s` for one cycle, triggers the electronic
-  stop; Piper-L retains a `1.0 rad/s` sustained threshold. These software
-  estimates are still not drive-current hard limits.
-- 导纳对 URDF 边界外最多 `admittance_joint_limit_margin=0.03 rad` 只开放受控
+  entering its target; requesting two or three modes together leaves the
+  current mode unchanged.
+- 所有 `I/O/H` 模式的参考关节速度统一受
+  `interaction_reference_joint_velocity_limit=0.5 rad/s` 限制，并在 ROS 硬件
+  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `1.5 rad/s` 连续三个
+  周期、Piper-L 超过 `1.0 rad/s` 连续三个周期，或任一机械臂单周期超过
+  `2.0 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
+  Twist/位移和预测位置限制。 / Every `I/O/H` mode shares
+  `interaction_reference_joint_velocity_limit=0.5 rad/s` and first passes the
+  same measured-speed guard in the ROS hardware adapter. An electronic stop is
+  triggered after three consecutive cycles above `1.5 rad/s` on Nero or
+  `1.0 rad/s` on Piper-L, or immediately above `2.0 rad/s` on either arm.
+  Admittance and hybrid control additionally retain their wrench, virtual
+  Twist/offset, and predictive-position bounds.
+- 导纳与混合对 URDF 边界外最多 `interaction_joint_limit_margin=0.03 rad` 只开放受控
   恢复：旋量速度 IK 禁止继续向外，只允许静止或向内运动；超过该恢复带仍由
   Control Cycle Guard 拒绝。普通 planned-position 使用独立的 SDK 限位与
-  `move_j` 路径，不依赖该导纳恢复规则。 / Admittance permits only a controlled
-  recovery within `admittance_joint_limit_margin=0.03 rad` outside a URDF
-  limit: screw velocity IK blocks outward motion and allows only rest or inward
-  motion, while the Control Cycle Guard rejects larger violations. Normal
+  `move_j` 路径，不依赖该恢复规则。 / Admittance and hybrid control permit only
+  a controlled recovery within `interaction_joint_limit_margin=0.03 rad`
+  outside a URDF limit: screw velocity IK blocks outward motion and allows only
+  rest or inward motion, while the Control Cycle Guard rejects larger
+  violations. Normal
   planned-position control has its own SDK limits and `move_j` path and does
   not depend on this admittance recovery rule.
 - Nero 的 `zero_force` 是柔顺零力，不是数学零抵抗：弱 `Kh`、正 `D0`、输入
@@ -1117,6 +1177,19 @@ Reference joint speed is limited to `0.5 rad/s`; measured speed above
 triggers the electronic stop. Append
 `admittance_mode:=resistive` to test the strongly returning variant.
 
+混合实机试验使用同一启动命令，默认无需修改 YAML：确认观测 wrench 新鲜、支撑
+机械臂后按 `H`，当前末端位姿成为阻抗锚点，基座 Z 方向走导纳，其余五维走阻抗；
+再次按 `H` 先退出到普通保持。可在启动命令显式追加
+`hybrid_admittance_axes:=x,y` 选择多个固定基座方向。`I`、`O`、`H` 任意互切都
+先经过普通模式，混合期间 `P`、home 和手动 jog 锁定。 / Use the same launch
+command for a hybrid hardware trial without changing YAML. After confirming a
+fresh observer wrench and physically supporting the arm, press `H`: the
+current tool pose becomes the impedance anchor, base-frame Z uses admittance,
+and the other five dimensions use impedance. Press `H` again to exit through
+normal hold. Append `hybrid_admittance_axes:=x,y` to select multiple fixed
+base-frame directions. Every switch among `I`, `O`, and `H` passes through
+normal mode; `P`, home, and manual jog are locked while hybrid is active.
+
 ### Piper-L 实机接线 / Piper-L hardware wiring
 
 ```bash
@@ -1145,14 +1218,16 @@ Piper-L 默认使用带阻尼和回中刚度的 `resistive` 导纳；追加
 锁住。 / Piper-L defaults to damped and restoring `resistive` admittance;
 append `admittance_mode:=zero_force` to select the zero-force variant. Keep
 `impedance_enabled:=false`, then press `O` to capture the current pose and
-enter admittance; press `O` again to leave. If impedance is active, `O` exits
-it first; if admittance is active, `I` exits it first. `P`, manual jog, and
-home are locked while admittance is active.
+enter admittance; press `O` again to leave. Press `H` for the default
+base-frame-Z admittance plus five-axis impedance hybrid. Every switch among
+`I`, `O`, and `H` exits the current controller to normal hold before entering
+the target. `P`, manual jog, and home are locked while admittance or hybrid is
+active.
 
-实机按 `O` 前必须已有新鲜的 `/arm_external_joint_torque`（默认不超过
-`0.10 s`）；否则控制器拒绝进入并提示检查该 topic。 / Before pressing `O` on
-hardware, `/arm_external_joint_torque` must be fresh (no older than `0.10 s`
-by default); otherwise entry is rejected with a topic diagnostic.
+实机按 `O` 或 `H` 前必须已有新鲜的 `/arm_external_joint_torque`（默认不超过
+`0.10 s`）；否则控制器拒绝进入并提示检查该 topic。 / Before pressing `O` or
+`H` on hardware, `/arm_external_joint_torque` must be fresh (no older than
+`0.10 s` by default); otherwise entry is rejected with a topic diagnostic.
 
 两个实机命令都会默认启动 100 Hz 被动动量观测器。进入 MIT 后查看： / Both
 hardware commands start the passive 100 Hz momentum observer by default.
@@ -1204,11 +1279,11 @@ at connection time.
    `ID(q,qdot,0)` contain only Coriolis/centrifugal and gravity support?
 9. Nero 是否满足 `J_g M^-1 tau_null≈0`。 / Does Nero satisfy
    `J_g M^-1 tau_null≈0`?
-10. 三个 MIT controller 的 `torque_feedback`、`torque_model_requested`、
+10. 四个 MIT controller adapter 的 `torque_feedback`、`torque_model_requested`、
    `torque_task_requested` 和 `torque_auxiliary_requested` 是否组成
    `torque_total_requested`；`torque_feedforward_sent` 与反馈相加是否等于
    `torque_total_estimated`；饱和时是否给出 `torque_saturation_reason`。 / Across
-   all three MIT controllers, do feedback, requested model/task/auxiliary
+   all four MIT controller adapters, do feedback, requested model/task/auxiliary
    torque compose `torque_total_requested`; does sent feedforward plus feedback
    equal `torque_total_estimated`; and is a saturation reason present when
    clipping occurs?
@@ -1221,12 +1296,13 @@ at connection time.
 12. 静止无接触时，残差是否稳定但可能存在摩擦/模型偏置；接触时符号是否符合关节
     正方向。 / At rest without contact, is the residual stable despite possible
     friction/model bias, and does contact follow the positive joint sign?
-13. Interaction Mode Lifecycle 是否始终保持普通、阻抗、导纳三者互斥；按 `O`
-    后是否发送低增益 MIT；随后按 `I` 是否先提交普通 planned-position hold，
-    再进入 MIT 阻抗。 / Does the Interaction Mode Lifecycle keep normal,
-    impedance, and admittance mutually exclusive; after `O`, is low-gain MIT
-    sent; and after `I`, is normal planned-position hold committed before MIT
-    impedance enters?
+13. Interaction Mode Lifecycle 是否始终保持普通、阻抗、导纳、混合四者互斥；
+    按 `H` 后 sample 是否显示 `hybrid`、默认 mask 是否为
+    `[0,0,0,0,0,1]`；随后按 `I` 是否先提交普通 planned-position hold，再进入
+    MIT 阻抗。 / Does the Interaction Mode Lifecycle keep normal, impedance,
+    admittance, and hybrid mutually exclusive; after `H`, does the sample show
+    `hybrid` with default mask `[0,0,0,0,0,1]`; and after `I`, is normal
+    planned-position hold committed before MIT impedance enters?
 14. `/arm_control_sample` 的 `interaction_mode` 是否明确为
     `admittance_zero_force` 或 `admittance_resistive`；前者松手后是否停止在新
     偏置，后者是否回到锚点。 / Does `/arm_control_sample` identify
@@ -1269,20 +1345,28 @@ at connection time.
    validation remain undone.
 8. **Nero/Piper-L 导纳 / Nero/Piper-L admittance**：已完成独立
    `cartesian/` 共用任务几何、完全分开的 `impedance/`/`admittance/` adapter、
-   Nero 抗漂移柔顺零力、`resistive`、机器人独立参数、`O` 键、I/O 互锁、7/6 轴
+   Nero 抗漂移柔顺零力、`resistive`、机器人独立参数、`O` 键、I/O/H 互锁、7/6 轴
    DLS wrench、受限旋量 Jacobian 速度 IK、实测位置重锚定和低增益 MIT adapter；整合后的
    实机阈值与手感仍需低速验证。 /
    Shared `cartesian/` task geometry, separated `impedance/` and `admittance/`
    adapters, Nero anti-drift soft zero force, `resistive` dynamics,
-   robot-specific tuning, the `O` key, I/O interlock, seven/six-axis DLS
+   robot-specific tuning, the `O` key, I/O/H interlock, seven/six-axis DLS
    wrench mapping, bounded screw-Jacobian velocity IK, measured-position
    reanchoring, and low-gain MIT adapter are implemented; hardware thresholds
    and feel of the integrated controller still require low-speed validation.
-9. **统一 controller seam / Unified controller seam**：已完成三个 adapter 的
+9. **Twist 混合控制 / Twist hybrid control**：已完成新 `hybrid/` 模块、`H` 键、
+   固定基座轴 `S_a` 与互补 `S_i`、单一 controller 输出、受限旋量速度 IK、共享
+   速度/力矩保护和四态互锁；曲面法向动态投影与整合版本实机验证仍待完成。 /
+   The new `hybrid/` module, `H` key, fixed-base-axis `S_a` and complementary
+   `S_i`, one-owner controller output, bounded screw-velocity IK, shared
+   speed/torque guards, and four-state interlock are implemented; dynamic
+   surface-normal projection and hardware validation of this integration
+   remain pending.
+10. **统一 controller seam / Unified controller seam**：已完成四个 adapter 的
    `ControlInput -> ControlResult`、统一命令类型、JSON sample 和共用测试面。 /
-   The three adapters now share `ControlInput -> ControlResult`, normalized
+   The four adapters now share `ControlInput -> ControlResult`, normalized
    command types, JSON samples, and one test surface.
-10. **实验运行 / Experiment runs**：已完成 manifest、JSONL sample/event、原子
+11. **实验运行 / Experiment runs**：已完成 manifest、JSONL sample/event、原子
     summary、Memory/JSONL sink 和可选 ROS recorder；自动轨迹脚本和跨 run
     统计比较仍待完成。 / Manifest, JSONL samples/events, atomic summary,
     Memory/JSONL sinks, and the optional ROS recorder are implemented;
@@ -1319,6 +1403,11 @@ at connection time.
     宣称稳定。 / Run the same path with joint and Cartesian impedance, compare
     period, RMSE, and maximum estimated torque across summaries, and explain
     why RMSE alone does not establish stability.
+11. 令 `S_a=diag(0,0,0,0,0,1)`，验证 `S_i=I-S_a`、`S_a S_i=0`，并解释为何
+    本项目中第六维而非第三维才是平移 Z。 / Set
+    `S_a=diag(0,0,0,0,0,1)`, verify `S_i=I-S_a` and `S_a S_i=0`, and explain
+    why translational Z is the sixth rather than third component in this
+    project.
 
 ## 16. 术语表 / Glossary
 
@@ -1327,9 +1416,11 @@ at connection time.
 | 关节阻抗 | Joint impedance | Joint-space spring-damper torque law |
 | 笛卡尔阻抗 | Cartesian impedance | Tool-space wrench spring-damper law |
 | 笛卡尔导纳 | Cartesian admittance | External wrench drives a virtual mass-damper-spring pose |
+| 互补混合控制 | Complementary hybrid control | Selected task axes produce admittance Twist while the complementary axes produce impedance wrench inside one controller |
+| 选择矩阵 | Selection matrix | Diagonal task projector `S_a`, with complementary `S_i=I-S_a` |
 | 柔顺零力 | Soft zero force | Near-zero desired wrench with weak holding, damping, and stick/slip anti-drift resistance |
 | 阻力导纳 | Resistive admittance | Positive damping and stiffness resist motion and restore the anchor |
-| 互锁 | Interlock | Entering impedance exits admittance and vice versa |
+| 互锁 | Interlock | Normal/impedance/admittance/hybrid are mutually exclusive and every cross-mode switch passes through normal |
 | 空间雅可比 | Space Jacobian | PoE space-twist Jacobian `[omega; v]` |
 | 几何雅可比 | Geometric Jacobian | Tool-origin velocity Jacobian `[omega; p_dot]` |
 | wrench | Wrench | Moment-force vector `[M; F]` |
@@ -1342,10 +1433,11 @@ at connection time.
 | 旋量 IK | Screw IK | IK based on PoE screws and SE(3) logarithms |
 | 受限旋量速度 IK | Bounded screw velocity IK | 从 PoE 空间 Jacobian 构造工具几何 Jacobian，并以加权 DLS、关节速度和预测位置边界求解 `dq_ref` / Computes `dq_ref` from a PoE space Jacobian through the tool geometric Jacobian, weighted DLS, joint-speed limits, and predictive-position bounds |
 | 模型补偿 | Model Compensation | 在共享 interface 中选择重力、偏置或完整逆动力学 / Shared interface selecting gravity, bias, or full inverse dynamics |
+| 交互安全边界 | Interaction Safety Limits | 四个 MIT adapter 共用且一次校验的力矩、参考/实测速度和关节位置边界 / One validated source of torque, reference/measured-speed, and joint-position bounds shared by all four MIT adapters |
 | MIT 安全包络 | MIT Safety Envelope | 检查反馈力矩可行性，并在估算总力矩限制内分配前馈 / Checks feedback-torque feasibility and bounds feedforward within the estimated total-torque limit |
 | 控制周期保护器 | Control Cycle Guard | 每周期检查反馈完整性、周期、实测位置和速度 / Per-cycle checks for feedback completeness, period, measured position, and velocity |
 | 持续速度保护器 | Sustained Velocity Guard | 将可去抖的实测速度停止阈值与单周期硬停止阈值分开 / Separates a debounced measured-speed stop threshold from an immediate hard-stop threshold |
-| 交互模式生命周期 | Interaction Mode Lifecycle | 保持普通/阻抗/导纳互斥，并强制跨模式经过普通态 / Keeps normal/impedance/admittance mutually exclusive and forces cross-mode transitions through normal |
+| 交互模式生命周期 | Interaction Mode Lifecycle | 保持普通/阻抗/导纳/混合互斥，并强制跨模式经过普通态 / Keeps normal/impedance/admittance/hybrid mutually exclusive and forces cross-mode transitions through normal |
 | 旋转向量 | Rotation vector | `Log(R_d R^T)^vee` 轴角姿态误差，不是 RPY 差值 / Axis-angle orientation error, not an RPY difference |
 | 空间误差旋量 | Space-error twist | `Log(T_d T^-1)^vee`，表达在基坐标系并与 `J_s` 配对 / Base-frame SE(3) error paired with `J_s` |
 | 广义动量 | Generalized momentum | `p=M(q)qdot` |

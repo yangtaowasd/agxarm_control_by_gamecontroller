@@ -14,7 +14,9 @@ arm_keyboard_controller:
     mit_feedforward: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     mit_gravity_compensation_enabled: true
     mit_gravity_scale: 1.0
-    mit_gravity_torque_limit: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+
+    # Nero keeps more measured-speed headroom than the shared 1.0 default.
+    interaction_measured_joint_velocity_stop_limit: [1.5]
 
     # Nero uses isotropic task-space rotation stiffness.  The stronger
     # base-Z return is a Piper-L-only tuning choice.
@@ -30,7 +32,6 @@ arm_keyboard_controller:
     # bypasses the nullspace projector to balance J2/J3/J4 hardware feel.
     cartesian_impedance_joint_posture_stiffness: [0.0, 0.5, 0.5, 0.6, 0.0, 0.0, 0.0]
     cartesian_impedance_joint_posture_damping: [0.0, 0.08, 0.08, 0.12, 0.0, 0.0, 0.0]
-    cartesian_impedance_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
 
     # J1...J7 model multiplier. J4 is the fourth value.
     # Keep 1.0 until bare-arm static torque calibration is available.
@@ -60,19 +61,10 @@ arm_keyboard_controller:
     # Task vectors remain [angular; linear], hence the reordered task weights.
     admittance_mit_kp: [0.32, 0.24, 0.32, 0.24, 0.32, 0.28, 0.28]
     admittance_mit_kd: [0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08]
-    admittance_mit_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
     admittance_mit_model_scale: 1.0
-    admittance_joint_velocity_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
-    # Reference speed stays at 0.5. Measured tracking gets headroom: sustained
-    # overspeed must exceed 1.5 for 3 cycles; 2.0 remains a hard stop.
-    admittance_measured_joint_velocity_stop_limit: [1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5]
-    admittance_measured_joint_velocity_hard_limit: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
-    admittance_measured_velocity_violation_cycles: 3
     admittance_task_weights: [0.4, 0.4, 0.4, 1.0, 1.0, 1.0]
     admittance_velocity_dls_damping: 0.02
-    admittance_joint_limit_margin: 0.03
 
-    mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 

@@ -107,6 +107,10 @@ if(BUILD_TESTING)
     test/test_control_interface.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
   )
+  ament_add_pytest_test(hybrid_control_test
+    test/test_hybrid_control.py
+    APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
+  )
   ament_add_pytest_test(experiment_framework_test
     test/test_experiment.py
     APPEND_ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1

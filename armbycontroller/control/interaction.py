@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 
-INTERACTION_MODES = ("normal", "impedance", "admittance")
+INTERACTION_MODES = ("normal", "impedance", "admittance", "hybrid")
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,8 @@ class InteractionModeLifecycle:
         mode = str(value).strip().lower()
         if mode not in INTERACTION_MODES:
             raise ValueError(
-                "interaction mode must be normal, impedance, or admittance"
+                "interaction mode must be normal, impedance, admittance, "
+                "or hybrid"
             )
         return mode
 
@@ -34,17 +35,25 @@ class InteractionModeLifecycle:
     def active(self):
         return self._active
 
-    def synchronize(self, impedance_enabled, admittance_enabled):
+    def synchronize(
+        self,
+        impedance_enabled,
+        admittance_enabled,
+        hybrid_enabled=False,
+    ):
         """Import legacy boolean state while enforcing mutual exclusion."""
         impedance = bool(impedance_enabled)
         admittance = bool(admittance_enabled)
-        if impedance and admittance:
+        hybrid = bool(hybrid_enabled)
+        if sum((impedance, admittance, hybrid)) > 1:
             raise RuntimeError(
-                "impedance and admittance cannot be active together"
+                "impedance, admittance, and hybrid cannot be active together"
             )
         observed = (
-            "impedance"
-            if impedance else "admittance" if admittance else "normal"
+            "impedance" if impedance
+            else "admittance" if admittance
+            else "hybrid" if hybrid
+            else "normal"
         )
         self._active = observed
         return observed

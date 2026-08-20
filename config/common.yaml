@@ -5,6 +5,15 @@ arm_keyboard_controller:
     mit_command_rate: 100.0   # Hz
     impedance_enabled: false
     impedance_backend: cartesian
+    # Shared by joint impedance, Cartesian impedance, admittance, and hybrid.
+    interaction_torque_limit: [8.0]
+    interaction_reference_joint_velocity_limit: [0.5]
+    interaction_measured_joint_velocity_stop_limit: [1.0]
+    interaction_measured_joint_velocity_hard_limit: [2.0]
+    interaction_measured_velocity_violation_cycles: 3
+    interaction_joint_limit_margin: 0.03
+    hybrid_admittance_axes: z
+    hybrid_desired_wrench: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     firmware_probe_timeout: 5.0       # s; first/default connection
     firmware_probe_poll_period: 0.1   # s
     firmware_reconnect_delay: 0.5     # s; probe disconnect -> formal connect

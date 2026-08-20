@@ -14,6 +14,8 @@ from sensor_msgs.msg import JointState
 
 from armbycontroller.control import ControlResult
 from armbycontroller.control import ControlSafetyError
+from armbycontroller.control import INTERACTION_TORQUE_LIMIT_MAX
+from armbycontroller.control import InteractionSafetyLimits
 from armbycontroller.control import MitCommand
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
@@ -34,9 +36,6 @@ from armbycontroller.ik.core import solve_pointing_ik
 from armbycontroller.ros.keyboard_controller_node import ArmJointJogState
 from armbycontroller.ros.keyboard_controller_node import ArmKeyboardController
 from armbycontroller.ros.keyboard_controller_node import (
-    ADMITTANCE_MIT_TORQUE_LIMIT_MAX,
-)
-from armbycontroller.ros.keyboard_controller_node import (
     estimate_joint_velocity,
 )
 from armbycontroller.ros.keyboard_controller_node import (
@@ -52,6 +51,7 @@ from armbycontroller.ros.keyboard_controller_node import KEY_ADMITTANCE_TOGGLE
 from armbycontroller.ros.keyboard_controller_node import KEY_DECREASE
 from armbycontroller.ros.keyboard_controller_node import KEY_ESTOP
 from armbycontroller.ros.keyboard_controller_node import KEY_HOME
+from armbycontroller.ros.keyboard_controller_node import KEY_HYBRID_TOGGLE
 from armbycontroller.ros.keyboard_controller_node import KEY_INCREASE
 from armbycontroller.ros.keyboard_controller_node import KEY_IMPEDANCE_TOGGLE
 from armbycontroller.ros.keyboard_controller_node import KEY_MODE_TOGGLE
@@ -140,17 +140,30 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert {
         "admittance_mit_kp",
         "admittance_mit_kd",
-        "admittance_mit_torque_limit",
         "admittance_mit_model_scale",
+        "admittance_task_weights",
+        "admittance_velocity_dls_damping",
+        "interaction_torque_limit",
+        "interaction_reference_joint_velocity_limit",
+        "interaction_measured_joint_velocity_stop_limit",
+        "interaction_measured_joint_velocity_hard_limit",
+        "interaction_measured_velocity_violation_cycles",
+        "interaction_joint_limit_margin",
+        "hybrid_admittance_axes",
+        "hybrid_desired_wrench",
+    } <= module.CONFIGURED_PARAMETERS
+    assert {
+        "mit_gravity_torque_limit",
+        "cartesian_impedance_torque_limit",
+        "admittance_mit_torque_limit",
         "admittance_joint_velocity_limit",
         "admittance_measured_joint_velocity_stop_limit",
         "admittance_measured_joint_velocity_hard_limit",
         "admittance_measured_velocity_violation_cycles",
-        "admittance_task_weights",
-        "admittance_velocity_dls_damping",
         "admittance_joint_limit_margin",
-    } <= module.CONFIGURED_PARAMETERS
-    assert ADMITTANCE_MIT_TORQUE_LIMIT_MAX == 8.0
+        "mit_trajectory_max_velocity",
+    }.isdisjoint(module.CONFIGURED_PARAMETERS)
+    assert INTERACTION_TORQUE_LIMIT_MAX == 8.0
 
 
 def test_robot_configs_separate_nero_and_piper_parameters():
@@ -166,6 +179,12 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "firmware_probe_timeout: 5.0" in common
     assert "firmware_probe_poll_period: 0.1" in common
     assert "firmware_reconnect_delay: 0.5" in common
+    assert "interaction_torque_limit: [8.0]" in common
+    assert "interaction_reference_joint_velocity_limit: [0.5]" in common
+    assert "interaction_measured_joint_velocity_stop_limit: [1.0]" in common
+    assert "interaction_measured_joint_velocity_hard_limit: [2.0]" in common
+    assert "interaction_measured_velocity_violation_cycles: 3" in common
+    assert "interaction_joint_limit_margin: 0.03" in common
     assert "firmware:" not in common
     assert "nero_mount: side" in nero
     assert "nero_mount:=side" not in nero_start
@@ -178,10 +197,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_friction" in nero
     assert "admittance_resistive_stiffness" in nero
     assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
-    assert "admittance_mit_torque_limit: [8.0, 8.0, 8.0" in nero
-    assert "admittance_measured_joint_velocity_stop_limit: [1.5" in nero
-    assert "admittance_measured_joint_velocity_hard_limit: [2.0" in nero
-    assert "admittance_measured_velocity_violation_cycles: 3" in nero
+    assert "interaction_measured_joint_velocity_stop_limit: [1.5]" in nero
     assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero
     assert "admittance_task_weights: [0.4, 0.4, 0.4, 1.0" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
@@ -203,10 +219,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_friction" in piper
     assert "admittance_resistive_stiffness" in piper
     assert "admittance_mit_kp: [0.3, 0.5, 0.5" in piper
-    assert "admittance_mit_torque_limit: [8.0, 8.0, 8.0" in piper
-    assert "admittance_measured_joint_velocity_stop_limit: [1.0" in piper
-    assert "admittance_measured_joint_velocity_hard_limit: [2.0" in piper
-    assert "admittance_measured_velocity_violation_cycles: 3" in piper
+    assert "interaction_" not in piper
     assert "cartesian_impedance_rotation_stiffness: 0.4" in piper
     assert "cartesian_impedance_base_z_rotation_stiffness: 4.0" in piper
     assert "cartesian_impedance_joint_posture_stiffness" not in piper
@@ -995,6 +1008,16 @@ def test_admittance_toggle_is_edge_triggered_and_suppresses_jog():
     assert not second.admittance_toggle_requested
 
 
+def test_hybrid_toggle_is_edge_triggered_and_suppresses_jog():
+    jog = ArmJointJogState(LIMITS, 0.1)
+    first = jog.update(keys(KEY_HYBRID_TOGGLE, KEY_INCREASE))
+    second = jog.update(keys(KEY_HYBRID_TOGGLE))
+
+    assert first.hybrid_toggle_requested
+    assert not first.target_changed
+    assert not second.hybrid_toggle_requested
+
+
 def test_motor_feedback_uses_one_complete_cached_sdk_sample():
     class FakeArm:
         def get_joint_angles(self):
@@ -1271,6 +1294,78 @@ def test_admittance_tick_estops_on_measured_joint_overspeed(monkeypatch):
     assert estops == [True]
 
 
+def test_hybrid_tick_estops_on_measured_joint_overspeed(monkeypatch):
+    class FakeEngine:
+        def step(self, name, sample):
+            del name, sample
+            raise ControlSafetyError(
+                "measured joint velocity exceeded its limit",
+                reason="measured_velocity_limit",
+            )
+
+    class FakeLogger:
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    estops = []
+    controller = object.__new__(ArmKeyboardController)
+    controller.mit_command_rate = 100.0
+    controller.last_hybrid_tick_time = None
+    controller.latest_external_wrench_received_at = -math.inf
+    controller.admittance_wrench_timeout = 0.1
+    controller.latest_external_wrench = np.zeros(6)
+    controller.admittance_measured_joint_velocity_stop_limit = [1.0] * 6
+    controller.admittance_measured_joint_velocity_hard_limit = [2.0] * 6
+    controller.trigger_emergency_stop = lambda: estops.append(True)
+    controller._get_control_engine = lambda name: FakeEngine()
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    feedback = MotorFeedback(
+        position=np.zeros(6),
+        velocity=np.asarray([0.0, 0.0, 1.1, 0.0, 0.0, 0.0]),
+        torque=np.zeros(6),
+    )
+
+    controller._hybrid_tick(feedback)
+
+    assert estops == [True]
+
+
+def test_shared_velocity_guard_covers_impedance_mode(monkeypatch):
+    class FakeLogger:
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    estops = []
+    controller = object.__new__(ArmKeyboardController)
+    controller.interaction_safety = InteractionSafetyLimits(
+        torque_limit=np.ones(6) * 8.0,
+        reference_velocity_limit=np.ones(6) * 0.5,
+        measured_velocity_stop_limit=np.ones(6) * 1.0,
+        measured_velocity_hard_limit=np.ones(6) * 2.0,
+        measured_velocity_violation_cycles=3,
+        joint_limit_margin=0.03,
+    )
+    controller.interaction_velocity_guard = (
+        controller.interaction_safety.velocity_guard()
+    )
+    controller.trigger_emergency_stop = lambda: estops.append(True)
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    feedback = MotorFeedback(
+        position=np.zeros(6),
+        velocity=np.asarray([0.0, 0.0, 2.1, 0.0, 0.0, 0.0]),
+        torque=np.zeros(6),
+    )
+
+    assert not controller._validate_interaction_velocity(
+        feedback, "impedance"
+    )
+    assert estops == [True]
+
+
 def test_impedance_entry_exits_admittance_first(monkeypatch):
     events = []
 
@@ -1368,6 +1463,102 @@ def test_admittance_entry_exits_impedance_first(monkeypatch):
     assert not controller.impedance_enabled
     assert events[0] == ("impedance_exit", "switching to admittance")
     assert events[1][0] == "admittance_reset"
+
+
+def test_hybrid_entry_exits_impedance_first(monkeypatch):
+    events = []
+
+    class FakeModel:
+        def forward_kinematics(self, joints):
+            pose = np.eye(4)
+            pose[:3, 3] = [float(joints[0]), 0.0, 0.2]
+            return pose
+
+    class FakeEngine:
+        def reset(self, name, state):
+            assert name == "hybrid_cartesian"
+            events.append(("hybrid_reset", state.position.copy()))
+
+    class FakeTrajectory:
+        def reset(self, joints):
+            del joints
+
+    class FakeLogger:
+        def warning(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.robot_model = "piper_l"
+    controller.impedance_enabled = True
+    controller.admittance_enabled = False
+    controller.hybrid_enabled = False
+    controller.execute_motion = False
+    controller.control_mode = "joint"
+    controller.gravity_model = FakeModel()
+    controller.hybrid_admittance_axes = "z"
+    controller.mit_trajectory = FakeTrajectory()
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.ik_valid_history = deque(maxlen=2)
+    controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller._get_control_engine = lambda name: FakeEngine()
+
+    def exit_impedance(reason):
+        events.append(("impedance_exit", reason))
+        controller.impedance_enabled = False
+        return True
+
+    controller._exit_impedance = exit_impedance
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    controller.toggle_hybrid()
+
+    assert controller.hybrid_enabled
+    assert not controller.impedance_enabled
+    assert not controller.admittance_enabled
+    assert events[0] == ("impedance_exit", "switching to hybrid")
+    assert events[1][0] == "hybrid_reset"
+
+
+def test_hybrid_exit_commits_normal_before_planned_hold(monkeypatch):
+    events = []
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = False
+    controller.admittance_enabled = False
+    controller.hybrid_enabled = True
+    controller.execute_motion = False
+    controller.control_mode = "ik"
+    controller.hybrid_previous_control_mode = "joint"
+    controller.hybrid_admittance_axes = "z"
+    controller.gravity_model = None
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller.send_target = lambda reason: events.append((
+        reason,
+        controller.impedance_enabled,
+        controller.admittance_enabled,
+        controller.hybrid_enabled,
+    ))
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    assert controller._enter_normal_interaction_mode("H toggle")
+
+    assert events == [("hybrid exit hold (H toggle)", False, False, False)]
+    assert controller.control_mode == "joint"
 
 
 def test_cross_interaction_switch_passes_through_normal(monkeypatch):
@@ -1595,7 +1786,7 @@ def test_mit_tick_sends_one_impedance_command_per_joint(monkeypatch):
     controller.mit_kp = [10.0] * 6
     controller.mit_kd = [0.8] * 6
     controller.mit_feedforward = [0.0] * 6
-    controller.mit_gravity_torque_limit = [10.0] * 6
+    controller.mit_gravity_torque_limit = [8.0] * 6
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
@@ -1996,7 +2187,7 @@ def test_mit_tick_uses_trajectory_state_for_full_inverse_dynamics(monkeypatch):
     controller.mit_feedforward = [0.0] * 2
     controller.gravity_model = FakeDynamicsModel()
     controller.mit_gravity_scale = 1.0
-    controller.mit_gravity_torque_limit = [10.0] * 2
+    controller.mit_gravity_torque_limit = [8.0] * 2
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
@@ -2062,7 +2253,7 @@ def test_mit_tick_keeps_gains_fixed_and_limits_combined_torque(monkeypatch):
     controller.mit_feedforward = [0.0, 0.0]
     controller.gravity_model = FakeDynamicsModel()
     controller.mit_gravity_scale = 1.0
-    controller.mit_gravity_torque_limit = [10.0, 10.0]
+    controller.mit_gravity_torque_limit = [8.0, 8.0]
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
@@ -2073,7 +2264,7 @@ def test_mit_tick_keeps_gains_fixed_and_limits_combined_torque(monkeypatch):
     assert [command["kd"] for command in controller.arm.commands] == [0.2, 0.2]
     assert [
         command["t_ff"] for command in controller.arm.commands
-    ] == [2.0, -2.0]
+    ] == [0.0, 0.0]
     estimated_total = [
         command["kp"] * (command["p_des"] - measured_position)
         + command["kd"] * (command["v_des"] - 0.0)
@@ -2082,7 +2273,7 @@ def test_mit_tick_keeps_gains_fixed_and_limits_combined_torque(monkeypatch):
             controller.arm.commands, [0.0, 0.0]
         )
     ]
-    assert estimated_total == pytest.approx([10.0, -10.0])
+    assert estimated_total == pytest.approx([8.0, -8.0])
 
 
 def test_ik_joint_target_is_consumed_only_by_mit_backend(monkeypatch):
