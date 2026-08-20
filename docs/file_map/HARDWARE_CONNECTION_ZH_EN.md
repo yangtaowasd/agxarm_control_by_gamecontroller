@@ -11,7 +11,8 @@ lifecycle for Nero/Piper-L; they contain no control algorithm.
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
 | `armbycontroller/hardware/connection.py` | 用 `default` profile 探测、保存完整 firmware 数据、断开、映射版本并以新实例正式重连 / probe with the `default` profile, save complete firmware data, disconnect, map the version, and formally reconnect with a new instance |
-| `armbycontroller/hardware/__init__.py` | 两阶段连接的稳定 Python 导出面 / stable Python exports for two-stage connection |
+| `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和低通差分速度估计 / side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered velocity estimation |
+| `armbycontroller/hardware/__init__.py` | 两阶段连接和反馈工具的稳定 Python 导出面 / stable Python exports for two-stage connection and feedback tools |
 | `test/test_hardware_connection.py` | 两次连接的严格顺序、实例隔离、版本边界、数据副本和失败清理 / exact two-connection order, instance isolation, version boundaries, copied data, and failure cleanup |
 
 ## 生命周期 / Lifecycle

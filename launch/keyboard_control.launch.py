@@ -165,7 +165,7 @@ def _nodes(context):
         ),
         Node(
             package="armbycontroller",
-            executable="keyboard_controller_node.py",
+            executable="main.py",
             name="arm_keyboard_controller", output="screen",
             parameters=[*parameter_files, controller_parameters],
         ),

@@ -10,13 +10,13 @@ pose construction.
 
 ## 两种模式 / Two modes
 
-- `zero_force.py`：`M xdd + D0 xd + Kh x + Fstick/slip = Fext`。这是 Nero 优先
+- `laws.py` 中的 `ZeroForceAdmittance`：`M xdd + D0 xd + Kh x + Fstick/slip = Fext`。这是 Nero 优先
   的“柔顺零力”，不是理想零力：`Kh` 很弱，配合速度阻尼和有限粘/滑阻力吸收
   观测偏置与摩擦，避免积分漂移，但不会产生 `resistive` 的强回中手感。 / This
   Nero-first soft-zero-force law is intentionally non-ideal. Weak `Kh`,
   viscous damping, and bounded stick/slip resistance absorb observer bias and
   friction without the strong return feel of `resistive`.
-- `resistive.py`：`M xdd + Dr xd + Kr x = Fext`。正阻尼产生速度相关阻力，正
+- `laws.py` 中的 `ResistiveAdmittance`：`M xdd + Dr xd + Kr x = Fext`。正阻尼产生速度相关阻力，正
   刚度使末端释放后回到按 `O` 时捕获的锚定位姿。 / Positive damping gives
   velocity-dependent resistance and positive stiffness returns the tool to
   the anchor captured when `O` was pressed.

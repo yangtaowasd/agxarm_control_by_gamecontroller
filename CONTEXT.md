@@ -12,6 +12,27 @@ measured joint state, joint reference, external wrench, timestamp, and period
 for one control cycle.
 _Avoid_: tick arguments, backend inputs
 
+**键盘控制意图 / Keyboard Control Intent**:
+固定 25 键协议经边沿检测后产生的关节选择、限位内增量、回零、急停及模式请求；
+不依赖 ROS 消息或 CAN。 / Joint selection, limit-safe increments, home,
+emergency-stop, and mode requests produced by edge detection over the fixed
+25-key protocol; independent of ROS messages and CAN.
+_Avoid_: raw key array, ROS keyboard state
+
+**控制参数面 / Controller Parameter Surface**:
+主控制节点在接触硬件前一次性声明的 ROS 参数名称、类型和默认值，并根据机器人
+profile 选择逐关节默认增益。 / The ROS parameter names, types, and defaults
+declared once by the main control node before hardware access, including
+per-joint defaults selected from the robot profile.
+_Avoid_: init constants, scattered defaults
+
+**控制设置快照 / Controller Settings Snapshot**:
+从控制参数面读取并校验后冻结的单次运行配置；在任何 SDK/CAN 连接前创建，并作为
+节点组合根的唯一启动配置证据。 / The validated, frozen configuration for one
+run read from the Controller Parameter Surface; created before any SDK/CAN
+connection and retained as the composition root's startup evidence.
+_Avoid_: mutable parameter bag, repeated get_parameter calls
+
 **控制结果 / Control Result**:
 控制算法产生的 MIT 或 planned-position 命令，以及同周期诊断信号。 / The MIT
 or planned-position command produced by an algorithm together with same-cycle

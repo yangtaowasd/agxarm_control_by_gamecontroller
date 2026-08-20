@@ -4,7 +4,7 @@
 
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
-| `CMakeLists.txt` | C++/Python 安装、节点安装、资源安装和八组 pytest 注册 / C++/Python install, node/resource install, and eight pytest registrations |
+| `CMakeLists.txt` | C++/Python 安装、节点/资源安装、九组 pytest，以及限定到源码目录的 style lint 注册 / C++/Python install, node/resource install, nine pytest groups, and source-scoped style-lint registration |
 | `package.xml` | ROS 2 build/runtime/test 依赖；实验 recorder 需要 `std_srvs` / ROS 2 dependencies, including `std_srvs` for experiment recording |
 | `resource/armbycontroller` | ament Python package 索引 marker / ament Python-package index marker |
 | `README.md` | 快速构建与运行入口 / quick build and run entry point |
@@ -36,6 +36,12 @@
 | `agx_arm_urdf/piper_l/urdf/*` | Piper-L 本体及 gripper/Revo2 固定附件模型 / Piper-L and fixed accessory variants |
 | `agx_arm_urdf/revo2/urdf/*` | 左右 Revo2 手模型 / left/right Revo2 hand models |
 | `agx_arm_urdf/**/meshes/*` | RViz/robot-description 几何资源；不参与控制公式 / visualization geometry; not part of control equations |
+
+Revo2 的 URDF/Xacro 和全部 mesh 是为后续工具配置预留的受支持资产。即使当前
+`tool_configuration` 没有引用其中某个 mesh，也不得只依据当前引用可达性删除。
+/ All Revo2 URDF/Xacro files and meshes are supported assets reserved for
+future tool configurations. A mesh must not be removed solely because the
+current `tool_configuration` does not reference it.
 
 ## 测试 / Tests
 

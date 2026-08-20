@@ -10,7 +10,8 @@ independent device.
 
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
-| `src/keyboard.cpp` | 读取 Linux input event 并发布统一 24 键状态 / read Linux input events and publish the unified 24-key state |
+| `src/keyboard.cpp` | 读取 Linux input event 并发布统一 25 键状态 / read Linux input events and publish the unified 25-key state |
+| `armbycontroller/teleop/keyboard.py` | 将固定 25 键协议边沿检测为关节选择、限位内增量和模式请求，不依赖 ROS/CAN / edge-detect the fixed 25-key protocol into joint selection, limit-safe increments, and mode requests without ROS/CAN |
 | `armbycontroller/pose_controller.py` | 独立 `PoseStamped -> screw IK -> move_j/JointState` 工作流，支持 RViz dry-run / standalone pose-to-IK-to-position workflow with RViz dry-run |
 | `armbycontroller/terminal_teleop.py` | 终端按键转换为相对目标位姿 / terminal keys to relative target poses |
 | `armbycontroller/motion_link_bridge.py` | Motion Link WebSocket 手机姿态到 `PoseStamped`，含零点、超时和姿态范围限制 / phone orientation to `PoseStamped` with zeroing, timeout, and orientation bounds |

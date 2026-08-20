@@ -6,8 +6,8 @@ from armbycontroller.admittance.controller import (
     ADMITTANCE_MIT_TORQUE_LIMIT_MAX,
 )
 from armbycontroller.admittance.controller import CartesianAdmittanceController
-from armbycontroller.admittance.resistive import ResistiveAdmittance
-from armbycontroller.admittance.zero_force import ZeroForceAdmittance
+from armbycontroller.admittance.laws import ResistiveAdmittance
+from armbycontroller.admittance.laws import ZeroForceAdmittance
 from armbycontroller.ik.screw import BoundedScrewVelocityIk
 
 

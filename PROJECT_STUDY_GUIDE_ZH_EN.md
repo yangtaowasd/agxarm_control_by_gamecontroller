@@ -476,6 +476,12 @@ surface-normal projection is not yet implemented.
 
 ## 6. 架构 / Architecture
 
+实际 ROS 节点 topic/service 连接图、主进程 module 架构图和单周期时序图见
+[`docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md`](docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md)。 /
+See [`docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md`](docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md)
+for the actual ROS topic/service graph, main-process module architecture, and
+one-cycle sequence diagram.
+
 ```text
 Keyboard / IK reference       measured q/qdot/tau       observer wrench
           |                            |                       |
@@ -535,6 +541,42 @@ baseline. This repository now uses the same `admittance twist -> bounded
 screw-Jacobian IK -> measured-q reanchoring -> low-gain MIT` chain while retaining
 its own `zero_force`/`resistive` dynamics, shared observer, I/O/H interlock, and
 8 N·m safety ceiling.
+
+### 6.1 Python/C++ 性能边界 / Python/C++ performance boundary
+
+Linux 键盘设备读取、X11 事件处理和 ROS 键状态发布已经由
+`src/keyboard.cpp` 实现；这是当前明确的 C++ 低延迟 I/O adapter。主控制器继续
+使用 Python，因为 AGX 传输 adapter 是 `pyAgxArm`，而任务空间矩阵运算已经由
+NumPy/LAPACK 在编译代码中执行。把节点编排或七维小矩阵封装成 C++/Python FFI
+不会自动提高周期效率，还会产生两套公式和序列化语义。 / Linux keyboard-device
+reads, X11 event handling, and ROS key-state publication are already
+implemented by `src/keyboard.cpp`; it is the current explicit low-latency C++
+I/O adapter. The main controller remains Python because its AGX transport
+adapter is `pyAgxArm`, while task-space matrix operations already execute in
+compiled NumPy/LAPACK code. Wrapping node orchestration or tiny seven-axis
+matrices behind a C++/Python FFI would not automatically improve cycle time
+and would create duplicate equation and serialization semantics.
+
+2026-08-20 在本机对实际 Nero/Piper-L URDF 进行 300 次热运行微基准；下表是单次
+调用 wall time，仅作为迁移决策证据，不是硬实时保证。100 Hz 周期预算为 10 ms。 /
+On 2026-08-20, 300 warmed iterations were measured locally against the actual
+Nero/Piper-L URDFs. The table reports per-call wall time as migration evidence,
+not a hard-real-time guarantee. The 100 Hz cycle budget is 10 ms.
+
+| 热路径 / Hot path | Nero mean / P95 | Piper-L mean / P95 |
+| --- | ---: | ---: |
+| tool-origin geometric Jacobian | 0.723 / 1.152 ms | 0.562 / 0.625 ms |
+| inverse dynamics | 0.818 / 0.882 ms | 0.713 / 0.742 ms |
+| momentum-observer model terms | 1.713 / 1.878 ms | 1.485 / 1.560 ms |
+| bounded screw-velocity IK | 0.716 / 0.915 ms | 0.620 / 0.685 ms |
+
+因此当前不增加第二个 C++ 控制实现。只有实机记录显示持续 deadline miss，且 profiler
+把瓶颈定位到可独立验证的纯数学 kernel 时，才考虑 C++；迁移必须保留 Python
+公式作为交叉验证 oracle，直到逐样本数值一致。 / Therefore no second C++
+controller implementation is added now. Consider C++ only when hardware logs
+show sustained deadline misses and a profiler isolates a pure mathematical
+kernel. Keep the Python formula as a cross-validation oracle until numerical
+agreement is demonstrated sample by sample.
 
 ## 7. 数据流 / Data flow
 
@@ -642,8 +684,7 @@ profile is used.
 | `armbycontroller/impedance/cartesian.py` | 纯阻抗公式、误差、增益等价和 Nero 动力学一致零空间 / Pure impedance law, error, gain equivalence, and Nero dynamically consistent nullspace |
 | `armbycontroller/impedance/controllers.py` | 关节 MIT 与笛卡尔阻抗 controller adapter，以及 J2/J3/J4 姿态项；模型补偿和 MIT 包络委托给共享 control module / Joint MIT and Cartesian-impedance controller adapters plus J2/J3/J4 posture terms; model compensation and MIT envelope are delegated to shared control modules |
 | `armbycontroller/admittance/core.py` | 两种导纳内部共用的输入整形、二阶积分、SE(3) 目标和安全边界 / Input conditioning, second-order integration, SE(3) target, and safety bounds shared internally by admittance modes |
-| `armbycontroller/admittance/zero_force.py` | Nero 优先的弱保持、阻尼、粘/滑抗漂移柔顺零力 / Nero-first anti-drift soft zero force with weak holding, damping, and stick/slip resistance |
-| `armbycontroller/admittance/resistive.py` | 正阻尼和正回中刚度的阻力导纳 / Resistive admittance with positive damping and restoring stiffness |
+| `armbycontroller/admittance/laws.py` | 两种紧密相关的导纳律：Nero 优先的抗漂移柔顺零力，以及带正阻尼和回中刚度的阻力导纳 / Two closely related admittance laws: Nero-first anti-drift soft zero force and resistive admittance with positive damping and restoring stiffness |
 | `armbycontroller/admittance/controller.py` | 导纳 twist 到受限旋量速度 IK、实测位置重锚定和低增益 MIT 的 controller adapter / Controller adapter from admittance twist to bounded screw velocity IK, measured-position reanchoring, and low-gain MIT |
 | `armbycontroller/hybrid/selection.py` | 按项目 `[rx,ry,rz,x,y,z]` 顺序解析固定基座轴并生成任务选择 mask / Parses fixed base-frame axes in project order and creates task-selection masks |
 | `armbycontroller/hybrid/controller.py` | 单一所有者的互补混合 adapter：选中轴导纳 Twist、其余轴阻抗 wrench、受限旋量 IK、模型补偿和一个 MIT 包络 / One-owner complementary hybrid adapter: selected-axis admittance Twist, remaining-axis impedance wrench, bounded screw IK, model compensation, and one MIT envelope |
@@ -653,19 +694,31 @@ profile is used.
 | `armbycontroller/control/mit.py` | 统一 MIT Safety Envelope、总力矩/变化率可行性和力矩分解诊断 / Shared MIT Safety Envelope, total-torque/rate feasibility, and torque-decomposition diagnostics |
 | `armbycontroller/control/safety.py` | `InteractionSafetyLimits` 统一四个 MIT adapter 的力矩幅值/变化率、参考/实测速度和关节边界，并提供反馈完整性、周期及持续/硬速度 guard / `InteractionSafetyLimits` unifies torque magnitude/rate, reference/measured speed, and joint boundaries for all four MIT adapters and provides feedback, period, and sustained/hard-speed guards |
 | `armbycontroller/control/interaction.py` | `normal/impedance/admittance/hybrid` 互锁和强制经过普通模式的迁移路径 / Normal/impedance/admittance/hybrid interlock and normal-mediated transition paths |
+| `armbycontroller/control/trajectory.py` | 无 ROS/CAN 的限加加速度、限加速度和限速度关节参考轨迹 / ROS/CAN-free jerk-, acceleration-, and velocity-limited joint-reference trajectory |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射、断开和 profile 化正式重连 / Shared DEFAULT probe, version mapping, disconnect, and profile-specific formal reconnect for Nero/Piper-L |
+| `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和 Nero 低通差分速度估计 / Side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered Nero velocity estimation |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
 | `armbycontroller/ik/screw.py` | 完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK，共享 PoE 模型 / Full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over one PoE model |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
-| `armbycontroller/ros/keyboard_controller_node.py` | ROS 键盘状态机、I/O/H 互锁、SDK/CAN adapter、100 Hz 实测状态发布 / ROS keyboard state machine, I/O/H interlock, SDK/CAN adapter, and 100 Hz measured-state publication |
+| `armbycontroller/teleop/keyboard.py` | 与传输无关的固定 25 键协议、边沿检测和限位内 Keyboard Control Intent / Transport-independent fixed 25-key protocol, edge detection, and limit-safe Keyboard Control Intent |
+| `armbycontroller/ros/parameters.py` | 主节点统一的 Controller Parameter Surface、机器人 profile、逐关节默认增益和标量/数组展开校验；不连接硬件 / Main-node Controller Parameter Surface, robot profiles, per-joint default gains, and scalar/array expansion validation; never connects hardware |
+| `armbycontroller/ros/settings.py` | 在硬件连接前读取并校验机器人、启动、IK、安全和 ROS 接口参数，生成冻结的 Controller Settings Snapshot / Reads and validates robot, startup, IK, safety, and ROS-interface parameters before hardware connection, producing a frozen Controller Settings Snapshot |
+| `armbycontroller/ros/telemetry.py` | 独占动力学、控制样本、控制事件和锁存交互状态 publisher 及其消息 schema / Sole owner of dynamics, control-sample, control-event, and latched interaction-state publishers and schemas |
+| `armbycontroller/ros/main.py` | 27 行纯 ROS 可执行入口，只负责 `init/spin/shutdown` 生命周期 / 27-line ROS executable entry owning only the `init/spin/shutdown` lifecycle |
+| `armbycontroller/ros/node.py` | 611 行 composition root：参数派生对象、运行状态和 ROS topic/service/timer 接线 / 611-line composition root for parameter-derived objects, runtime state, and ROS topic/service/timer wiring |
+| `armbycontroller/ros/controller_runtime.py` | controller adapter 注册、标准 Control Input 构造和 telemetry 委托 / Controller-adapter registration, normalized Control Input construction, and telemetry delegation |
+| `armbycontroller/ros/interaction_runtime.py` | UI service adapter、普通态中转互锁和阻抗/导纳/混合所有权切换 / UI service adapters, normal-mediated interlock, and impedance/admittance/hybrid ownership transitions |
+| `armbycontroller/ros/hardware_session.py` | 两阶段连接、启动安全、反馈归一化、SDK 命令、急停和退出断开 / Two-stage connection, startup safety, normalized feedback, SDK commands, emergency stop, and shutdown disconnect |
+| `armbycontroller/ros/control_cycle.py` | 键盘周期调度、四类 MIT tick、笛卡尔目标与单周期唯一命令所有者 / Keyboard-cycle dispatch, four MIT ticks, Cartesian targets, and one command owner per cycle |
 | `armbycontroller/modeling/momentum_observer.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
 | `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
 | `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
 | `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴零空间、J2/J3/J4 混合姿态、两种导纳和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis nullspace, J2/J3/J4 hybrid posture, both admittance modes, and observer parameters |
 | `config/piper_l.yaml` | Piper-L 独立固件、夹爪、6 轴增益/比例/限制、两种导纳和观测器参数 / Piper-L-only firmware, gripper, six-axis tuning and limits, both admittance modes, and observer parameters |
+| `agx_arm_urdf/revo2/{urdf,meshes}` | 为未来工具配置保留的完整 Revo2 模型资产；不得仅因当前配置未引用某个 mesh 而裁剪 / Complete Revo2 model assets retained for future tool configurations; do not prune a mesh solely because the current configuration does not reference it |
 | `test/test_cartesian_common.py` | 共享 Jacobian、SE(3) 和虚功映射契约 / Shared Jacobian, SE(3), and virtual-work contracts |
 | `test/test_cartesian_impedance.py` | 阻抗符号、耦合、零空间与模型支撑契约 / Impedance sign, coupling, nullspace, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
@@ -1041,6 +1094,15 @@ source install/setup.bash
 
 ### 配置文件 / Configuration file
 
+ROS 2 YAML 负责参数值和机器人差异，但不能替代参数声明本身：节点仍需声明参数名、
+类型/动态类型描述和无 YAML 时的默认值。因此 `config/*.yaml` 保持值配置，
+`ros/parameters.py` 保持 Controller Parameter Surface；二者不重复实现控制逻辑。 /
+ROS 2 YAML owns parameter values and robot-specific overrides but cannot
+replace parameter declarations: the node still must declare names,
+type/dynamic-type descriptors, and defaults for runs without YAML. Therefore
+`config/*.yaml` remains value configuration and `ros/parameters.py` remains
+the Controller Parameter Surface; neither implements control behavior.
+
 launch 先加载 `config/common.yaml`，再根据 `robot_model` 只加载
 `config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期、默认 backend
 和固件探测时序；固件配置检查、工具、重力/模型比例、逐关节增益与限制、轨迹和
@@ -1102,6 +1164,12 @@ source /opt/ros/humble/setup.bash
 colcon test --packages-select armbycontroller
 colcon test-result --verbose
 ```
+
+Style lint 只检查 `src/`、`armbycontroller/`、`test/`、`launch/` 和
+`CMakeLists.txt` 对应的源码范围；仓库内的 `build/`、`install/` 生成物不会被当作
+源码。 / Style lint is scoped to the applicable source paths under `src/`,
+`armbycontroller/`, `test/`, `launch/`, and `CMakeLists.txt`; generated
+`build/` and `install/` trees are not treated as source.
 
 ### UI/前端模式接口 / UI and frontend mode API
 
@@ -1556,10 +1624,11 @@ checks.
 - 本仓库 `armbycontroller/modeling/screw_model.py`：PoE、空间雅可比和 RNEA 的实际实现。
   / This repository's `armbycontroller/modeling/screw_model.py`: the implemented PoE,
   space Jacobian, and RNEA model.
-- 本仓库 `armbycontroller/ros/keyboard_controller_node.py`：当前 ROS 状态机、
-  AGX MIT/planned adapter 与互锁基线。 / This repository's
-  `armbycontroller/ros/keyboard_controller_node.py`: the current ROS state
-  machine, AGX MIT/planned adapters, and interlock baseline.
+- 本仓库 `armbycontroller/ros/node.py`：当前 ROS 状态机、
+  AGX MIT/planned adapter 与互锁基线；`ros/main.py` 仅负责进程生命周期。 /
+  This repository's `armbycontroller/ros/node.py`: the current ROS state
+  machine, AGX MIT/planned adapters, and interlock baseline; `ros/main.py`
+  owns only process lifecycle.
 - 本仓库 `armbycontroller/control/core.py`、`cartesian/spatial.py`、
   `impedance/controllers.py` 与 `admittance/controller.py`：统一 controller
   interface、共用任务几何、命令 schema 和解耦 adapter。 / This repository's

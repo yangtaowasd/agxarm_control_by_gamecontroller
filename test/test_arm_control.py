@@ -20,7 +20,10 @@ from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control import InteractionModeLifecycle
 from armbycontroller.control import InteractionSafetyLimits
+from armbycontroller.control import JointTrajectoryState
 from armbycontroller.control import MitCommand
+from armbycontroller.hardware import estimate_joint_velocity
+from armbycontroller.hardware import MotorFeedback
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -37,33 +40,26 @@ from armbycontroller.ik.core import resolve_tool_urdf_path
 from armbycontroller.ik.core import resolve_urdf_path
 from armbycontroller.ik.core import set_joint_acceleration_limits
 from armbycontroller.ik.core import solve_pointing_ik
-from armbycontroller.ros.keyboard_controller_node import ArmJointJogState
-from armbycontroller.ros.keyboard_controller_node import ArmKeyboardController
-from armbycontroller.ros.keyboard_controller_node import (
-    estimate_joint_velocity,
-)
-from armbycontroller.ros.keyboard_controller_node import (
+from armbycontroller.ros.node import ArmKeyboardController
+from armbycontroller.ros.node import (
     bounded_model_feedforward,
 )
-from armbycontroller.ros.keyboard_controller_node import expand_joint_values
-from armbycontroller.ros.keyboard_controller_node import default_mit_gains
-from armbycontroller.ros.keyboard_controller_node import (
-    default_mit_feedforward,
-)
-from armbycontroller.ros.keyboard_controller_node import KEY_COUNT
-from armbycontroller.ros.keyboard_controller_node import KEY_ADMITTANCE_TOGGLE
-from armbycontroller.ros.keyboard_controller_node import KEY_DECREASE
-from armbycontroller.ros.keyboard_controller_node import KEY_ESTOP
-from armbycontroller.ros.keyboard_controller_node import KEY_HOME
-from armbycontroller.ros.keyboard_controller_node import KEY_HYBRID_TOGGLE
-from armbycontroller.ros.keyboard_controller_node import KEY_INCREASE
-from armbycontroller.ros.keyboard_controller_node import KEY_IMPEDANCE_TOGGLE
-from armbycontroller.ros.keyboard_controller_node import KEY_MODE_TOGGLE
-from armbycontroller.ros.keyboard_controller_node import JointTrajectoryState
-from armbycontroller.ros.keyboard_controller_node import MotorFeedback
-from armbycontroller.ros.keyboard_controller_node import (
+from armbycontroller.ros.node import (
     limit_mit_combined_torque,
 )
+from armbycontroller.ros.parameters import default_mit_feedforward
+from armbycontroller.ros.parameters import default_mit_gains
+from armbycontroller.ros.parameters import expand_joint_values
+from armbycontroller.teleop import ArmJointJogState
+from armbycontroller.teleop import KEY_ADMITTANCE_TOGGLE
+from armbycontroller.teleop import KEY_COUNT
+from armbycontroller.teleop import KEY_DECREASE
+from armbycontroller.teleop import KEY_ESTOP
+from armbycontroller.teleop import KEY_HOME
+from armbycontroller.teleop import KEY_HYBRID_TOGGLE
+from armbycontroller.teleop import KEY_IMPEDANCE_TOGGLE
+from armbycontroller.teleop import KEY_INCREASE
+from armbycontroller.teleop import KEY_MODE_TOGGLE
 from armbycontroller.modeling.lie import rotation_from_vector
 from armbycontroller.modeling.lie import rotation_vector
 from armbycontroller.modeling.lie import space_pose_error
@@ -120,6 +116,7 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
         "admittance_mode_service"
     ] == "/arm/set_admittance_mode"
     assert "hybrid_mode_service" not in module.COMMON
+    assert 'executable="main.py"' in launch_path.read_text(encoding="utf-8")
     assert module.OBSERVER["momentum_observer_enabled"] == "true"
     assert "momentum_observer_rate" in (
         module.CONFIGURED_OBSERVER_PARAMETERS
@@ -182,6 +179,51 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
         "mit_trajectory_max_velocity",
     }.isdisjoint(module.CONFIGURED_PARAMETERS)
     assert INTERACTION_TORQUE_LIMIT_MAX == 8.0
+
+
+def test_main_ros_entrypoint_stays_thin():
+    entrypoint = (
+        Path(__file__).resolve().parents[1]
+        / "armbycontroller" / "ros" / "main.py"
+    )
+    source = entrypoint.read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) <= 35
+    assert "class ArmKeyboardController" not in source
+    assert "from armbycontroller.ros.node import ArmKeyboardController" in (
+        source
+    )
+
+
+def test_ros_node_composition_root_stays_under_one_thousand_lines():
+    ros_root = (
+        Path(__file__).resolve().parents[1] / "armbycontroller" / "ros"
+    )
+    source = (ros_root / "node.py").read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) < 1000
+    assert "class ArmKeyboardController(" in source
+    for module_name in (
+        "controller_runtime.py",
+        "interaction_runtime.py",
+        "hardware_session.py",
+        "control_cycle.py",
+    ):
+        assert (ros_root / module_name).is_file()
+
+
+def test_shallow_admittance_laws_are_consolidated_and_legacy_entry_is_gone():
+    root = Path(__file__).resolve().parents[1]
+    admittance = root / "armbycontroller" / "admittance"
+    cmake = (root / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    assert (admittance / "laws.py").is_file()
+    assert not (admittance / "zero_force.py").exists()
+    assert not (admittance / "resistive.py").exists()
+    assert not (
+        root / "armbycontroller" / "ros" / "keyboard_controller_node.py"
+    ).exists()
+    assert "keyboard_controller_node.py" not in cmake
 
 
 def test_robot_configs_separate_nero_and_piper_parameters():
@@ -837,7 +879,7 @@ def test_keyboard_hardware_connection_uses_saved_probe_result(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.connect_arm_two_stage",
+        "armbycontroller.ros.hardware_session.connect_arm_two_stage",
         fake_two_stage,
     )
     monkeypatch.setattr(
@@ -1096,7 +1138,7 @@ def test_nero_v112_feedback_estimates_velocity_when_sdk_reports_zero(
 
     timestamps = iter([10.0, 10.1])
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: next(timestamps),
     )
     controller = object.__new__(ArmKeyboardController)
@@ -1145,7 +1187,7 @@ def test_external_torque_callback_uses_urdf_jacobian_without_sdk(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: 12.5,
     )
     sample = JointState()
@@ -1187,7 +1229,7 @@ def test_nero_external_torque_callback_maps_seven_joints_to_six_axis_wrench(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: 12.5,
     )
     sample = JointState()
@@ -1289,7 +1331,7 @@ def test_admittance_tick_sends_reanchored_reference_through_mit(monkeypatch):
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: 20.0,
     )
     feedback = MotorFeedback(
@@ -1802,7 +1844,7 @@ def test_failed_mit_exit_does_not_claim_normal_mode(monkeypatch):
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node."
+        "armbycontroller.ros.interaction_runtime."
         "prepare_planned_joint_mode",
         lambda arm, timeout: False,
     )
@@ -1881,7 +1923,7 @@ def test_failed_admittance_mit_exit_does_not_claim_normal_mode(monkeypatch):
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node."
+        "armbycontroller.ros.interaction_runtime."
         "prepare_planned_joint_mode",
         lambda arm, timeout: False,
     )
@@ -2243,7 +2285,7 @@ def test_cartesian_mit_applies_shared_torque_rate_limit(
     )
     clock = iter((10.0, 10.01))
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: next(clock),
     )
     monkeypatch.setattr(
@@ -2311,7 +2353,7 @@ def test_mit_tick_computes_gravity_from_measured_joint_positions(monkeypatch):
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: 100.0,
     )
 
@@ -2694,7 +2736,7 @@ def test_startup_home_timeout_triggers_electronic_stop(monkeypatch):
     )
     clock = iter((0.0, 1.0))
     monkeypatch.setattr(
-        "armbycontroller.ros.keyboard_controller_node.time.monotonic",
+        "armbycontroller.ros.node.time.monotonic",
         lambda: next(clock),
     )
 

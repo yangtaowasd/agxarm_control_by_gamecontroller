@@ -35,7 +35,7 @@ install(TARGETS
 )
 
 install(PROGRAMS
-  armbycontroller/ros/keyboard_controller_node.py
+  armbycontroller/ros/main.py
   armbycontroller/pose_controller.py
   armbycontroller/terminal_teleop.py
   armbycontroller/hand_controller.py
@@ -74,6 +74,11 @@ install(FILES
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(FILES
+  docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md
+  DESTINATION share/${PROJECT_NAME}/docs
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
@@ -81,19 +86,25 @@ if(BUILD_TESTING)
   # carry separate LICENSE/CONTRIBUTING files. Keep functional/style linters
   # enabled while skipping the file-presence copyright linter.
   set(ament_cmake_copyright_FOUND TRUE)
-  # Register the C/CMake linters with explicit source paths. This prevents an
-  # in-source colcon build directory from being mistaken for project source.
+  # Register style linters with explicit source paths. This prevents in-source
+  # colcon build/install directories from being mistaken for project source.
   set(AMENT_LINT_AUTO_EXCLUDE
     ament_cmake_cpplint
+    ament_cmake_flake8
     ament_cmake_lint_cmake
+    ament_cmake_pep257
     ament_cmake_uncrustify
   )
   ament_lint_auto_find_test_dependencies()
   find_package(ament_cmake_cpplint REQUIRED)
+  find_package(ament_cmake_flake8 REQUIRED)
   find_package(ament_cmake_lint_cmake REQUIRED)
+  find_package(ament_cmake_pep257 REQUIRED)
   find_package(ament_cmake_uncrustify REQUIRED)
   ament_cpplint(src)
+  ament_flake8(armbycontroller test launch)
   ament_lint_cmake(CMakeLists.txt)
+  ament_pep257(armbycontroller test launch)
   ament_uncrustify(src)
   set(ENV{PYTEST_DISABLE_PLUGIN_AUTOLOAD} "1")
   ament_add_pytest_test(arm_control_test

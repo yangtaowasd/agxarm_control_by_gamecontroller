@@ -1,4 +1,4 @@
-"""Zero-force Cartesian admittance for hand-guided motion."""
+"""Zero-force and resistive Cartesian admittance laws."""
 
 import numpy as np
 
@@ -81,3 +81,40 @@ class ZeroForceAdmittance(CartesianAdmittance):
             - self.virtual_mass[sticking] * acceleration[sticking]
         )
         return acceleration, resisting
+
+
+class ResistiveAdmittance(CartesianAdmittance):
+    """Add virtual damping and a spring toward the captured anchor pose."""
+
+    mode = "resistive"
+
+    def __init__(
+        self,
+        virtual_mass,
+        damping,
+        stiffness,
+        wrench_deadband,
+        wrench_limit,
+        offset_limit,
+        velocity_limit,
+        wrench_filter_hz=5.0,
+    ):
+        self.damping = spatial_vector(
+            damping, "resistive_damping", positive=True
+        )
+        self.stiffness = spatial_vector(
+            stiffness, "resistive_stiffness", positive=True
+        )
+        super().__init__(
+            virtual_mass=virtual_mass,
+            wrench_deadband=wrench_deadband,
+            wrench_limit=wrench_limit,
+            offset_limit=offset_limit,
+            velocity_limit=velocity_limit,
+            wrench_filter_hz=wrench_filter_hz,
+        )
+
+    def _mode_acceleration(self, applied_wrench, period):
+        del period
+        resisting = self.damping * self.velocity + self.stiffness * self.offset
+        return (applied_wrench - resisting) / self.virtual_mass, resisting
