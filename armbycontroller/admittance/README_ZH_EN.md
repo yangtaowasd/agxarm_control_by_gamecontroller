@@ -37,18 +37,20 @@ pose construction.
   Envelope protects estimated total torque.
 
 关节参考速度和实测失控保护使用不同阈值：旋量速度 IK 用
-`admittance_joint_velocity_limit=0.5 rad/s` 饱和参考速度；实测速度超过
-`admittance_measured_joint_velocity_stop_limit=1.0 rad/s` 连续三个控制周期，或
+`admittance_joint_velocity_limit=0.5 rad/s` 饱和参考速度；Nero 实测速度超过
+`admittance_measured_joint_velocity_stop_limit=1.5 rad/s` 连续三个控制周期，或
 单周期超过 `admittance_measured_joint_velocity_hard_limit=2.0 rad/s`，ROS 硬件
-adapter 才触发电子急停。导纳 MIT 估算总力矩不得超过 `8 N·m`。 /
+adapter 才触发电子急停；Piper-L 的持续阈值仍为 `1.0 rad/s`。导纳 MIT 估算
+总力矩不得超过 `8 N·m`。 /
 Reference speed and measured-runaway protection use separate thresholds. Screw
 velocity IK saturates the reference at
 `admittance_joint_velocity_limit=0.5 rad/s`; the ROS hardware adapter triggers
-the electronic stop when measured speed exceeds
-`admittance_measured_joint_velocity_stop_limit=1.0 rad/s` for three consecutive
+the electronic stop on Nero when measured speed exceeds
+`admittance_measured_joint_velocity_stop_limit=1.5 rad/s` for three consecutive
 control cycles, or exceeds the immediate
-`admittance_measured_joint_velocity_hard_limit=2.0 rad/s`. Estimated total
-admittance MIT torque may not exceed `8 N·m`.
+`admittance_measured_joint_velocity_hard_limit=2.0 rad/s`. Piper-L retains a
+`1.0 rad/s` sustained threshold. Estimated total admittance MIT torque may not
+exceed `8 N·m`.
 
 三个 MIT controller 使用同一组诊断字段，包括 `torque_feedback`、
 `torque_model_requested`、`torque_task_requested`、

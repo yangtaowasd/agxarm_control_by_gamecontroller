@@ -121,8 +121,9 @@ DLS with joint-speed and predictive-position bounds. The resulting joint
 velocity is tracked with low-gain MIT. Every cycle uses
 `q_ref=q_measured+dq_ref*dt`, so tracking error cannot accumulate into a
 pullback toward an old joint target. `dq_ref` is capped at `0.5 rad/s` per
-joint. Measured speed above `1.0 rad/s` for three consecutive 100 Hz cycles,
-or above the `2.0 rad/s` hard limit once, triggers the electronic stop.
+joint. On Nero, measured speed above `1.5 rad/s` for three consecutive 100 Hz
+cycles, or above the `2.0 rad/s` hard limit once, triggers the electronic stop
+(Piper-L keeps a `1.0 rad/s` sustained threshold).
 Estimated MIT total torque is capped at `8 N·m`. The separate
 `armbycontroller/admittance/`
 package provides two explicit modes:

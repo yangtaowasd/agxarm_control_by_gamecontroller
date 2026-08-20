@@ -676,7 +676,7 @@ implementation.
 | `admittance_mit_torque_limit` | 1 or n | N·m | `8.0` per joint on both arms; estimated MIT total |
 | `admittance_mit_model_scale` | scalar | — | `1.0`, range `[0,1]`; gravity feedforward scale |
 | `admittance_joint_velocity_limit` | 1 or n | rad/s | `0.5` per joint; bounds only `dq_ref` from screw velocity IK |
-| `admittance_measured_joint_velocity_stop_limit` | 1 or n | rad/s | `1.0` per joint; sustained measured-speed stop threshold |
+| `admittance_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`1.5`, Piper-L=`1.0` per joint; sustained measured-speed stop threshold |
 | `admittance_measured_joint_velocity_hard_limit` | 1 or n | rad/s | `2.0` per joint; immediate measured-speed hard stop |
 | `admittance_measured_velocity_violation_cycles` | scalar | cycles | `3`; consecutive sustained-threshold violations before E-stop |
 | `admittance_task_weights` | 6 | — | `[0.4,0.4,0.4,1,1,1]` in `[angular;linear]` order |
@@ -793,15 +793,17 @@ in joint space before the total torque clip.
   unchanged.
 - 导纳同时限制 wrench、虚拟速度/位移、参考关节速度、预测关节位置、模型前馈和
   MIT 估算总力矩；两种机械臂上限均为 ±8 N·m。旋量 IK 的 `dq_ref` 上限为
-  `0.5 rad/s`，它不再兼作实测急停线。实测任一关节速度超过 `1.0 rad/s`
-  连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子急停。该软件估算
+  `0.5 rad/s`，它不再兼作实测急停线。Nero 实测任一关节速度超过 `1.5 rad/s`
+  连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子急停；Piper-L 的持续
+  阈值仍为 `1.0 rad/s`。该软件估算
   仍不是驱动器电流硬限。 / Admittance bounds wrench, virtual velocity/offset,
   reference joint velocity, predicted joint position, model feedforward, and
   estimated total MIT torque. Both arms use ±8 N·m. The screw-IK `dq_ref` cap
   is `0.5 rad/s` and is no longer reused as a measured-speed stop threshold.
-  Measured speed above `1.0 rad/s` on any joint for three consecutive control
-  cycles, or above `2.0 rad/s` for one cycle, triggers the electronic stop.
-  These software estimates are still not drive-current hard limits.
+  On Nero, measured speed above `1.5 rad/s` on any joint for three consecutive
+  control cycles, or above `2.0 rad/s` for one cycle, triggers the electronic
+  stop; Piper-L retains a `1.0 rad/s` sustained threshold. These software
+  estimates are still not drive-current hard limits.
 - 导纳对 URDF 边界外最多 `admittance_joint_limit_margin=0.03 rad` 只开放受控
   恢复：旋量速度 IK 禁止继续向外，只允许静止或向内运动；超过该恢复带仍由
   Control Cycle Guard 拒绝。普通 planned-position 使用独立的 SDK 限位与
@@ -1096,7 +1098,7 @@ Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
 下游从同一 PoE 模型取得旋量 Jacobian、构造工具几何 Jacobian，再由受限加权
 DLS 生成 `dq_ref`，并用验证包同值低增益 MIT 跟踪；共享 Model Compensation
 提供重力项，每周期参考从实测 `q` 重锚定，估算总力矩限制为 ±8 N·m；参考关节速度
-限制为 `0.5 rad/s`，实测任一关节超过 `1.0 rad/s` 连续三个周期或单周期超过
+限制为 `0.5 rad/s`，实测任一关节超过 `1.5 rad/s` 连续三个周期或单周期超过
 `2.0 rad/s` 会触发电子急停。
 若要验证带阻力且松手回中的版本，在启动命令末尾追加
 `admittance_mode:=resistive`。 / Nero defaults to
@@ -1111,7 +1113,7 @@ to produce `dq_ref`. It is tracked with the verified package's low MIT gains;
 shared Model Compensation supplies gravity, the reference is reanchored to
 measured `q` every cycle, and estimated total torque is limited to ±8 N·m.
 Reference joint speed is limited to `0.5 rad/s`; measured speed above
-`1.0 rad/s` for three consecutive cycles or above `2.0 rad/s` for one cycle
+`1.5 rad/s` for three consecutive cycles or above `2.0 rad/s` for one cycle
 triggers the electronic stop. Append
 `admittance_mode:=resistive` to test the strongly returning variant.
 

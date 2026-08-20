@@ -179,7 +179,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_resistive_stiffness" in nero
     assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
     assert "admittance_mit_torque_limit: [8.0, 8.0, 8.0" in nero
-    assert "admittance_measured_joint_velocity_stop_limit: [1.0" in nero
+    assert "admittance_measured_joint_velocity_stop_limit: [1.5" in nero
     assert "admittance_measured_joint_velocity_hard_limit: [2.0" in nero
     assert "admittance_measured_velocity_violation_cycles: 3" in nero
     assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero

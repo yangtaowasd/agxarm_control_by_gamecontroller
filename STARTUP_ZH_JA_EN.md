@@ -59,8 +59,9 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 - 导纳控制（`O`）：估算外力先生成末端速度，经 PoE 旋量 Jacobian 和工具几何
   Jacobian 的受限加权 DLS 转成关节速度，再由
   低增益 MIT 跟踪。每周期从实测关节位置重新锚定；参考关节速度上限为
-  `0.5 rad/s`，共享重力补偿已开启，估算总力矩上限为 `8 N·m`。实测关节速度
-  超过 `1.0 rad/s` 连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子急停。
+  `0.5 rad/s`，共享重力补偿已开启，估算总力矩上限为 `8 N·m`。Nero 实测关节
+  速度超过 `1.5 rad/s` 连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子
+  急停；Piper-L 的持续阈值为 `1.0 rad/s`。
 - `I` 和 `O` 不能同时开启。阻抗与导纳之间切换时，控制器严格执行
   `当前模式 -> 普通 planned-position 模式 -> 目标模式`；如果回到普通模式失败，
   则拒绝进入目标模式。再次按下当前模式的按键会回到普通模式。
@@ -133,8 +134,9 @@ Piper-L を起動します。
   Jacobian から工具幾何 Jacobian を構成した制限付き重み付き DLS で
   関節速度へ変換して低ゲイン MIT で追従します。各周期で実測関節位置へ
   再アンカーします。関節参照速度上限は `0.5 rad/s`、推定総トルク上限は
-  `8 N·m` です。共有重力補償を使用し、実測関節速度が `1.0 rad/s` を3制御周期
-  連続で超えるか、1周期でも `2.0 rad/s` を超えると電子非常停止します。
+  `8 N·m` です。共有重力補償を使用し、Nero の実測関節速度が `1.5 rad/s` を
+  3制御周期連続で超えるか、1周期でも `2.0 rad/s` を超えると電子非常停止
+  します。Piper-L の連続超過しきい値は `1.0 rad/s` です。
 - `I` と `O` は同時に有効化できません。インピーダンスとアドミッタンスを
   切り替えるときは、必ず `現在のモード -> 通常 planned-position モード ->
   目的のモード` の順で遷移します。通常モードへの復帰に失敗した場合、目的の
@@ -211,8 +213,9 @@ there are no people or obstacles around the arm.
   compensation is enabled. The joint
   reference is reanchored to measured position every cycle. Reference joint
   speed is capped at `0.5 rad/s` and estimated total torque at `8 N·m`.
-  Measured joint speed above `1.0 rad/s` for three consecutive control cycles,
-  or above `2.0 rad/s` once, triggers the electronic stop.
+  On Nero, measured joint speed above `1.5 rad/s` for three consecutive control
+  cycles, or above `2.0 rad/s` once, triggers the electronic stop. Piper-L
+  retains a `1.0 rad/s` sustained threshold.
 - `I` and `O` cannot be enabled together. Switching between impedance and
   admittance strictly follows `current mode -> normal planned-position mode ->
   target mode`; failure to restore normal mode rejects the target transition.
