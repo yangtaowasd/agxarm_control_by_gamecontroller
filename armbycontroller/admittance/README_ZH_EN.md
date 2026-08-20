@@ -38,18 +38,18 @@ pose construction.
 
 关节级安全边界与阻抗、混合共用：旋量速度 IK 用
 `interaction_reference_joint_velocity_limit=1.0 rad/s` 饱和参考速度；Nero 实测
-速度超过 `interaction_measured_joint_velocity_stop_limit=2.3 rad/s` 连续三个
+速度超过 `interaction_measured_joint_velocity_stop_limit=2.5 rad/s` 连续三个
 控制周期，或单周期超过
-`interaction_measured_joint_velocity_hard_limit=2.6 rad/s`，ROS 硬件 adapter
+`interaction_measured_joint_velocity_hard_limit=2.8 rad/s`，ROS 硬件 adapter
 触发电子急停；Piper-L 的持续阈值为 `1.5 rad/s`。所有 MIT 交互模式的估算总力矩
 由 `interaction_torque_limit=8 N·m` 统一限制。导纳自己的 wrench、Twist 和位移
 边界仍独立。 / Joint-level boundaries are shared with impedance and hybrid
 control. Screw velocity IK saturates the reference at
 `interaction_reference_joint_velocity_limit=1.0 rad/s`; the ROS hardware
 adapter triggers the electronic stop on Nero when measured speed exceeds
-`interaction_measured_joint_velocity_stop_limit=2.3 rad/s` for three
+`interaction_measured_joint_velocity_stop_limit=2.5 rad/s` for three
 consecutive cycles or exceeds the immediate
-`interaction_measured_joint_velocity_hard_limit=2.6 rad/s`. Piper-L uses a
+`interaction_measured_joint_velocity_hard_limit=2.8 rad/s`. Piper-L uses a
 `1.5 rad/s` sustained threshold. `interaction_torque_limit=8 N.m` bounds
 estimated total torque in every MIT interaction mode. Admittance-specific
 wrench, Twist, and offset bounds remain independent.

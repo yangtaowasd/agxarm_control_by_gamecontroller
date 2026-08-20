@@ -274,8 +274,8 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_friction" in nero
     assert "admittance_resistive_stiffness" in nero
     assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
-    assert "interaction_measured_joint_velocity_stop_limit: [2.3]" in nero
-    assert "interaction_measured_joint_velocity_hard_limit: [2.6]" in nero
+    assert "interaction_measured_joint_velocity_stop_limit: [2.5]" in nero
+    assert "interaction_measured_joint_velocity_hard_limit: [2.8]" in nero
     assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero
     assert "admittance_task_weights: [0.4, 0.4, 0.4, 1.0" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero

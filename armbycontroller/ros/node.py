@@ -560,6 +560,7 @@ class ArmKeyboardController(
         self.key_state = [0] * KEY_COUNT
         self.last_keyboard_time = 0.0
         self.arm = None
+        self.firmware_probe_arm = None
         self.arm_connected = False
         self.arm_ready = False
         self.emergency_stopped = False

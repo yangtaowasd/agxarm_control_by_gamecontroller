@@ -50,23 +50,18 @@ rejects the target mode, and the three interaction modes never run together.
 Both arms support admittance and hybrid control, with independent
 robot-specific YAML tuning.
 
-真实硬件启动统一采用两阶段连接。第一阶段以 SDK `default` profile 创建探测
-实例，连接后取得并保存完整 firmware 字典，随后必定断开；第二阶段根据保存的
-`software_version` 选择 Nero/Piper-L 对应驱动 profile。探测实例断开后等待默认
-`0.5 s`，才创建全新的正式控制实例。
-Nero 和 Piper-L 探测阶段都会请求使能；探测连接结束时只断开通信，不发送
-`disable()`，使能状态留给正式连接接管。即使固件探测失败也不会自动失能；不会
-发送运动或固件写入命令。 /
-Real-hardware startup uses one two-stage connection for both arms. Stage one
-creates a probe with
-the SDK `default` profile, connects, saves the complete firmware dictionary,
-and always disconnects. After a default `0.5 s` post-disconnect delay, stage
-two selects the Nero/Piper-L driver profile from the saved `software_version`
-and creates a distinct formal control instance.
-Both Nero and Piper-L probes request enable. Probe teardown disconnects
-communication without sending `disable()`, leaving the enabled state for the
-formal connection to take over. A failed firmware probe also does not
-automatically disable the arm. No motion or firmware-write command is sent.
+真实硬件启动统一采用两连接并存流程。第一条以 SDK `default` profile 创建探测
+实例，执行 `connect()` 后立即发送一次 `enable()`，再取得并保存完整 firmware
+字典；根据 `software_version` 创建对应 Nero/Piper-L profile 的第二条正式连接。
+两次 `connect()` 之间不调用 `disable()`、不调用 `disconnect()`、也不等待；探测
+实例会与正式实例一起保留到节点退出。探测实例不发送模式、运动或固件写入命令。 /
+Real-hardware startup keeps two connections alive. The first uses the SDK
+`default` profile, calls `connect()`, immediately sends one `enable()`, and
+saves the complete firmware dictionary. A second formal connection is then
+created with the Nero/Piper-L profile selected from `software_version`.
+There is no `disable()`, `disconnect()`, or delay between the two `connect()`
+calls; both instances remain alive until node shutdown. The probe sends no
+mode, motion, or firmware-write command.
 
 ## 2. 心智模型 / Mental model
 
@@ -601,14 +596,14 @@ agreement is demonstrated sample by sample.
 
 ## 7. 数据流 / Data flow
 
-进入以下控制周期前，硬件 adapter 先执行：`DEFAULT 探测连接 -> 保存设备信息 ->
-断开 -> 等待 0.5 s -> 按检测 profile 正式连接`。Nero 的边界为
+进入以下控制周期前，硬件 adapter 先执行：`DEFAULT 探测连接 -> enable -> 保存设备
+信息 -> 保持连接 -> 按检测 profile 建立第二条正式连接`。Nero 的边界为
 `1.11/1.12/1.20`；Piper-L 的
 边界为 `S-V1.8-3/8/9`，与当前 pyAgxArm profile 定义一致。无法取得或解析
 `software_version` 时启动失败，不会用猜测 profile 建立控制连接。 / Before the
 following cyclic flow, the hardware adapter runs `DEFAULT probe connection ->
-save device data -> disconnect -> wait 0.5 s -> formal connection with the
-detected profile`. Nero boundaries are `1.11/1.12/1.20`; Piper-L boundaries are
+enable -> save device data -> keep connected -> second formal connection with
+the detected profile`. Nero boundaries are `1.11/1.12/1.20`; Piper-L boundaries are
 `S-V1.8-3/8/9`, matching the current pyAgxArm profile definitions. Startup
 fails if `software_version` cannot be obtained or parsed; no guessed control
 profile is used.
@@ -717,7 +712,7 @@ profile is used.
 | `armbycontroller/control/interaction.py` | `normal/impedance/admittance/hybrid` 互锁和强制经过普通模式的迁移路径 / Normal/impedance/admittance/hybrid interlock and normal-mediated transition paths |
 | `armbycontroller/control/trajectory.py` | 无 ROS/CAN 的限加加速度、限加速度和限速度关节参考轨迹 / ROS/CAN-free jerk-, acceleration-, and velocity-limited joint-reference trajectory |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
-| `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射、断开和 profile 化正式重连 / Shared DEFAULT probe, version mapping, disconnect, and profile-specific formal reconnect for Nero/Piper-L |
+| `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射和不中断使能的第二条 profile 连接 / Shared DEFAULT probe, version mapping, and profile-specific second connection without interrupting enable |
 | `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和 Nero 低通差分速度估计 / Side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered Nero velocity estimation |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
@@ -748,7 +743,7 @@ profile is used.
 | `test/test_control_interface.py` | 四种交互模式的共用 interface、命令、sample schema 和互锁契约 / Shared interface, command, sample-schema, and interlock contracts for four interaction modes |
 | `test/test_hybrid_control.py` | 任务顺序、互补选择、导纳目标力投影和阻抗/导纳输出解耦契约 / Task ordering, complementary selection, desired-wrench projection, and impedance/admittance output-decoupling contracts |
 | `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
-| `test/test_hardware_connection.py` | 两次连接顺序、探测数据保存、版本到 profile 映射和失败断开契约 / Two-connection ordering, saved probe data, version-to-profile mapping, and failure-disconnect contracts |
+| `test/test_hardware_connection.py` | 两次连接顺序、探测连接保活、数据保存和版本到 profile 映射契约 / Two-connection ordering, retained probe, saved data, and version-to-profile mapping contracts |
 
 用户要求排除 `ros/`、`ik/`、`impedance/` 后的详细文件分类，见
 `docs/file_map/README_ZH_EN.md` 及其五个分类子文档。 / For the requested
@@ -772,13 +767,13 @@ implementation.
 | `firmware` | string | — | `auto`；实机检测结果优先，显式值仅作配置检查与干跑 profile / detected hardware wins; explicit value is a configuration check and dry-run profile |
 | `firmware_probe_timeout` | scalar | s | `5.0`；第一阶段取得固件数据的总时限 / total stage-one firmware-data deadline |
 | `firmware_probe_poll_period` | scalar | s | `0.1`；无数据时的查询间隔 / retry interval while data is absent |
-| `firmware_reconnect_delay` | scalar | s | `0.5`；探测连接断开与正式连接创建之间的等待 / delay between probe disconnect and formal-connection creation |
+| `firmware_reconnect_delay` | scalar | s | `0.5`；兼容保留，当前两连接并存流程不等待 / retained for compatibility; current overlapping-connection flow does not wait |
 | `impedance_backend` | string | — | `cartesian` (`joint` 可对照 / for comparison) |
 | `interaction_torque_limit` | 1 or n | N·m | `8.0` per joint；关节阻抗、笛卡尔阻抗、导纳和混合共用的估算总力矩上限 / estimated-total-torque limit shared by joint/Cartesian impedance, admittance, and hybrid |
 | `interaction_torque_rate_limit` | 1 or n | N·m/s | `20.0` per joint；在 100 Hz 下每周期最多变化 0.2 N·m / estimated-total-torque slew limit shared by all four MIT controllers; at 100 Hz, at most 0.2 N·m per cycle |
 | `interaction_reference_joint_velocity_limit` | 1 or n | rad/s | `1.0` per joint；阻抗轨迹和导纳/混合旋量速度 IK 共用 / shared by impedance trajectories and admittance/hybrid screw-velocity IK |
-| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`2.3`; Piper-L=`1.5` per joint；持续速度停止线 / sustained measured-speed stop threshold |
-| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | Nero=`2.6`; Piper-L=`2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
+| `interaction_measured_joint_velocity_stop_limit` | 1 or n | rad/s | Nero=`2.5`; Piper-L=`1.5` per joint；持续速度停止线 / sustained measured-speed stop threshold |
+| `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | Nero=`2.8`; Piper-L=`2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
 | `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
 | `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
@@ -895,15 +890,14 @@ in joint space before the total torque clip.
 
 ## 10. 安全边界 / Safety boundaries
 
-- Nero 和 Piper-L 固件探测都在 `get_firmware()` 前发送一次 `enable()`，断开前
-  明确不发送 `disable()`；即使探测失败，使能状态也可能保留，必须使用物理急停
-  或另一个控制连接处理。正式控制实例只在探测实例断开并等待
-  `firmware_reconnect_delay` 后创建。 / Both Nero and Piper-L firmware probes
-  send one `enable()` before `get_firmware()` and deliberately do not send
-  `disable()` before disconnecting. Even a failed probe may leave the arm
-  enabled; use the physical E-stop or another control connection to handle it.
-  The formal control instance is created only after the probe disconnects and
-  `firmware_reconnect_delay` elapses.
+- Nero 和 Piper-L 固件探测执行 `connect()` 后立即发送一次 `enable()`，再读取
+  firmware。第二条正式连接建立前不发送 `disable()` 或 `disconnect()`；两条 SDK
+  连接会并存，直到节点退出统一释放。若探测失败，机械臂可能保持使能，必须使用
+  物理急停处理。 / Nero and Piper-L firmware probes send one `enable()`
+  immediately after `connect()`, then read firmware. No `disable()` or
+  `disconnect()` is sent before the second formal connection; both SDK
+  connections coexist until node shutdown. If discovery fails, the arm may
+  remain enabled and must be handled with the physical E-stop.
 - 固件数据缺失、`software_version` 无法解析或检测 profile 不受当前 SDK 支持时，
   实机启动直接失败。 / Hardware startup fails closed when firmware data is
   absent, `software_version` cannot be parsed, or the detected profile is not
@@ -979,14 +973,14 @@ in joint space before the total torque clip.
   the actual robot mode.
 - 所有 `I/O/H` 模式的参考关节速度统一受
   `interaction_reference_joint_velocity_limit=1.0 rad/s` 限制，并在 ROS 硬件
-  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.3 rad/s` 连续三个
+  adapter 先经过同一个实测速度保护器。Nero 任一关节超过 `2.5 rad/s` 连续三个
   周期、Piper-L 超过 `1.5 rad/s` 连续三个周期，或 Nero 单周期超过
-  `2.6 rad/s`、Piper-L 单周期超过 `2.5 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
+  `2.8 rad/s`、Piper-L 单周期超过 `2.5 rad/s`，都会触发电子急停。导纳与混合还保留各自的 wrench、虚拟
   Twist/位移和预测位置限制。 / Every `I/O/H` mode shares
   `interaction_reference_joint_velocity_limit=1.0 rad/s` and first passes the
   same measured-speed guard in the ROS hardware adapter. An electronic stop is
-  triggered after three consecutive cycles above `2.3 rad/s` on Nero or
-  `1.5 rad/s` on Piper-L, or immediately above `2.6 rad/s` on Nero and
+  triggered after three consecutive cycles above `2.5 rad/s` on Nero or
+  `1.5 rad/s` on Piper-L, or immediately above `2.8 rad/s` on Nero and
   `2.5 rad/s` on Piper-L.
   Admittance and hybrid control additionally retain their wrench, virtual
   Twist/offset, and predictive-position bounds.
@@ -1159,12 +1153,13 @@ Explicit launch arguments have highest priority. `common_config` and
 
 Nero 文件对应当前侧装、无手机械臂，显式设置 `tool_configuration=none`；
 Piper-L 文件独立设置 `tool_configuration=gripper`。实机启动时，两种机械臂都会先
-用 `default` profile 探测并保存数据、断开，再以检测 profile 正式重连；例如 Nero
+用 `default` profile 连接、enable 并保存数据，保持该连接，再以检测 profile 建立
+第二条正式连接；例如 Nero
 `1.11 -> v111`、Piper-L `S-V1.8-8 -> v188`。`firmware=auto` 不再使用静态版本
 猜测。 / Nero explicitly uses `tool_configuration=none`; Piper-L independently
-uses `tool_configuration=gripper`. On hardware, both arms first probe with the
-`default` profile, save the returned data, disconnect, and formally reconnect
-with the detected profile; examples are Nero `1.11 -> v111` and Piper-L
+uses `tool_configuration=gripper`. On hardware, both arms first connect with
+the `default` profile, enable, save the returned data, keep that connection,
+and open a second connection with the detected profile; examples are Nero `1.11 -> v111` and Piper-L
 `S-V1.8-8 -> v188`. `firmware=auto` no longer guesses a static version.
 
 `cartesian_impedance_model_scale` 对 Nero 可写 7 个值，顺序为 J1…J7，J4 是第
@@ -1326,8 +1321,8 @@ Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
 DLS 生成 `dq_ref`，并用验证包同值低增益 MIT 跟踪；共享 Model Compensation
 提供重力项，每周期参考从实测 `q` 重锚定，估算总力矩限制为 ±8 N·m、变化率为
 `20 N·m/s`；参考关节速度
-限制为 `1.0 rad/s`，实测任一关节超过 `2.3 rad/s` 连续三个周期或单周期超过
-`2.6 rad/s` 会触发电子急停。
+限制为 `1.0 rad/s`，实测任一关节超过 `2.5 rad/s` 连续三个周期或单周期超过
+`2.8 rad/s` 会触发电子急停。
 若要验证带阻力且松手回中的版本，在启动命令末尾追加
 `admittance_mode:=resistive`。 / Nero defaults to
 `admittance_mode=zero_force`. With the arm supported and a fresh
@@ -1342,7 +1337,7 @@ shared Model Compensation supplies gravity, the reference is reanchored to
 measured `q` every cycle, and estimated total torque is limited to ±8 N·m and
 `20 N·m/s`.
 Reference joint speed is limited to `1.0 rad/s`; measured speed above
-`2.3 rad/s` for three consecutive cycles or above `2.6 rad/s` for one cycle
+`2.5 rad/s` for three consecutive cycles or above `2.8 rad/s` for one cycle
 triggers the electronic stop. Append
 `admittance_mode:=resistive` to test the strongly returning variant.
 

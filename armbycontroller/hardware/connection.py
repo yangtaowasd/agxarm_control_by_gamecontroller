@@ -1,4 +1,4 @@
-"""Two-stage AGX arm discovery and control connection."""
+"""Two-connection AGX arm discovery and control startup."""
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -13,12 +13,13 @@ class FirmwareDetectionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ArmConnection:
-    """The formal arm instance and data saved by the probe connection."""
+    """The formal arm plus the probe kept alive during control."""
 
     arm: object
     firmware_info: dict
     firmware_profile: str
     config: dict
+    probe_arm: object | None = None
 
 
 def _software_version(firmware_info):
@@ -152,11 +153,12 @@ def connect_arm_two_stage(
     sleep=time.sleep,
 ):
     """
-    Probe with DEFAULT, disconnect, then reconnect with detected data.
+    Connect with DEFAULT, keep it enabled, then connect the detected profile.
 
     The first arm object is used only to query and save firmware metadata. It
-    is always disconnected before a distinct, profile-specific arm object is
-    created. The returned object is the second, formal control connection.
+    remains connected so the hardware does not lose enable between startup
+    stages. The returned formal arm is a distinct, profile-specific instance;
+    ``probe_arm`` must be retained for the lifetime of the formal connection.
     """
     model = str(robot_model).lower()
     if model not in ("nero", "piper_l"):
@@ -196,9 +198,6 @@ def connect_arm_two_stage(
     )
     try:
         probe_arm.connect()
-        announce(
-            f"{model} firmware probe: sending one temporary enable request"
-        )
         try:
             enable_result = probe_arm.enable()
             announce(
@@ -210,6 +209,7 @@ def connect_arm_two_stage(
                 f"{model} firmware probe enable request failed: "
                 f"{type(error).__name__}: {error}"
             )
+
         firmware_info = _wait_for_firmware(
             probe_arm,
             float(probe_timeout),
@@ -227,16 +227,14 @@ def connect_arm_two_stage(
             f"firmware probe data saved: {firmware_info}; "
             f"selected profile={firmware_profile}"
         )
-    finally:
-        probe_arm.disconnect()
-        announce("firmware probe disconnected")
+    except Exception:
+        # Deliberately do not disconnect here: on this hardware, disconnecting
+        # the probe drops motor enable before the formal connection starts.
+        raise
 
-    reconnect_delay = float(reconnect_delay)
-    if reconnect_delay > 0.0:
-        announce(
-            f"waiting {reconnect_delay:.3f} s before formal connection"
-        )
-        sleep(reconnect_delay)
+    announce(
+        "firmware probe kept connected and enabled during formal connection"
+    )
 
     formal_config = config_factory(
         robot=arm_model,
@@ -259,6 +257,7 @@ def connect_arm_two_stage(
         firmware_info,
         firmware_profile,
         formal_config,
+        probe_arm,
     )
 
 

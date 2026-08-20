@@ -10,26 +10,27 @@ lifecycle for Nero/Piper-L; they contain no control algorithm.
 
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
-| `armbycontroller/hardware/connection.py` | 用 `default` profile 探测、保存完整 firmware 数据、断开、映射版本并以新实例正式重连 / probe with the `default` profile, save complete firmware data, disconnect, map the version, and formally reconnect with a new instance |
+| `armbycontroller/hardware/connection.py` | 用 `default` profile 连接、enable、保存 firmware，并在不中断第一条连接时建立 profile 化正式连接 / connect and enable with the `default` profile, save firmware, and establish a profile-specific formal connection without interrupting the first |
 | `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和低通差分速度估计 / side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered velocity estimation |
 | `armbycontroller/hardware/__init__.py` | 两阶段连接和反馈工具的稳定 Python 导出面 / stable Python exports for two-stage connection and feedback tools |
-| `test/test_hardware_connection.py` | 两次连接的严格顺序、实例隔离、版本边界、数据副本和失败清理 / exact two-connection order, instance isolation, version boundaries, copied data, and failure cleanup |
+| `test/test_hardware_connection.py` | 两次连接的严格顺序、探测连接保活、实例隔离、版本边界和数据副本 / exact two-connection order, retained probe, instance isolation, version boundaries, and copied data |
 
 ## 生命周期 / Lifecycle
 
 ```text
-create(DEFAULT) -> connect -> temporary enable -> get_firmware
-       -> save -> disconnect (no disable) -> wait 0.5 s
-       -> create(detected profile) -> connect -> control
+create(DEFAULT) -> connect -> enable -> get_firmware -> save
+       -> keep probe connected
+       -> create(detected profile) -> connect -> enable -> control
 ```
 
-Nero 和 Piper-L 探测实例都发送一次临时 `enable()`，读取固件后直接断开且不
-发送 `disable()`；探测失败清理也一样，因此硬件可能保持使能。它们不发送模式
-切换、运动或固件写入命令。若没有
+Nero 和 Piper-L 探测实例在连接后立即发送一次 `enable()`，然后读取固件。读取后
+不发送 `disable()` 或 `disconnect()`；第一条连接与第二条正式连接并存到节点退出。
+它们不发送模式切换、运动或固件写入命令。若没有
 `software_version`、版本无法解析，或当前 pyAgxArm 不支持映射出的 profile，
-正式实例不会建立。 / Both Nero and Piper-L probes send one temporary
-`enable()` and disconnect without sending `disable()` after the firmware read.
-This also applies to probe-failure cleanup, so hardware may remain enabled.
+正式实例不会建立。 / Both Nero and Piper-L probes send one `enable()`
+immediately after connecting and then query firmware. They remain connected
+without sending `disable()` while the formal connection is created. Hardware
+may remain enabled if discovery fails.
 They send no mode, motion, or firmware-write command. The formal instance is
 not created when `software_version` is absent, cannot be parsed, or maps to a
 profile unsupported by the installed pyAgxArm.
@@ -40,9 +41,8 @@ profile unsupported by the installed pyAgxArm.
   deadline, default `5.0 s`.
 - `firmware_probe_poll_period`：空响应后的重试间隔，默认 `0.1 s`。 / retry
   interval after an empty response, default `0.1 s`.
-- `firmware_reconnect_delay`：第一次断开后、创建第二个实例前的等待，默认
-  `0.5 s`。 / delay after the first disconnect and before creating the second
-  instance, default `0.5 s`.
+- `firmware_reconnect_delay`：兼容保留；当前两连接并存流程不等待。 / retained
+  for compatibility; the current overlapping-connection flow does not wait.
 - `firmware`：实机上检测结果优先；显式值用于提示不一致，并用于不连接 CAN 的
   dry-run profile。 / detected hardware wins on real arms; an explicit value
   reports mismatches and supplies the profile for CAN-free dry runs.

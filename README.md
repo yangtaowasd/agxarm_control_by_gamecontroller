@@ -121,8 +121,8 @@ DLS with joint-speed and predictive-position bounds. The resulting joint
 velocity is tracked with low-gain MIT. Every cycle uses
 `q_ref=q_measured+dq_ref*dt`, so tracking error cannot accumulate into a
 pullback toward an old joint target. `dq_ref` is capped at `1.0 rad/s` per
-joint. On Nero, measured speed above `2.3 rad/s` for three consecutive 100 Hz
-cycles, or above the `2.6 rad/s` hard limit once, triggers the electronic stop
+joint. On Nero, measured speed above `2.5 rad/s` for three consecutive 100 Hz
+cycles, or above the `2.8 rad/s` hard limit once, triggers the electronic stop
 (Piper-L keeps a `1.5 rad/s` sustained threshold).
 Estimated MIT total torque is capped at `8 N·m` and slewed at `20 N·m/s` by
 default. If observer wrench data or its source timestamp exceeds the `0.10 s`
@@ -167,7 +167,7 @@ All MIT interaction modes now use the same `interaction_*` joint-safety
 configuration. The shared defaults are an `8 N.m` estimated-total-torque
 limit, `20 N.m/s` estimated-total-torque rate limit, `1.0 rad/s`
 reference-speed limit, three-cycle sustained-speed debounce, and `0.03 rad`
-joint-limit margin. Nero uses `2.3 rad/s` sustained and `2.6 rad/s` immediate
+joint-limit margin. Nero uses `2.5 rad/s` sustained and `2.8 rad/s` immediate
 measured-speed stops; Piper-L retains `1.5 rad/s` and `2.5 rad/s` respectively.
 Admittance-specific wrench, virtual Twist, and offset bounds remain
 separate because they are task-space control-law parameters.
@@ -415,16 +415,13 @@ For Nero J1 through J7, use a seven-value
 guess a J4 value from motion drift alone. Removing the incorrectly modeled
 Revo2 removes about `1.57 N.m` from the previously reproduced J4 model torque
 at the logged pose. The latest hardware log reported software `1.11` while
-real hardware now always uses two connections. A first SDK `default` instance
-reads and saves the complete firmware dictionary, then disconnects. After the
-shared `firmware_reconnect_delay` (default `0.5 s`), a distinct second instance
-is created with the detected profile (`1.11 -> v111` for Nero,
-`S-V1.8-8 -> v188` for Piper-L). Both probes send one temporary enable request
-and disconnect without sending disable, allowing the formal connection to take
-over without an intentional enable-state drop. They send no motion or
-firmware-write command. Failure to obtain or parse `software_version` aborts
-startup but deliberately does not disable the arm; use the physical E-stop if
-that failure occurs.
+real hardware now always uses two simultaneous connections. A first SDK
+`default` instance connects, sends one enable request, and saves the complete
+firmware dictionary. It stays connected while a distinct second instance is
+created immediately with the detected profile (`1.11 -> v111` for Nero,
+`S-V1.8-8 -> v188` for Piper-L). There is no `disable()` or `disconnect()`
+between the two `connect()` calls. Both instances are retained until node
+shutdown. The probe sends no mode, motion, or firmware-write command.
 
 Run Nero:
 

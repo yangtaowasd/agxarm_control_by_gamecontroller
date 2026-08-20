@@ -181,6 +181,7 @@ class PoseController(Node):
         self._validate_parameters()
 
         self.robot = None
+        self.firmware_probe_arm = None
         self.device_firmware_info = {}
         self.ik_solver = None
         self.ik_engine = None
@@ -359,6 +360,7 @@ class PoseController(Node):
             report=self.get_logger().info,
         )
         self.robot = connection.arm
+        self.firmware_probe_arm = getattr(connection, "probe_arm", None)
         self.device_firmware_info = connection.firmware_info
         detected_firmware = connection.firmware_profile
         if (
@@ -639,6 +641,16 @@ class PoseController(Node):
             )
         finally:
             self.robot = None
+        if self.firmware_probe_arm is not None:
+            try:
+                self.firmware_probe_arm.disconnect()
+            except Exception as error:
+                self.get_logger().error(
+                    f"failed to disconnect {self.robot_model} firmware "
+                    f"probe: {error}"
+                )
+            finally:
+                self.firmware_probe_arm = None
 
     def destroy_node(self):
         self.close()

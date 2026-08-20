@@ -52,6 +52,7 @@ class HardwareSessionMixin:
                 report=self.get_logger().info,
             )
             self.arm = connection.arm
+            self.firmware_probe_arm = getattr(connection, "probe_arm", None)
             self.device_firmware_info = connection.firmware_info
             detected_name = connection.firmware_profile
             if (
@@ -556,4 +557,14 @@ class HardwareSessionMixin:
                 self.get_logger().error(
                     f"failed to disconnect {self.robot_model}: {exc}"
                 )
+            probe_arm = getattr(self, "firmware_probe_arm", None)
+            if probe_arm is not None and probe_arm is not self.arm:
+                try:
+                    probe_arm.disconnect()
+                except Exception as exc:
+                    self.get_logger().error(
+                        f"failed to disconnect {self.robot_model} firmware "
+                        f"probe: {exc}"
+                    )
+                self.firmware_probe_arm = None
         super().destroy_node()
