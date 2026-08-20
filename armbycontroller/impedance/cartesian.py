@@ -173,6 +173,7 @@ def cartesian_impedance_command(
     nullspace_stiffness=0.0,
     nullspace_damping=0.0,
     model_scale=1.0,
+    model_torque_override=None,
 ):
     """
     Evaluate strict Cartesian impedance and map it to joint torque.
@@ -290,7 +291,11 @@ def cartesian_impedance_command(
         )
         nullspace_torque = torque_projector @ unprojected
 
-    if dynamics_model is None:
+    if model_torque_override is not None:
+        model_torque = _finite_vector(
+            model_torque_override, positions.size, "model_torque_override"
+        )
+    elif dynamics_model is None:
         model_torque = np.zeros(positions.size, dtype=float)
     else:
         scale = _nonnegative_joint_gain(

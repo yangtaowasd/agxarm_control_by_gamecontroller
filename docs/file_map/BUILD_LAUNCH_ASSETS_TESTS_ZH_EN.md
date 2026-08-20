@@ -25,8 +25,8 @@
 | 文件 / File | 分类责任 / Classified responsibility |
 | --- | --- |
 | `config/common.yaml` | 两种机械臂共用的控制/观测周期、默认 backend 和固件探测时序 / shared control/observer rates, default backend, and firmware-probe timing |
-| `config/nero.yaml` | Nero 独立侧装裸臂、7 轴补偿/阻抗/轨迹、两种导纳、J2/J3/J4 混合姿态与速度估计参数 / Nero-only side-mounted bare-arm, seven-axis compensation/impedance/trajectory, both admittance modes, hybrid J2/J3/J4-posture, and velocity-estimation parameters |
-| `config/piper_l.yaml` | Piper-L 独立夹爪、6 轴补偿/阻抗/轨迹与两种导纳参数 / Piper-L-only gripper, six-axis compensation/impedance/trajectory, and both admittance modes |
+| `config/nero.yaml` | Nero 独立侧装裸臂、7 轴补偿/阻抗/轨迹、两种导纳、导纳 MIT、J2/J3/J4 混合姿态与速度估计参数 / Nero-only side-mounted bare-arm, seven-axis compensation/impedance/trajectory, both admittance modes, admittance MIT, hybrid J2/J3/J4-posture, and velocity-estimation parameters |
+| `config/piper_l.yaml` | Piper-L 独立夹爪、6 轴补偿/阻抗/轨迹、两种导纳与导纳 MIT 参数 / Piper-L-only gripper, six-axis compensation/impedance/trajectory, both admittance modes, and admittance-MIT parameters |
 
 ## 机器人资源 / Robot assets
 

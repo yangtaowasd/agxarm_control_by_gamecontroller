@@ -51,10 +51,26 @@ arm_keyboard_controller:
     admittance_wrench_deadband: [0.05, 0.05, 0.05, 0.25, 0.25, 0.25]
     admittance_wrench_limit: [1.5, 1.5, 1.5, 6.0, 6.0, 6.0]
     admittance_offset_limit: [0.25, 0.25, 0.25, 0.08, 0.08, 0.08]
-    admittance_velocity_limit: [0.35, 0.35, 0.35, 0.10, 0.10, 0.10]
+    admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05, 0.05, 0.05]
     admittance_wrench_filter_hz: 5.0
     admittance_wrench_dls_damping: 0.05
     admittance_wrench_timeout: 0.10  # s
+
+    # Hardware-validated low-gain MIT tracking after velocity admittance.
+    # Task vectors remain [angular; linear], hence the reordered task weights.
+    admittance_mit_kp: [0.32, 0.24, 0.32, 0.24, 0.32, 0.28, 0.28]
+    admittance_mit_kd: [0.08, 0.08, 0.08, 0.08, 0.08, 0.08, 0.08]
+    admittance_mit_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+    admittance_mit_model_scale: 1.0
+    admittance_joint_velocity_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    # Reference speed stays at 0.5. Measured tracking gets headroom: sustained
+    # overspeed must last 3 cycles; 2.0 rad/s remains an immediate hard stop.
+    admittance_measured_joint_velocity_stop_limit: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    admittance_measured_joint_velocity_hard_limit: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    admittance_measured_velocity_violation_cycles: 3
+    admittance_task_weights: [0.4, 0.4, 0.4, 1.0, 1.0, 1.0]
+    admittance_velocity_dls_damping: 0.02
+    admittance_joint_limit_margin: 0.03
 
     mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

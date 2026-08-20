@@ -4,6 +4,7 @@ from collections import deque
 import importlib.util
 import math
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import modern_robotics as mr
@@ -11,6 +12,9 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import JointState
 
+from armbycontroller.control import ControlResult
+from armbycontroller.control import ControlSafetyError
+from armbycontroller.control import MitCommand
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
 from armbycontroller.ik.core import IkFailure
@@ -29,6 +33,9 @@ from armbycontroller.ik.core import set_joint_acceleration_limits
 from armbycontroller.ik.core import solve_pointing_ik
 from armbycontroller.ros.keyboard_controller_node import ArmJointJogState
 from armbycontroller.ros.keyboard_controller_node import ArmKeyboardController
+from armbycontroller.ros.keyboard_controller_node import (
+    ADMITTANCE_MIT_TORQUE_LIMIT_MAX,
+)
 from armbycontroller.ros.keyboard_controller_node import (
     estimate_joint_velocity,
 )
@@ -130,10 +137,27 @@ def test_keyboard_launch_exposes_yaml_tuning_overrides_without_defaults():
     assert "admittance_resistive_stiffness" in (
         module.CONFIGURED_PARAMETERS
     )
+    assert {
+        "admittance_mit_kp",
+        "admittance_mit_kd",
+        "admittance_mit_torque_limit",
+        "admittance_mit_model_scale",
+        "admittance_joint_velocity_limit",
+        "admittance_measured_joint_velocity_stop_limit",
+        "admittance_measured_joint_velocity_hard_limit",
+        "admittance_measured_velocity_violation_cycles",
+        "admittance_task_weights",
+        "admittance_velocity_dls_damping",
+        "admittance_joint_limit_margin",
+    } <= module.CONFIGURED_PARAMETERS
+    assert ADMITTANCE_MIT_TORQUE_LIMIT_MAX == 8.0
 
 
 def test_robot_configs_separate_nero_and_piper_parameters():
     config_root = Path(__file__).resolve().parents[1] / "config"
+    nero_start = (
+        Path(__file__).resolve().parents[1] / "scripts" / "start_nero.sh"
+    ).read_text(encoding="utf-8")
     common = (config_root / "common.yaml").read_text(encoding="utf-8")
     nero = (config_root / "nero.yaml").read_text(encoding="utf-8")
     piper = (config_root / "piper_l.yaml").read_text(encoding="utf-8")
@@ -144,6 +168,7 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "firmware_reconnect_delay: 0.5" in common
     assert "firmware:" not in common
     assert "nero_mount: side" in nero
+    assert "nero_mount:=side" not in nero_start
     assert "tool_configuration: none" in nero
     assert "nero_velocity_estimation_enabled: true" in nero
     assert "admittance_mode: zero_force" in nero
@@ -152,6 +177,13 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_holding_stiffness" in nero
     assert "admittance_zero_force_friction" in nero
     assert "admittance_resistive_stiffness" in nero
+    assert "admittance_mit_kp: [0.32, 0.24, 0.32" in nero
+    assert "admittance_mit_torque_limit: [8.0, 8.0, 8.0" in nero
+    assert "admittance_measured_joint_velocity_stop_limit: [1.0" in nero
+    assert "admittance_measured_joint_velocity_hard_limit: [2.0" in nero
+    assert "admittance_measured_velocity_violation_cycles: 3" in nero
+    assert "admittance_velocity_limit: [0.12, 0.12, 0.12, 0.05" in nero
+    assert "admittance_task_weights: [0.4, 0.4, 0.4, 1.0" in nero
     assert "cartesian_impedance_rotation_stiffness: 1.9" in nero
     assert "cartesian_impedance_base_z_rotation_stiffness: 1.9" in nero
     assert "cartesian_impedance_translation_stiffness: 70.0" in nero
@@ -170,12 +202,42 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "admittance_zero_force_holding_stiffness" in piper
     assert "admittance_zero_force_friction" in piper
     assert "admittance_resistive_stiffness" in piper
+    assert "admittance_mit_kp: [0.3, 0.5, 0.5" in piper
+    assert "admittance_mit_torque_limit: [8.0, 8.0, 8.0" in piper
+    assert "admittance_measured_joint_velocity_stop_limit: [1.0" in piper
+    assert "admittance_measured_joint_velocity_hard_limit: [2.0" in piper
+    assert "admittance_measured_velocity_violation_cycles: 3" in piper
     assert "cartesian_impedance_rotation_stiffness: 0.4" in piper
     assert "cartesian_impedance_base_z_rotation_stiffness: 4.0" in piper
     assert "cartesian_impedance_joint_posture_stiffness" not in piper
     assert "cartesian_impedance_joint_posture_damping" not in piper
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in nero
     assert "[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]" in piper
+
+
+def test_input_selector_expands_numeric_event_device():
+    selector = (
+        Path(__file__).resolve().parents[1]
+        / "scripts" / "select_input_device.sh"
+    )
+
+    result = subprocess.run(
+        ["script", "-qfec", str(selector), "/dev/null"],
+        input="2\n3\n",
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    output = result.stdout + result.stderr
+
+    assert "keyboard device does not exist: 3" not in output
+    assert result.returncode == 0 or any(
+        message in output
+        for message in (
+            "keyboard device does not exist: /dev/input/event3",
+            "keyboard device is not readable: /dev/input/event3",
+        )
+    )
 
 
 def test_launch_selects_one_robot_specific_config_filename():
@@ -1089,27 +1151,41 @@ def test_nero_external_torque_callback_maps_seven_joints_to_six_axis_wrench(
     assert controller.latest_external_wrench_received_at == 12.5
 
 
-def test_admittance_tick_sends_screw_ik_result_through_planned_backend(
-    monkeypatch,
-):
-    class FakeAdmittance:
-        def step(self, wrench, period):
-            assert wrench == pytest.approx([0.0] * 5 + [2.0])
-            assert period == pytest.approx(0.01)
+def test_admittance_tick_sends_reanchored_reference_through_mit(monkeypatch):
+    class FakeEngine:
+        def step(self, name, sample):
+            assert name == "cartesian_admittance"
+            assert sample.period == pytest.approx(0.01)
+            assert sample.reference.external_wrench == pytest.approx(
+                [0.0] * 5 + [2.0]
+            )
             pose = np.eye(4)
             pose[2, 3] = 0.01
-            return SimpleNamespace(
-                desired_pose=pose,
-                applied_wrench=np.asarray(wrench),
+            state = SimpleNamespace(
+                applied_wrench=sample.reference.external_wrench,
+                resisting_wrench=np.zeros(6),
                 offset=np.asarray([0.0] * 5 + [0.01]),
             )
+            return ControlResult(
+                "cartesian_admittance",
+                MitCommand(
+                    np.asarray([0.01] * 6),
+                    np.asarray([0.02] * 6),
+                    np.asarray([0.3] * 6),
+                    np.asarray([0.08] * 6),
+                    np.asarray([0.1] * 6),
+                    np.asarray([0.1] * 6),
+                ),
+                {"desired_pose": pose},
+                raw=state,
+            )
 
-    class FakeIkEngine:
-        def solve(self, position, rotation, seed):
-            assert position == pytest.approx([0.0, 0.0, 0.01])
-            assert rotation == pytest.approx(np.eye(3))
-            assert seed == pytest.approx(np.zeros(6))
-            return SimpleNamespace(joints=np.asarray([0.01] * 6))
+    class FakeArm:
+        def __init__(self):
+            self.commands = []
+
+        def move_mit(self, **command):
+            self.commands.append(command)
 
     class FakeLogger:
         def info(self, message, **kwargs):
@@ -1118,19 +1194,19 @@ def test_admittance_tick_sends_screw_ik_result_through_planned_backend(
         def warning(self, message, **kwargs):
             del message, kwargs
 
-    sent = []
     controller = object.__new__(ArmKeyboardController)
+    controller.arm = FakeArm()
     controller.mit_command_rate = 100.0
     controller.last_admittance_tick_time = None
     controller.latest_external_wrench_received_at = 20.0
     controller.admittance_wrench_timeout = 0.1
+    controller.admittance_joint_velocity_limit = [0.5] * 6
     controller.latest_external_wrench = np.asarray([0.0] * 5 + [2.0])
-    controller.admittance_controller = FakeAdmittance()
-    controller.ik_engine = FakeIkEngine()
-    controller.mit_max_joint_step = 0.05
+    controller.admittance_mode = "zero_force"
+    controller.admittance_controller = SimpleNamespace(mode="zero_force")
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 6, 0.1)
     controller.remember_ik_valid = lambda *values: None
-    controller.send_target = lambda reason: sent.append(reason)
+    controller._get_control_engine = lambda name: FakeEngine()
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
@@ -1146,8 +1222,53 @@ def test_admittance_tick_sends_screw_ik_result_through_planned_backend(
 
     controller._admittance_tick(feedback)
 
-    assert controller.jog.target_joints == pytest.approx([0.01] * 6)
-    assert sent == ["Cartesian admittance"]
+    assert len(controller.arm.commands) == 6
+    assert [command["p_des"] for command in controller.arm.commands] == (
+        pytest.approx([0.01] * 6)
+    )
+    assert [command["kp"] for command in controller.arm.commands] == (
+        pytest.approx([0.3] * 6)
+    )
+    assert controller.ik_target_position == pytest.approx([0.0, 0.0, 0.01])
+
+
+def test_admittance_tick_estops_on_measured_joint_overspeed(monkeypatch):
+    class FakeEngine:
+        def step(self, name, sample):
+            del name, sample
+            raise ControlSafetyError(
+                "measured joint velocity exceeded its limit",
+                reason="measured_velocity_limit",
+            )
+
+    class FakeLogger:
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    estops = []
+    controller = object.__new__(ArmKeyboardController)
+    controller.mit_command_rate = 100.0
+    controller.last_admittance_tick_time = None
+    controller.latest_external_wrench_received_at = -math.inf
+    controller.admittance_wrench_timeout = 0.1
+    controller.latest_external_wrench = np.zeros(6)
+    controller.admittance_joint_velocity_limit = [0.5] * 6
+    controller.admittance_measured_joint_velocity_stop_limit = [1.0] * 6
+    controller.admittance_measured_joint_velocity_hard_limit = [2.0] * 6
+    controller.trigger_emergency_stop = lambda: estops.append(True)
+    controller._get_control_engine = lambda name: FakeEngine()
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    feedback = MotorFeedback(
+        position=np.zeros(6),
+        velocity=np.asarray([0.0, 0.0, 1.1, 0.0, 0.0, 0.0]),
+        torque=np.zeros(6),
+    )
+
+    controller._admittance_tick(feedback)
+
+    assert estops == [True]
 
 
 def test_impedance_entry_exits_admittance_first(monkeypatch):
@@ -1170,10 +1291,13 @@ def test_impedance_entry_exits_admittance_first(monkeypatch):
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
     controller.mit_trajectory = FakeTrajectory()
     controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
-    controller._exit_admittance = lambda reason: (
-        events.append(("admittance_exit", reason)),
-        setattr(controller, "admittance_enabled", False),
-    )
+
+    def exit_admittance(reason):
+        events.append(("admittance_exit", reason))
+        controller.admittance_enabled = False
+        return True
+
+    controller._exit_admittance = exit_admittance
     controller.mit_tick = lambda: events.append(("impedance_tick", None))
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
@@ -1196,8 +1320,12 @@ def test_admittance_entry_exits_impedance_first(monkeypatch):
             return pose
 
     class FakeAdmittance:
-        def reset(self, pose):
-            events.append(("admittance_reset", pose.copy()))
+        mode = "zero_force"
+
+    class FakeEngine:
+        def reset(self, name, state):
+            assert name == "cartesian_admittance"
+            events.append(("admittance_reset", state.position.copy()))
 
     class FakeTrajectory:
         def reset(self, joints):
@@ -1222,12 +1350,14 @@ def test_admittance_entry_exits_impedance_first(monkeypatch):
     controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
     controller.ik_valid_history = deque(maxlen=2)
     controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller._get_control_engine = lambda name: FakeEngine()
 
-    def exit_impedance():
-        events.append(("impedance_exit", None))
+    def exit_impedance(reason):
+        events.append(("impedance_exit", reason))
         controller.impedance_enabled = False
+        return True
 
-    controller.toggle_impedance = exit_impedance
+    controller._exit_impedance = exit_impedance
     monkeypatch.setattr(
         ArmKeyboardController, "get_logger", lambda self: FakeLogger()
     )
@@ -1236,8 +1366,131 @@ def test_admittance_entry_exits_impedance_first(monkeypatch):
 
     assert controller.admittance_enabled
     assert not controller.impedance_enabled
-    assert events[0] == ("impedance_exit", None)
+    assert events[0] == ("impedance_exit", "switching to admittance")
     assert events[1][0] == "admittance_reset"
+
+
+def test_cross_interaction_switch_passes_through_normal(monkeypatch):
+    events = []
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del message, kwargs
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = True
+    controller.admittance_enabled = False
+    controller.execute_motion = False
+    controller.impedance_backend = "joint"
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller.send_target = lambda reason: events.append((
+        "normal_hold", reason, controller.impedance_enabled,
+        controller.admittance_enabled,
+    ))
+    controller._publish_control_event = lambda event, **fields: events.append(
+        (event, fields)
+    )
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+
+    assert controller._enter_normal_interaction_mode(
+        "switching to admittance"
+    )
+
+    assert not controller.impedance_enabled
+    assert not controller.admittance_enabled
+    assert events[1] == (
+        "normal_hold",
+        "MIT exit hold (switching to admittance)",
+        False,
+        False,
+    )
+
+
+def test_failed_mit_exit_does_not_claim_normal_mode(monkeypatch):
+    events = []
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del kwargs
+            events.append(("error", message))
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = True
+    controller.admittance_enabled = False
+    controller.execute_motion = True
+    controller.arm = object()
+    controller.position_mode_timeout = 2.0
+    controller.impedance_backend = "joint"
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller.send_target = lambda reason: events.append(("target", reason))
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.keyboard_controller_node."
+        "prepare_planned_joint_mode",
+        lambda arm, timeout: False,
+    )
+
+    assert not controller._enter_normal_interaction_mode(
+        "switching to admittance"
+    )
+
+    assert controller.impedance_enabled
+    assert not controller.admittance_enabled
+    assert not any(event[0] == "target" for event in events)
+
+
+def test_failed_admittance_mit_exit_does_not_claim_normal_mode(monkeypatch):
+    events = []
+
+    class FakeLogger:
+        def info(self, message, **kwargs):
+            del message, kwargs
+
+        def error(self, message, **kwargs):
+            del kwargs
+            events.append(("error", message))
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.impedance_enabled = False
+    controller.admittance_enabled = True
+    controller.execute_motion = True
+    controller.admittance_previous_control_mode = "joint"
+    controller.control_mode = "ik"
+    controller.admittance_mode = "zero_force"
+    controller.admittance_controller = SimpleNamespace(mode="zero_force")
+    controller.arm = object()
+    controller.position_mode_timeout = 2.0
+    controller.jog = ArmJointJogState([(-1.0, 1.0)] * 2, 0.1)
+    controller.current_or_target_joints = lambda: np.asarray([0.1, -0.2])
+    controller.send_target = lambda reason: events.append(("target", reason))
+    monkeypatch.setattr(
+        ArmKeyboardController, "get_logger", lambda self: FakeLogger()
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.keyboard_controller_node."
+        "prepare_planned_joint_mode",
+        lambda arm, timeout: False,
+    )
+
+    assert not controller._enter_normal_interaction_mode(
+        "switching to impedance"
+    )
+
+    assert controller.admittance_enabled
+    assert not controller.impedance_enabled
+    assert not any(event[0] == "target" for event in events)
 
 
 def test_mit_gains_expand_from_scalar_and_validate_joint_count():
@@ -1913,6 +2166,21 @@ def test_startup_reset_clears_latched_emergency_stop(monkeypatch):
 
     assert controller.reset_emergency_stop()
     assert controller.arm.reset_calls == 1
+
+
+def test_explicit_startup_reset_is_sent_even_if_cached_status_is_normal():
+    controller = object.__new__(ArmKeyboardController)
+    controller.reset_emergency_stop_on_start = True
+    controller.arm_reports_emergency_stop = lambda: False
+    reset_calls = []
+    controller.reset_emergency_stop = lambda: reset_calls.append(True) or True
+    controller.get_logger = lambda: SimpleNamespace(
+        info=lambda message: None,
+        error=lambda message: None,
+    )
+
+    assert controller.prepare_startup_safety()
+    assert reset_calls == [True]
 
 
 def test_startup_home_zeros_joints_strictly_in_order(monkeypatch):

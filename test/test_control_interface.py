@@ -5,21 +5,30 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from armbycontroller.admittance.controller import (
+    ADMITTANCE_MIT_TORQUE_LIMIT_MAX,
+)
 from armbycontroller.admittance.controller import CartesianAdmittanceController
 from armbycontroller.control import ControlEngine
+from armbycontroller.control import ControlCycleGuard
 from armbycontroller.control import ControlInput
 from armbycontroller.control import ControlReference
 from armbycontroller.control import ControlSafetyError
 from armbycontroller.control import ControlState
 from armbycontroller.control import MitCommand
-from armbycontroller.control import PositionCommand
+from armbycontroller.control import MitTorqueEnvelope
+from armbycontroller.control import ModelCompensator
+from armbycontroller.control import InteractionModeLifecycle
+from armbycontroller.control import SustainedVelocityGuard
 from armbycontroller.control import control_sample
 from armbycontroller.impedance.controllers import CartesianImpedanceController
 from armbycontroller.impedance.controllers import JointMitController
+from armbycontroller.ik.screw import BoundedScrewVelocityIk
 
 
 class IdentityModel:
     joint_count = 6
+    joint_limits = np.asarray([[-1.0, 1.0]] * 6)
 
     def forward_kinematics(self, joints):
         pose = np.eye(4)
@@ -35,13 +44,177 @@ class IdentityModel:
         return np.arange(1.0, 7.0)
 
 
-def sample(position=None, target=None, wrench=None):
+def test_shared_model_compensator_selects_gravity_bias_and_dynamics():
+    class RecordingModel(IdentityModel):
+        def __init__(self):
+            self.inverse_calls = []
+
+        def gravity_torque(self, position):
+            self.gravity_position = np.asarray(position).copy()
+            return np.ones(6) * 2.0
+
+        def inverse_dynamics(self, position, velocity, acceleration):
+            self.inverse_calls.append((
+                np.asarray(position).copy(),
+                np.asarray(velocity).copy(),
+                np.asarray(acceleration).copy(),
+            ))
+            return np.ones(6) * 4.0
+
+    model = RecordingModel()
+    position = np.linspace(0.0, 0.5, 6)
+    velocity = np.linspace(0.1, 0.6, 6)
+    acceleration = np.linspace(0.2, 0.7, 6)
+
+    gravity = ModelCompensator(
+        model, 6, "gravity", scale=0.5
+    ).evaluate(position)
+    bias = ModelCompensator(model, 6, "bias").evaluate(
+        position, velocity
+    )
+    dynamics = ModelCompensator(
+        model, 6, "inverse_dynamics"
+    ).evaluate(position, velocity, acceleration)
+
+    assert gravity.raw_torque == pytest.approx([2.0] * 6)
+    assert gravity.requested_torque == pytest.approx([1.0] * 6)
+    assert bias.requested_torque == pytest.approx([4.0] * 6)
+    assert model.inverse_calls[0][2] == pytest.approx(np.zeros(6))
+    assert dynamics.requested_torque == pytest.approx([4.0] * 6)
+    assert model.inverse_calls[1][2] == pytest.approx(acceleration)
+
+
+def test_shared_mit_envelope_reports_one_torque_decomposition():
+    envelope = MitTorqueEnvelope(
+        kp=np.zeros(2), kd=np.zeros(2), torque_limit=[4.0, 4.0]
+    )
+
+    result = envelope.command(
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [0.0, 0.0],
+        [5.0, -1.0],
+    )
+    signals = result.signals(
+        model_torque=[2.0, -1.0],
+        task_torque=[2.0, 0.0],
+        auxiliary_torque=[1.0, 0.0],
+    )
+
+    assert result.command.feedforward == pytest.approx([4.0, -1.0])
+    assert signals["torque_saturated"]
+    assert signals["torque_saturation_reason"] == "total_limit"
+    assert signals["torque_total_estimated"] == pytest.approx([4.0, -1.0])
+
+
+def test_bounded_screw_velocity_ik_uses_model_jacobian_and_caps_speed():
+    solver = BoundedScrewVelocityIk(
+        IdentityModel(), velocity_limits=np.ones(6) * 0.5
+    )
+
+    velocity = solver.solve(np.ones(6), np.zeros(6), 0.01)
+
+    assert velocity == pytest.approx([0.5] * 6)
+
+
+def test_bounded_screw_velocity_ik_never_drives_farther_outside_limit():
+    solver = BoundedScrewVelocityIk(
+        IdentityModel(),
+        velocity_limits=np.ones(6) * 0.5,
+        joint_limit_margin=0.03,
+    )
+    position = np.asarray([1.02, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+    blocked_outward = solver.solve(
+        [1.0, 0.0, 0.0, 0.0, 0.0, 0.0], position, 0.01
+    )
+    inward = solver.solve(
+        [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0], position, 0.01
+    )
+
+    assert blocked_outward[0] == pytest.approx(0.0)
+    assert inward[0] == pytest.approx(-0.5)
+
+
+def test_control_cycle_guard_reports_measured_overspeed_reason():
+    guard = ControlCycleGuard(6, velocity_limits=np.ones(6) * 0.5)
+
+    with pytest.raises(ControlSafetyError) as raised:
+        guard.validate(sample(velocity=[0.0, 0.51, 0.0, 0.0, 0.0, 0.0]))
+
+    assert raised.value.reason == "measured_velocity_limit"
+
+
+def test_sustained_velocity_guard_has_tracking_headroom_and_debounce():
+    guard = SustainedVelocityGuard(
+        sustained_limits=np.ones(2),
+        hard_limits=np.ones(2) * 2.0,
+        violation_cycles=3,
+    )
+
+    guard.validate([0.634, 0.0])
+    guard.validate([1.1, 0.0])
+    guard.validate([1.1, 0.0])
+    with pytest.raises(ControlSafetyError) as raised:
+        guard.validate([1.1, 0.0])
+
+    assert raised.value.reason == "measured_velocity_limit"
+
+
+def test_sustained_velocity_guard_hard_limit_stops_immediately():
+    guard = SustainedVelocityGuard(
+        sustained_limits=np.ones(2),
+        hard_limits=np.ones(2) * 2.0,
+        violation_cycles=3,
+    )
+
+    with pytest.raises(ControlSafetyError) as raised:
+        guard.validate([0.0, 2.01])
+
+    assert raised.value.reason == "measured_velocity_hard_limit"
+
+
+def test_control_cycle_guard_allows_only_bounded_position_recovery_band():
+    guard = ControlCycleGuard(
+        6,
+        joint_limits=np.asarray([[-1.0, 1.0]] * 6),
+        position_tolerance=0.03,
+    )
+
+    guard.validate(sample(position=[1.02, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    with pytest.raises(ControlSafetyError) as raised:
+        guard.validate(sample(
+            position=[1.031, 0.0, 0.0, 0.0, 0.0, 0.0]
+        ))
+
+    assert raised.value.reason == "measured_position_limit"
+
+
+def test_interaction_lifecycle_requires_normal_cross_transition():
+    lifecycle = InteractionModeLifecycle("impedance")
+
+    transition = lifecycle.plan("admittance")
+
+    assert transition.path == ("normal", "admittance")
+    with pytest.raises(RuntimeError, match="through normal"):
+        lifecycle.commit("admittance")
+    lifecycle.commit("normal")
+    lifecycle.commit("admittance")
+    assert lifecycle.active == "admittance"
+
+
+def sample(position=None, target=None, wrench=None, velocity=None):
     position = np.zeros(6) if position is None else np.asarray(position)
     target = np.zeros(6) if target is None else np.asarray(target)
     return ControlInput(
         12.5,
         0.01,
-        ControlState(position, np.zeros(6), np.zeros(6)),
+        ControlState(
+            position,
+            np.zeros(6) if velocity is None else velocity,
+            np.zeros(6),
+        ),
         ControlReference(
             target, np.zeros(6), np.zeros(6),
             np.zeros(6) if wrench is None else wrench,
@@ -199,41 +372,50 @@ def test_cartesian_adapter_reuses_unchanged_reference_kinematics():
     assert model.jacobian_calls == 5
 
 
-def test_admittance_adapter_produces_checked_position_command():
+def test_admittance_adapter_produces_reanchored_mit_command():
     class FakeAdmittance:
         def reset(self, pose):
             self.pose = pose
 
         def step(self, wrench, period):
             pose = np.eye(4)
-            pose[0, 3] = float(wrench[3]) * period
             return SimpleNamespace(
                 mode="zero_force",
-                offset=np.asarray([0, 0, 0, pose[0, 3], 0, 0]),
-                velocity=np.zeros(6),
+                offset=np.zeros(6),
+                velocity=np.asarray([0.2, 0, 0, 0, 0, 0]),
                 acceleration=np.zeros(6),
                 applied_wrench=np.asarray(wrench),
                 resisting_wrench=np.asarray(wrench) * 0.25,
                 desired_pose=pose,
-                desired_twist=np.zeros(6),
+                desired_twist=np.asarray([0.2, 0, 0, 0, 0, 0]),
             )
 
-    class FakeIk:
-        def solve(self, position, rotation, seed):
-            del rotation
-            joints = np.asarray(seed).copy()
-            joints[0] += position[0]
-            return SimpleNamespace(joints=joints)
-
+    model = IdentityModel()
     controller = CartesianAdmittanceController(
-        IdentityModel(), FakeAdmittance(), FakeIk(), max_joint_step=0.05
+        model,
+        FakeAdmittance(),
+        BoundedScrewVelocityIk(
+            model,
+            velocity_limits=np.ones(6) * 0.5,
+            damping=0.02,
+        ),
+        kp=np.ones(6) * 0.3,
+        kd=np.ones(6) * 0.08,
+        torque_limit=np.ones(6) * 8.0,
+        model_scale=0.0,
     )
-    initial = sample().state
+    initial = sample(position=[0.4, 0, 0, 0, 0, 0]).state
     controller.reset(initial)
-    result = controller.step(sample(wrench=[0, 0, 0, 2, 0, 0]))
+    result = controller.step(sample(
+        position=[0.4, 0, 0, 0, 0, 0],
+        wrench=[0, 0, 0, 2, 0, 0],
+    ))
 
-    assert isinstance(result.command, PositionCommand)
-    assert result.command.position[0] == pytest.approx(0.02)
+    assert isinstance(result.command, MitCommand)
+    assert result.command.position[0] == pytest.approx(0.402, abs=1e-6)
+    assert result.command.velocity[0] == pytest.approx(0.2, abs=1e-4)
+    assert result.command.kp == pytest.approx([0.3] * 6)
+    assert result.command.kd == pytest.approx([0.08] * 6)
     assert result.signals["applied_wrench"] == pytest.approx(
         [0, 0, 0, 2, 0, 0]
     )
@@ -242,23 +424,141 @@ def test_admittance_adapter_produces_checked_position_command():
         [0, 0, 0, 0.5, 0, 0]
     )
 
+    moved = controller.step(sample(
+        position=[0.6, 0, 0, 0, 0, 0],
+        wrench=[0, 0, 0, 2, 0, 0],
+    ))
+    assert moved.command.position[0] == pytest.approx(0.602, abs=1e-6)
 
-def test_admittance_adapter_rejects_large_ik_step():
+
+def test_admittance_velocity_ik_enforces_predictive_joint_limit():
     class FakeAdmittance:
+        def reset(self, pose):
+            del pose
+
         def step(self, wrench, period):
             del wrench, period
-            return SimpleNamespace(desired_pose=np.eye(4))
+            return SimpleNamespace(
+                mode="zero_force",
+                offset=np.zeros(6),
+                velocity=np.ones(6),
+                acceleration=np.zeros(6),
+                applied_wrench=np.zeros(6),
+                resisting_wrench=np.zeros(6),
+                desired_pose=np.eye(4),
+                desired_twist=np.ones(6),
+            )
 
-    class FakeIk:
-        def solve(self, position, rotation, seed):
-            del position, rotation, seed
-            return SimpleNamespace(joints=np.ones(6))
-
+    model = IdentityModel()
     controller = CartesianAdmittanceController(
-        IdentityModel(), FakeAdmittance(), FakeIk(), max_joint_step=0.05
+        model,
+        FakeAdmittance(),
+        BoundedScrewVelocityIk(
+            model,
+            velocity_limits=np.ones(6) * 0.5,
+            damping=0.02,
+            joint_limit_margin=0.0,
+        ),
+        kp=np.ones(6) * 0.3,
+        kd=np.ones(6) * 0.08,
+        torque_limit=np.ones(6) * 8.0,
+        model_scale=0.0,
     )
-    with pytest.raises(ControlSafetyError, match="joint step"):
-        controller.step(sample())
+    position = np.ones(6) * 0.999
+    controller.reset(sample(position=position).state)
+
+    result = controller.step(sample(position=position))
+
+    assert result.command.velocity == pytest.approx([0.1] * 6, abs=1e-6)
+    assert result.command.position == pytest.approx(np.ones(6), abs=1e-9)
+
+
+def test_admittance_rejects_mit_feedback_that_cannot_be_torque_limited():
+    class FakeAdmittance:
+        def reset(self, pose):
+            del pose
+
+        def step(self, wrench, period):
+            del wrench, period
+            return SimpleNamespace(
+                mode="zero_force",
+                offset=np.zeros(6),
+                velocity=np.zeros(6),
+                acceleration=np.zeros(6),
+                applied_wrench=np.zeros(6),
+                resisting_wrench=np.zeros(6),
+                desired_pose=np.eye(4),
+                desired_twist=np.zeros(6),
+            )
+
+    model = IdentityModel()
+    controller = CartesianAdmittanceController(
+        model,
+        FakeAdmittance(),
+        BoundedScrewVelocityIk(
+            model,
+            velocity_limits=np.ones(6) * 0.5,
+        ),
+        kp=np.zeros(6),
+        kd=np.ones(6),
+        torque_limit=np.ones(6) * 0.1,
+        model_scale=0.0,
+    )
+
+    with pytest.raises(ControlSafetyError, match="feedback alone"):
+        controller.step(sample(velocity=np.ones(6) * 0.3))
+
+
+def test_admittance_debounces_measured_joint_tracking_overspeed():
+    class FakeAdmittance:
+        def reset(self, pose):
+            del pose
+
+        def step(self, wrench, period):
+            del wrench, period
+            return SimpleNamespace(
+                desired_twist=np.zeros(6),
+                desired_pose=np.eye(4),
+            )
+
+    model = IdentityModel()
+    controller = CartesianAdmittanceController(
+        model,
+        FakeAdmittance(),
+        BoundedScrewVelocityIk(
+            model,
+            velocity_limits=np.ones(6) * 0.5,
+        ),
+        kp=np.zeros(6),
+        kd=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        model_scale=0.0,
+    )
+
+    controller.step(sample(velocity=[0.634, 0, 0, 0, 0, 0]))
+    controller.step(sample(velocity=[1.1, 0, 0, 0, 0, 0]))
+    controller.step(sample(velocity=[1.1, 0, 0, 0, 0, 0]))
+    with pytest.raises(ControlSafetyError) as raised:
+        controller.step(sample(velocity=[1.1, 0, 0, 0, 0, 0]))
+
+    assert raised.value.reason == "measured_velocity_limit"
+
+
+def test_admittance_rejects_torque_limit_above_eight_newton_metres():
+    with pytest.raises(ValueError, match=r"\(0, 8\]"):
+        CartesianAdmittanceController(
+            IdentityModel(),
+            SimpleNamespace(),
+            BoundedScrewVelocityIk(
+                IdentityModel(),
+                velocity_limits=np.ones(6) * 0.5,
+            ),
+            kp=np.zeros(6),
+            kd=np.zeros(6),
+            torque_limit=np.ones(6) * (
+                ADMITTANCE_MIT_TORQUE_LIMIT_MAX + 0.01
+            ),
+        )
 
 
 def test_control_sample_is_stable_json_compatible_schema():

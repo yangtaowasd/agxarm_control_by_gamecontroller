@@ -2,9 +2,21 @@
 
 set -euo pipefail
 
+normalize_keyboard_device_path() {
+  local device_path="$1"
+
+  if [[ "${device_path}" =~ ^[0-9]+$ ]]; then
+    printf '/dev/input/event%s\n' "${device_path}"
+  elif [[ "${device_path}" =~ ^event[0-9]+$ ]]; then
+    printf '/dev/input/%s\n' "${device_path}"
+  else
+    printf '%s\n' "${device_path}"
+  fi
+}
+
 for argument in "$@"; do
   if [[ "${argument}" == device:=* ]]; then
-    printf '%s\n' "${argument#device:=}"
+    normalize_keyboard_device_path "${argument#device:=}"
     exit 0
   fi
 done
@@ -33,9 +45,11 @@ case "${input_choice:-1}" in
         fi
       done
     fi
-    printf '%s' "Keyboard device [/dev/input/event3]: " >&2
+    printf '%s' "Keyboard device number or path [3]: " >&2
     read -r device_path
-    device_path="${device_path:-/dev/input/event3}"
+    device_path="$(
+      normalize_keyboard_device_path "${device_path:-3}"
+    )"
     if [[ ! -e "${device_path}" ]]; then
       printf 'Error: keyboard device does not exist: %s\n' \
         "${device_path}" >&2

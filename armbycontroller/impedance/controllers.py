@@ -4,8 +4,9 @@ import numpy as np
 
 from armbycontroller.cartesian import geometric_jacobian
 from armbycontroller.control.core import ControlResult
-from armbycontroller.control.core import ControlSafetyError
-from armbycontroller.control.core import MitCommand
+from armbycontroller.control.mit import MitTorqueEnvelope
+from armbycontroller.control.model_compensation import ModelCompensator
+from armbycontroller.control.safety import ControlCycleGuard
 from armbycontroller.impedance.cartesian import cartesian_impedance_command
 
 
@@ -19,64 +20,6 @@ def _joint_vector(values, joint_count, name, *, positive=False):
         qualifier = " positive" if positive else ""
         raise ValueError(f"{name} must be a finite{qualifier} joint vector")
     return result.copy()
-
-
-def bounded_model_feedforward(model_torque, scale, torque_limit):
-    """Scale and bound model torque independently for every joint."""
-    model_torque = np.asarray(model_torque, dtype=float)
-    torque_limit = np.asarray(torque_limit, dtype=float)
-    scale = float(scale)
-    if (
-        model_torque.shape != torque_limit.shape
-        or model_torque.ndim != 1
-        or not np.all(np.isfinite(model_torque))
-        or not np.all(np.isfinite(torque_limit))
-        or np.any(torque_limit <= 0.0)
-        or not np.isfinite(scale)
-    ):
-        raise ValueError("model feedforward inputs are invalid")
-    return np.clip(scale * model_torque, -torque_limit, torque_limit)
-
-
-def limit_mit_combined_torque(
-    feedforward,
-    reference_position,
-    reference_velocity,
-    measured_position,
-    measured_velocity,
-    kp,
-    kd,
-    torque_limit,
-):
-    """Adjust MIT feedforward so the estimated total respects a limit."""
-    arrays = [
-        np.asarray(values, dtype=float)
-        for values in (
-            feedforward,
-            reference_position,
-            reference_velocity,
-            measured_position,
-            measured_velocity,
-            kp,
-            kd,
-            torque_limit,
-        )
-    ]
-    if (
-        len({value.shape for value in arrays}) != 1
-        or arrays[0].ndim != 1
-        or not all(np.all(np.isfinite(value)) for value in arrays)
-        or np.any(arrays[-1] <= 0.0)
-    ):
-        raise ValueError(
-            "MIT torque limiter inputs must be finite equal arrays"
-        )
-    feed, q_ref, dq_ref, q, dq, kp_value, kd_value, limit = arrays
-    feedback = kp_value * (q_ref - q) + kd_value * (dq_ref - dq)
-    desired_total = feedback + feed
-    bounded_total = np.clip(desired_total, -limit, limit)
-    bounded_feedforward = np.clip(bounded_total - feedback, -limit, limit)
-    return bounded_feedforward, feedback + bounded_feedforward
 
 
 class JointMitController:
@@ -107,65 +50,75 @@ class JointMitController:
             raise ValueError("MIT gains must be nonnegative")
         self.dynamics_model = dynamics_model
         self.model_scale = float(model_scale)
+        self.model_compensator = (
+            None
+            if dynamics_model is None
+            else ModelCompensator(
+                dynamics_model,
+                self.joint_count,
+                "inverse_dynamics",
+                self.model_scale,
+            )
+        )
+        self.mit_envelope = MitTorqueEnvelope(
+            self.kp, self.kd, self.torque_limit
+        )
+        self.cycle_guard = ControlCycleGuard(
+            self.joint_count,
+            require_position=False,
+            require_velocity=False,
+            joint_limits=getattr(dynamics_model, "joint_limits", None),
+        )
 
     def reset(self, state):
         if state.joint_count != self.joint_count:
             raise ValueError("joint controller reset size mismatch")
 
     def step(self, sample):
-        if sample.state.joint_count != self.joint_count:
-            raise ValueError("joint controller input size mismatch")
+        self.cycle_guard.validate(sample)
         reference = sample.reference
         state = sample.state
         model_torque = self.feedforward.copy()
         model_active = False
+        compensation = None
         if self.dynamics_model is not None and state.position_valid:
-            if hasattr(self.dynamics_model, "inverse_dynamics"):
-                raw_model = self.dynamics_model.inverse_dynamics(
-                    state.position,
-                    reference.velocity,
-                    reference.acceleration,
-                )
-            else:
-                raw_model = self.dynamics_model.compensation(state.position)
-            model_torque = bounded_model_feedforward(
-                raw_model, self.model_scale, self.torque_limit
-            )
-            model_active = True
-        estimated = (
-            self.kp * (reference.position - state.position)
-            + self.kd * (reference.velocity - state.velocity)
-            + model_torque
-        )
-        combined_limit_active = state.position_valid
-        if combined_limit_active:
-            model_torque, estimated = limit_mit_combined_torque(
-                model_torque,
-                reference.position,
-                reference.velocity,
+            compensation = self.model_compensator.evaluate(
                 state.position,
-                state.velocity,
-                self.kp,
-                self.kd,
-                self.torque_limit,
+                reference.velocity,
+                reference.acceleration,
             )
-        command = MitCommand(
+            model_torque = compensation.requested_torque
+            model_active = True
+        combined_limit_active = state.position_valid
+        torque = self.mit_envelope.command(
             reference.position,
             reference.velocity,
-            self.kp,
-            self.kd,
+            state.position,
+            state.velocity,
             model_torque,
-            estimated,
+            reject_infeasible=combined_limit_active,
         )
+        signals = {
+            "model_torque": model_torque,
+            "model_active": model_active,
+            "combined_limit_active": combined_limit_active,
+            "torque_limit": self.torque_limit,
+        }
+        if compensation is not None:
+            signals.update(compensation.signals())
+        signals.update(torque.signals(
+            model_torque=(
+                model_torque if model_active else np.zeros(self.joint_count)
+            ),
+            auxiliary_torque=(
+                np.zeros(self.joint_count)
+                if model_active else model_torque
+            ),
+        ))
         return ControlResult(
             self.name,
-            command,
-            {
-                "model_torque": model_torque,
-                "model_active": model_active,
-                "combined_limit_active": combined_limit_active,
-                "torque_limit": self.torque_limit,
-            },
+            torque.command,
+            signals,
         )
 
 
@@ -204,6 +157,21 @@ class CartesianImpedanceController:
         )
         if np.any(self.model_scale < 0.0) or np.any(self.model_scale > 1.0):
             raise ValueError("model_scale values must be in [0, 1]")
+        self.model_compensator = ModelCompensator(
+            self.model,
+            self.joint_count,
+            "bias",
+            self.model_scale,
+        )
+        self.mit_envelope = MitTorqueEnvelope(
+            np.zeros(self.joint_count),
+            np.zeros(self.joint_count),
+            self.torque_limit,
+        )
+        self.cycle_guard = ControlCycleGuard(
+            self.joint_count,
+            joint_limits=getattr(self.model, "joint_limits", None),
+        )
         self.nullspace_stiffness = _joint_vector(
             np.zeros(self.joint_count)
             if nullspace_stiffness is None else nullspace_stiffness,
@@ -251,10 +219,7 @@ class CartesianImpedanceController:
     def step(self, sample):
         state = sample.state
         reference = sample.reference
-        if not state.position_valid or not state.velocity_valid:
-            raise ControlSafetyError(
-                "Cartesian impedance requires complete q/dq feedback"
-            )
+        self.cycle_guard.validate(sample)
         reference_position = np.asarray(reference.position, dtype=float)
         if (
             self._reference_position is None
@@ -280,6 +245,9 @@ class CartesianImpedanceController:
                 "nullspace_stiffness": self.nullspace_stiffness,
                 "nullspace_damping": self.nullspace_damping,
             }
+        compensation = self.model_compensator.evaluate(
+            state.position, state.velocity
+        )
         raw = cartesian_impedance_command(
             self.model,
             self.model,
@@ -289,7 +257,7 @@ class CartesianImpedanceController:
             desired_twist,
             self.stiffness,
             self.damping,
-            model_scale=self.model_scale,
+            model_torque_override=compensation.requested_torque,
             **nullspace,
         )
         joint_posture_torque = (
@@ -299,33 +267,37 @@ class CartesianImpedanceController:
             * (reference.velocity - state.velocity)
         )
         raw_command_torque = raw.command_torque + joint_posture_torque
-        torque = np.clip(
-            raw_command_torque, -self.torque_limit, self.torque_limit
-        )
         zeros = np.zeros(self.joint_count)
-        command = MitCommand(
+        torque = self.mit_envelope.command(
             state.position,
             zeros,
-            zeros,
-            zeros,
-            torque,
-            torque,
+            state.position,
+            state.velocity,
+            raw_command_torque,
         )
+        signals = {
+            "pose_error": raw.pose_error,
+            "desired_twist": raw.desired_twist,
+            "measured_twist": raw.measured_twist,
+            "commanded_wrench": raw.commanded_wrench,
+            "task_torque": raw.task_torque,
+            "nullspace_torque": raw.nullspace_torque,
+            "joint_posture_torque": joint_posture_torque,
+            "raw_command_torque": raw_command_torque,
+            "torque_limit": self.torque_limit,
+            "torque_clipped": torque.saturated,
+        }
+        signals.update(compensation.signals())
+        signals.update(torque.signals(
+            model_torque=raw.model_torque,
+            task_torque=raw.task_torque,
+            auxiliary_torque=(
+                raw.nullspace_torque + joint_posture_torque
+            ),
+        ))
         return ControlResult(
             self.name,
-            command,
-            {
-                "pose_error": raw.pose_error,
-                "desired_twist": raw.desired_twist,
-                "measured_twist": raw.measured_twist,
-                "commanded_wrench": raw.commanded_wrench,
-                "task_torque": raw.task_torque,
-                "nullspace_torque": raw.nullspace_torque,
-                "joint_posture_torque": joint_posture_torque,
-                "model_torque": raw.model_torque,
-                "raw_command_torque": raw_command_torque,
-                "torque_limit": self.torque_limit,
-                "torque_clipped": bool(np.any(raw_command_torque != torque)),
-            },
+            torque.command,
+            signals,
             raw=raw,
         )

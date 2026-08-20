@@ -32,6 +32,42 @@ validation, and `tau=Jg.T F` virtual-work mapping shared by impedance and
 admittance; it contains no K/D/M from either control law.
 _Avoid_: impedance geometry, admittance Jacobian helper
 
+**受限旋量速度 IK / Bounded Screw Velocity IK**:
+从共享 PoE 模型取得空间 Jacobian，转换为工具原点几何 Jacobian，并用带关节速度、
+预测位置和任务权重约束的 DLS 将导纳 twist 映射为关节速度参考。 / Uses the
+shared PoE model's space Jacobian, converts it to the tool-origin geometric
+Jacobian, and maps admittance twist to joint velocity through DLS with joint
+speed, predictive-position, and task-weight constraints.
+_Avoid_: ordinary DLS, admittance-local IK
+
+**模型补偿 / Model Compensation**:
+控制律之外的共享 URDF 力矩请求；按 controller adapter 选择重力 `g(q)`、偏置
+`C(q,qdot)qdot+g(q)` 或完整逆动力学，并统一应用模型比例。 / Shared URDF
+torque requested outside a control law; each controller adapter selects
+gravity, bias, or full inverse dynamics and uses one model-scaling rule.
+_Avoid_: gravity hidden in impedance, admittance feedforward helper
+
+**MIT 安全包络 / MIT Safety Envelope**:
+统一组合 MIT 的 PD 反馈估计和显式前馈，实施逐关节绝对总力矩上限，并报告请求、
+实际下发、饱和与不可满足原因。 / Combines estimated MIT PD feedback and
+explicit feedforward under one per-joint absolute total-torque limit, reporting
+requested, sent, saturated, and infeasible values.
+_Avoid_: controller-specific torque clipping
+
+**控制周期 guard / Control Cycle Guard**:
+在 controller adapter seam 校验反馈完整性、关节数、实测位置、实测速度和周期边界，
+并用稳定原因标识拒绝不安全周期。 / Validates feedback completeness, joint
+count, measured position, measured velocity, and period limits at the
+controller-adapter seam, rejecting unsafe cycles with stable reason codes.
+_Avoid_: tick-local safety check
+
+**交互模式生命周期 / Interaction Mode Lifecycle**:
+拥有 `normal`、`impedance`、`admittance` 的互斥不变量和合法迁移路径；阻抗与导纳
+跨模式必须提交 `normal` 后才能进入目标模式。 / Owns the mutual-exclusion
+invariant and legal transitions among normal, impedance, and admittance;
+cross-mode changes must commit normal before the target mode.
+_Avoid_: two independent enable booleans, direct impedance-admittance switch
+
 **柔顺零力 / Soft Zero Force**:
 Nero 优先的导纳手感；目标外力接近零，但用弱保持、速度阻尼和有限粘/滑阻力抑制
 观测偏置、摩擦和积分漂移。 / The Nero-first admittance feel: desired wrench

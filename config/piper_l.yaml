@@ -36,6 +36,18 @@ arm_keyboard_controller:
     admittance_wrench_filter_hz: 5.0
     admittance_wrench_dls_damping: 0.05
     admittance_wrench_timeout: 0.10  # s
+    admittance_mit_kp: [0.3, 0.5, 0.5, 0.5, 1.0, 0.3]
+    admittance_mit_kd: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
+    admittance_mit_torque_limit: [8.0, 8.0, 8.0, 8.0, 8.0, 8.0]
+    admittance_mit_model_scale: 1.0
+    admittance_joint_velocity_limit: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    # Keep reference limiting separate from measured tracking/runaway safety.
+    admittance_measured_joint_velocity_stop_limit: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    admittance_measured_joint_velocity_hard_limit: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    admittance_measured_velocity_violation_cycles: 3
+    admittance_task_weights: [0.4, 0.4, 0.4, 1.0, 1.0, 1.0]
+    admittance_velocity_dls_damping: 0.02
+    admittance_joint_limit_margin: 0.03
 
     mit_trajectory_max_velocity: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]

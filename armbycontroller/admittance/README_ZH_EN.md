@@ -23,9 +23,39 @@ pose construction.
 - `core.py`：两种导纳共用的输入整形、积分器、状态、SE(3) 目标和运动边界。 /
   Input conditioning, integration, state, SE(3) targets, and motion bounds
   shared only by the two admittance modes.
-- `controller.py`：将导纳目标经旋量 IK 变成 planned-position `ControlResult`。 /
-  Converts the admittance target through screw IK into a planned-position
-  `ControlResult`.
+- `controller.py`：把导纳速度交给 `ik/screw.py` 的受限旋量 Jacobian 速度 IK，
+  后者从同一 PoE 模型取得空间 Jacobian、转换为工具几何 Jacobian并执行加权
+  DLS；controller 以
+  `q_ref=q_measured+dq_ref*dt` 每周期重新锚定，并生成低增益 MIT
+  `ControlResult`。重力由共享 Model Compensation 生成，命令由共享 MIT Safety
+  Envelope 检查估算总力矩。 / Sends the admittance twist to the bounded
+  screw-Jacobian velocity IK in `ik/screw.py`; that solver obtains the space
+  Jacobian from the same PoE model, converts it to the tool geometric Jacobian,
+  and applies weighted DLS. The controller reanchors every cycle with
+  `q_ref=q_measured+dq_ref*dt`, and produces a low-gain MIT `ControlResult`;
+  shared Model Compensation supplies gravity and the shared MIT Safety
+  Envelope protects estimated total torque.
+
+关节参考速度和实测失控保护使用不同阈值：旋量速度 IK 用
+`admittance_joint_velocity_limit=0.5 rad/s` 饱和参考速度；实测速度超过
+`admittance_measured_joint_velocity_stop_limit=1.0 rad/s` 连续三个控制周期，或
+单周期超过 `admittance_measured_joint_velocity_hard_limit=2.0 rad/s`，ROS 硬件
+adapter 才触发电子急停。导纳 MIT 估算总力矩不得超过 `8 N·m`。 /
+Reference speed and measured-runaway protection use separate thresholds. Screw
+velocity IK saturates the reference at
+`admittance_joint_velocity_limit=0.5 rad/s`; the ROS hardware adapter triggers
+the electronic stop when measured speed exceeds
+`admittance_measured_joint_velocity_stop_limit=1.0 rad/s` for three consecutive
+control cycles, or exceeds the immediate
+`admittance_measured_joint_velocity_hard_limit=2.0 rad/s`. Estimated total
+admittance MIT torque may not exceed `8 N·m`.
+
+三个 MIT controller 使用同一组诊断字段，包括 `torque_feedback`、
+`torque_model_requested`、`torque_task_requested`、
+`torque_feedforward_requested/sent`、`torque_total_requested/estimated` 和
+`torque_saturation_reason`。 / All three MIT controllers use the same torque
+diagnostics, including feedback, requested model/task/feedforward, sent
+feedforward, requested/estimated total torque, and saturation reason.
 
 阻抗和导纳真正共用的坐标、tool-origin Jacobian、SE(3) 校验及虚功映射位于
 `armbycontroller/cartesian/`，不在本目录复制。 / Coordinate conventions,

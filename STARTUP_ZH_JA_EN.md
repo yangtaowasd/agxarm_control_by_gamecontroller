@@ -5,14 +5,16 @@
 进入项目目录：
 
 ```bash
-cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
+cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 ```
 
 启动 Nero：
 
 ```bash
-./scripts/start_nero.sh
+./scripts/start_nero.sh nero_mount:=horizontal
 ```
+
+该指令只在本次启动把 Nero 重力方向设为平置；YAML 默认仍保持 `side`。
 
 启动 Piper-L：
 
@@ -26,6 +28,9 @@ cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
 1：X11（NoMachine 或桌面键盘）
 2：本地键盘（/dev/input/eventN）
 ```
+
+选择 `2` 后，设备提示可输入编号（如 `3`）、事件名（如 `event3`）或完整路径
+（如 `/dev/input/event3`）。
 
 直接按回车默认选择 X11。脚本会自动配置 `can0`、检测固件、解除电子急停并使能
 机械臂。启动前请释放物理急停，并确保机械臂周围没有人员或障碍物。
@@ -51,9 +56,14 @@ cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
 
 - 阻抗控制（`I`）：机械臂像“弹簧＋阻尼器”。受到外力时可以偏移，松手后向
   开启时记住的姿态恢复。刚度越大越难推动，阻尼越大越平稳。
-- 导纳控制（`O`）：机械臂根据估算到的外力主动生成运动目标，适合拖动和柔顺
-  操作。虚拟质量越大反应越慢，阻尼越大越不容易晃动。
-- `I` 和 `O` 不能同时开启；进入一个模式会退出另一个模式。
+- 导纳控制（`O`）：估算外力先生成末端速度，经 PoE 旋量 Jacobian 和工具几何
+  Jacobian 的受限加权 DLS 转成关节速度，再由
+  低增益 MIT 跟踪。每周期从实测关节位置重新锚定；参考关节速度上限为
+  `0.5 rad/s`，共享重力补偿已开启，估算总力矩上限为 `8 N·m`。实测关节速度
+  超过 `1.0 rad/s` 连续三个控制周期，或单周期超过 `2.0 rad/s`，触发电子急停。
+- `I` 和 `O` 不能同时开启。阻抗与导纳之间切换时，控制器严格执行
+  `当前模式 -> 普通 planned-position 模式 -> 目标模式`；如果回到普通模式失败，
+  则拒绝进入目标模式。再次按下当前模式的按键会回到普通模式。
 
 按 `Ctrl-C` 停止程序。
 
@@ -64,14 +74,17 @@ cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
 プロジェクトディレクトリへ移動します。
 
 ```bash
-cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
+cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 ```
 
 Nero を起動します。
 
 ```bash
-./scripts/start_nero.sh
+./scripts/start_nero.sh nero_mount:=horizontal
 ```
+
+この引数は今回の起動だけ Nero の重力方向を水平設置へ変更します。YAML の
+既定値は `side` のままです。
 
 Piper-L を起動します。
 
@@ -85,6 +98,9 @@ Piper-L を起動します。
 1：X11（NoMachine またはデスクトップキーボード）
 2：ローカルキーボード（/dev/input/eventN）
 ```
+
+`2` を選択した後、デバイス番号（例：`3`）、イベント名（例：`event3`）、
+または完全なパス（例：`/dev/input/event3`）を入力できます。
 
 何も入力せず Enter を押すと X11 が選択されます。スクリプトは `can0` の設定、
 ファームウェア検出、電子非常停止の解除、アームの有効化を自動で行います。
@@ -113,10 +129,16 @@ Piper-L を起動します。
 - インピーダンス制御（`I`）：アームを「ばね＋ダンパ」のように動かします。
   外力で変位し、手を離すと開始時に記憶した姿勢へ戻ります。剛性が高いほど
   動かしにくく、減衰が高いほど動きが安定します。
-- アドミッタンス制御（`O`）：推定外力から新しい移動目標を生成します。手で
-  押して動かす操作や柔軟な動作に適しています。仮想質量が大きいほど反応が
-  遅く、減衰が大きいほど振動しにくくなります。
-- `I` と `O` は同時に有効化できません。一方へ入ると他方は終了します。
+- アドミッタンス制御（`O`）：推定外力から手先速度を生成し、PoE スクリュー
+  Jacobian から工具幾何 Jacobian を構成した制限付き重み付き DLS で
+  関節速度へ変換して低ゲイン MIT で追従します。各周期で実測関節位置へ
+  再アンカーします。関節参照速度上限は `0.5 rad/s`、推定総トルク上限は
+  `8 N·m` です。共有重力補償を使用し、実測関節速度が `1.0 rad/s` を3制御周期
+  連続で超えるか、1周期でも `2.0 rad/s` を超えると電子非常停止します。
+- `I` と `O` は同時に有効化できません。インピーダンスとアドミッタンスを
+  切り替えるときは、必ず `現在のモード -> 通常 planned-position モード ->
+  目的のモード` の順で遷移します。通常モードへの復帰に失敗した場合、目的の
+  モードには入りません。現在のモードのキーをもう一度押すと通常モードへ戻ります。
 
 `Ctrl-C` でプログラムを停止します。
 
@@ -127,14 +149,17 @@ Piper-L を起動します。
 Open the project directory:
 
 ```bash
-cd /home/techshare/demo_ws/src/agxarm_control_by_gamecontroller
+cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 ```
 
 Start Nero:
 
 ```bash
-./scripts/start_nero.sh
+./scripts/start_nero.sh nero_mount:=horizontal
 ```
+
+This overrides Nero's gravity direction for this launch only; the YAML default
+remains `side`.
 
 Start Piper-L:
 
@@ -148,6 +173,9 @@ Select the keyboard input during startup:
 1: X11 (NoMachine or desktop keyboard)
 2: Local keyboard (/dev/input/eventN)
 ```
+
+After selecting `2`, enter an event number such as `3`, an event name such as
+`event3`, or a full path such as `/dev/input/event3`.
 
 Press Enter to select X11 by default. The script automatically configures
 `can0`, detects the firmware, resets the electronic emergency stop, and enables
@@ -177,9 +205,17 @@ there are no people or obstacles around the arm.
   external force can displace it, and it returns toward the pose captured when
   the mode was enabled. Higher stiffness makes it harder to push; higher
   damping makes the response steadier.
-- Admittance control (`O`) generates a motion target from the estimated external
-  force. It is suitable for hand-guiding and compliant motion. Higher virtual
-  mass slows the response; higher damping reduces oscillation.
-- `I` and `O` cannot be enabled together. Entering one mode exits the other.
+- Admittance control (`O`) turns estimated force into tool velocity, obtains a
+  tool geometric Jacobian from the PoE screw Jacobian, maps it to bounded joint
+  velocity with weighted DLS, and tracks it with low-gain MIT. Shared gravity
+  compensation is enabled. The joint
+  reference is reanchored to measured position every cycle. Reference joint
+  speed is capped at `0.5 rad/s` and estimated total torque at `8 N·m`.
+  Measured joint speed above `1.0 rad/s` for three consecutive control cycles,
+  or above `2.0 rad/s` once, triggers the electronic stop.
+- `I` and `O` cannot be enabled together. Switching between impedance and
+  admittance strictly follows `current mode -> normal planned-position mode ->
+  target mode`; failure to restore normal mode rejects the target transition.
+  Press the active mode key again to return to normal mode.
 
 Press `Ctrl-C` to stop the program.

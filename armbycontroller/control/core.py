@@ -200,6 +200,10 @@ class ControlResult:
 class ControlSafetyError(RuntimeError):
     """A controller rejected an unsafe or incomplete cycle."""
 
+    def __init__(self, message, *, reason="unsafe_control_cycle"):
+        super().__init__(message)
+        self.reason = str(reason)
+
 
 @runtime_checkable
 class ControllerAdapter(Protocol):

@@ -14,6 +14,7 @@ external-disturbance observation mathematics.
 | `armbycontroller/modeling/lie.py` | SO(3)/SE(3) 指数与对数、空间误差、伴随、空间运动/力叉乘 / SO(3)/SE(3) exp/log, space error, adjoint, motion/force cross products |
 | `armbycontroller/modeling/screw_model.py` | 解析 URDF/Xacro，构造 PoE chain，计算 FK、空间 Jacobian、质量矩阵、RNEA、动量观测项 / parse URDF/Xacro; PoE, FK, space Jacobian, mass matrix, RNEA, observer terms |
 | `armbycontroller/modeling/momentum_observer.py` | 不使用加速度微分的广义动量残差积分器 / acceleration-free generalized-momentum residual integrator |
+| `armbycontroller/ik/screw.py` | 共享 PoE 模型的完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK / full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over the shared PoE model |
 | `armbycontroller/__init__.py` | 顶层 Python package 标识 / top-level Python package marker |
 
 ## 依赖方向 / Dependency direction
@@ -21,7 +22,7 @@ external-disturbance observation mathematics.
 ```text
 modeling/lie.py <- cartesian/spatial.py <- impedance/ | admittance/
        ^
-       +-------- modeling/screw_model.py <- controller adapters
+       +-------- modeling/screw_model.py <- ik/screw.py <- controller adapters
                               \---- modeling/momentum_observer.py
 ```
 

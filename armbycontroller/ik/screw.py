@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+from armbycontroller.cartesian import geometric_jacobian
 from armbycontroller.modeling.lie import space_pose_error
 from armbycontroller.modeling.lie import transform
 
@@ -21,6 +22,138 @@ class ScrewIkResult:
     position_error: float
     orientation_error: float
     iterations: int
+
+
+class BoundedScrewVelocityIk:
+    """Bounded weighted DLS over a PoE model's screw Jacobian."""
+
+    def __init__(
+        self,
+        model,
+        velocity_limits,
+        damping=0.02,
+        task_weights=None,
+        joint_limit_margin=0.03,
+    ):
+        self.model = model
+        self.joint_count = int(model.joint_count)
+        self.joint_limits = np.asarray(model.joint_limits, dtype=float)
+        self.velocity_limits = self._vector(
+            velocity_limits, self.joint_count, "velocity_limits", positive=True
+        )
+        self.task_weights = self._vector(
+            np.ones(6) if task_weights is None else task_weights,
+            6,
+            "task_weights",
+            positive=True,
+        )
+        self.damping = float(damping)
+        self.joint_limit_margin = float(joint_limit_margin)
+        if (
+            self.joint_limits.shape != (self.joint_count, 2)
+            or not np.all(np.isfinite(self.joint_limits))
+            or np.any(self.joint_limits[:, 0] >= self.joint_limits[:, 1])
+            or not math.isfinite(self.damping)
+            or self.damping <= 0.0
+            or not math.isfinite(self.joint_limit_margin)
+            or self.joint_limit_margin < 0.0
+        ):
+            raise ValueError("invalid bounded screw velocity IK settings")
+
+    @staticmethod
+    def _vector(values, size, name, *, positive=False):
+        result = np.asarray(values, dtype=float)
+        if (
+            result.shape != (size,)
+            or not np.all(np.isfinite(result))
+            or (positive and np.any(result <= 0.0))
+        ):
+            qualifier = " positive" if positive else ""
+            raise ValueError(
+                f"{name} must be a finite{qualifier} {size}-vector"
+            )
+        return result.copy()
+
+    def _bounds(self, joint_positions, period):
+        lower_position = (
+            self.joint_limits[:, 0]
+            + self.joint_limit_margin
+            - joint_positions
+        ) / period
+        upper_position = (
+            self.joint_limits[:, 1]
+            - self.joint_limit_margin
+            - joint_positions
+        ) / period
+        lower = np.maximum(-self.velocity_limits, lower_position)
+        upper = np.minimum(self.velocity_limits, upper_position)
+        for index in np.flatnonzero(lower > upper):
+            if (
+                joint_positions[index]
+                <= self.joint_limits[index, 0] + self.joint_limit_margin
+            ):
+                lower[index], upper[index] = (
+                    0.0,
+                    self.velocity_limits[index],
+                )
+            else:
+                lower[index], upper[index] = (
+                    -self.velocity_limits[index],
+                    0.0,
+                )
+        return lower, upper
+
+    def solve(self, target_twist, joint_positions, period):
+        """Map one tool twist to a bounded joint-velocity reference."""
+        target = self._vector(target_twist, 6, "target_twist")
+        joints = self._vector(
+            joint_positions, self.joint_count, "joint_positions"
+        )
+        period = float(period)
+        if not math.isfinite(period) or period <= 0.0:
+            raise ValueError("period must be finite and positive")
+        jacobian, _ = geometric_jacobian(self.model, joints)
+        weighted_jacobian = self.task_weights[:, None] * jacobian
+        weighted_target = self.task_weights * target
+        lower, upper = self._bounds(joints, period)
+
+        velocity = np.zeros(self.joint_count)
+        free = np.ones(self.joint_count, dtype=bool)
+        for _ in range(self.joint_count + 1):
+            if not np.any(free):
+                break
+            fixed = ~free
+            residual = weighted_target.copy()
+            if np.any(fixed):
+                residual -= weighted_jacobian[:, fixed] @ velocity[fixed]
+            reduced = weighted_jacobian[:, free]
+            normal = (
+                reduced.T @ reduced
+                + self.damping ** 2 * np.eye(np.count_nonzero(free))
+            )
+            try:
+                velocity[free] = np.linalg.solve(
+                    normal, reduced.T @ residual
+                )
+            except np.linalg.LinAlgError as error:
+                raise ScrewIkFailure(
+                    "bounded screw velocity IK solve failed"
+                ) from error
+            below = free & (velocity < lower)
+            above = free & (velocity > upper)
+            if not np.any(below | above):
+                break
+            violation = np.maximum(lower - velocity, velocity - upper)
+            index = int(np.argmax(np.where(
+                below | above, violation, -np.inf
+            )))
+            velocity[index] = (
+                lower[index]
+                if velocity[index] < lower[index]
+                else upper[index]
+            )
+            free[index] = False
+        return np.clip(velocity, lower, upper)
 
 
 class ScrewIkSolver:

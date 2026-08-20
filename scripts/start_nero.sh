@@ -37,7 +37,6 @@ set -u
 
 exec ros2 launch armbycontroller keyboard_control.launch.py \
   robot_model:=nero \
-  nero_mount:=side \
   execute_motion:=true \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
