@@ -155,6 +155,19 @@ class CartesianImpedanceController:
         position_tolerance=0.0,
         maximum_force=float("inf"),
         maximum_torque=float("inf"),
+        position_integral_gain=None,
+        position_integral_deadband=None,
+        position_integral_max_rotation_error=float("inf"),
+        position_integral_max_translation_error=float("inf"),
+        position_integral_max_force=1.0,
+        position_integral_max_torque=0.25,
+        position_integral_leak_rate=0.0,
+        position_integral_saturation_leak_rate=0.1,
+        position_integral_external_force_gate=float("inf"),
+        position_integral_external_force_release=0.5,
+        position_integral_external_torque_gate=float("inf"),
+        position_integral_external_torque_release=0.1,
+        position_integral_requires_external_wrench=False,
     ):
         self.model = model
         self.stiffness = np.asarray(stiffness, dtype=float).copy()
@@ -170,6 +183,95 @@ class CartesianImpedanceController:
         self.maximum_torque = float(maximum_torque)
         limit_cartesian_wrench(
             np.zeros(6), self.maximum_force, self.maximum_torque
+        )
+        self.position_integral_gain = _joint_vector(
+            np.zeros(6)
+            if position_integral_gain is None
+            else position_integral_gain,
+            6,
+            "position_integral_gain",
+        )
+        self.position_integral_deadband = _joint_vector(
+            np.zeros(6)
+            if position_integral_deadband is None
+            else position_integral_deadband,
+            6,
+            "position_integral_deadband",
+        )
+        if (
+            np.any(self.position_integral_gain < 0.0)
+            or np.any(self.position_integral_deadband < 0.0)
+        ):
+            raise ValueError(
+                "Cartesian position-integral gains and deadbands must be "
+                "nonnegative"
+            )
+        self.position_integral_max_rotation_error = float(
+            position_integral_max_rotation_error
+        )
+        self.position_integral_max_translation_error = float(
+            position_integral_max_translation_error
+        )
+        self.position_integral_max_force = float(
+            position_integral_max_force
+        )
+        self.position_integral_max_torque = float(
+            position_integral_max_torque
+        )
+        self.position_integral_leak_rate = float(
+            position_integral_leak_rate
+        )
+        self.position_integral_saturation_leak_rate = float(
+            position_integral_saturation_leak_rate
+        )
+        self.position_integral_external_force_gate = float(
+            position_integral_external_force_gate
+        )
+        self.position_integral_external_force_release = float(
+            position_integral_external_force_release
+        )
+        self.position_integral_external_torque_gate = float(
+            position_integral_external_torque_gate
+        )
+        self.position_integral_external_torque_release = float(
+            position_integral_external_torque_release
+        )
+        self.position_integral_requires_external_wrench = bool(
+            position_integral_requires_external_wrench
+        )
+        positive_integral_limits = (
+            self.position_integral_max_rotation_error,
+            self.position_integral_max_translation_error,
+            self.position_integral_max_force,
+            self.position_integral_max_torque,
+            self.position_integral_external_force_gate,
+            self.position_integral_external_force_release,
+            self.position_integral_external_torque_gate,
+            self.position_integral_external_torque_release,
+        )
+        if (
+            any(value <= 0.0 or np.isnan(value)
+                for value in positive_integral_limits)
+            or not np.isfinite(self.position_integral_leak_rate)
+            or self.position_integral_leak_rate < 0.0
+            or not np.isfinite(
+                self.position_integral_saturation_leak_rate
+            )
+            or self.position_integral_saturation_leak_rate <= 0.0
+            or self.position_integral_external_force_release
+            >= self.position_integral_external_force_gate
+            or self.position_integral_external_torque_release
+            >= self.position_integral_external_torque_gate
+        ):
+            raise ValueError(
+                "Cartesian position-integral limits must be positive and "
+                "finite, release gates must be below push gates, and leak "
+                "rates must be valid"
+            )
+        limit_cartesian_wrench(
+            np.zeros(6),
+            self.position_integral_max_force,
+            self.position_integral_max_torque,
         )
         scale = np.asarray(model_scale, dtype=float)
         if scale.ndim == 0 or scale.size == 1:
@@ -232,6 +334,10 @@ class CartesianImpedanceController:
         self._reference_position = None
         self._reference_pose = None
         self._reference_jacobian = None
+        self._position_integral_wrench = np.zeros(6)
+        self._position_integral_push_active = (
+            self.position_integral_requires_external_wrench
+        )
 
     def reset(self, state):
         if state.joint_count != self.joint_count:
@@ -239,6 +345,10 @@ class CartesianImpedanceController:
         self._reference_position = None
         self._reference_pose = None
         self._reference_jacobian = None
+        self._position_integral_wrench.fill(0.0)
+        self._position_integral_push_active = (
+            self.position_integral_requires_external_wrench
+        )
         self.mit_envelope.reset(
             state.effort if state.effort_valid else None
         )
@@ -248,15 +358,31 @@ class CartesianImpedanceController:
         reference = sample.reference
         self.cycle_guard.validate(sample)
         reference_position = np.asarray(reference.position, dtype=float)
-        if (
+        reference_position_changed = (
             self._reference_position is None
             or not np.array_equal(
                 reference_position, self._reference_position
             )
-        ):
+        )
+        task_reference_changed = False
+        if reference_position_changed:
             reference_jacobian, desired_pose = geometric_jacobian(
                 self.model, reference_position
             )
+            task_reference_changed = (
+                self._reference_pose is None
+                or not np.allclose(
+                    desired_pose,
+                    self._reference_pose,
+                    rtol=0.0,
+                    atol=1e-10,
+                )
+            )
+            if task_reference_changed:
+                self._position_integral_wrench.fill(0.0)
+                self._position_integral_push_active = (
+                    self.position_integral_requires_external_wrench
+                )
             self._reference_position = reference_position.copy()
             self._reference_pose = desired_pose
             self._reference_jacobian = reference_jacobian
@@ -285,6 +411,7 @@ class CartesianImpedanceController:
             self.stiffness,
             self.damping,
             model_torque_override=compensation.requested_torque,
+            integral_wrench=self._position_integral_wrench,
             maximum_force=self.maximum_force,
             maximum_torque=self.maximum_torque,
             **nullspace,
@@ -305,6 +432,107 @@ class CartesianImpedanceController:
             raw_command_torque,
             period=sample.period,
         )
+        integral_enabled = bool(np.any(self.position_integral_gain > 0.0))
+        integral_active = False
+        integral_limited = False
+        integral_pause_reason = "disabled"
+        external_wrench = reference.external_wrench
+        external_torque_norm = float(np.linalg.norm(external_wrench[:3]))
+        external_force_norm = float(np.linalg.norm(external_wrench[3:]))
+        integral_state_updated = False
+        saturation_active = bool(raw.wrench_limited or torque.saturated)
+        if integral_enabled:
+            if (
+                self.position_integral_requires_external_wrench
+                and not reference.external_wrench_valid
+            ):
+                self._position_integral_push_active = True
+            else:
+                if self._position_integral_push_active:
+                    if (
+                        external_force_norm
+                        < self.position_integral_external_force_release
+                        and external_torque_norm
+                        < self.position_integral_external_torque_release
+                    ):
+                        self._position_integral_push_active = False
+                elif (
+                    external_force_norm
+                    > self.position_integral_external_force_gate
+                    or external_torque_norm
+                    > self.position_integral_external_torque_gate
+                ):
+                    self._position_integral_push_active = True
+            if task_reference_changed:
+                integral_pause_reason = "reference_changed"
+            elif (
+                self.position_integral_requires_external_wrench
+                and not reference.external_wrench_valid
+            ):
+                integral_pause_reason = "external_wrench_unavailable"
+            elif self._position_integral_push_active:
+                if (
+                    external_torque_norm
+                    > self.position_integral_external_torque_gate
+                ):
+                    integral_pause_reason = "external_torque_gate"
+                elif (
+                    external_force_norm
+                    > self.position_integral_external_force_gate
+                ):
+                    integral_pause_reason = "external_force_gate"
+                else:
+                    integral_pause_reason = "external_wrench_hysteresis"
+            elif (
+                np.linalg.norm(raw.pose_error[:3])
+                > self.position_integral_max_rotation_error
+            ):
+                integral_pause_reason = "rotation_error_gate"
+            elif (
+                np.linalg.norm(raw.pose_error[3:])
+                > self.position_integral_max_translation_error
+            ):
+                integral_pause_reason = "translation_error_gate"
+            elif raw.wrench_limited:
+                integral_pause_reason = "wrench_saturated"
+            elif torque.saturated:
+                integral_pause_reason = "joint_torque_saturated"
+            else:
+                effective_error = np.sign(raw.pose_error) * np.maximum(
+                    np.abs(raw.pose_error)
+                    - self.position_integral_deadband,
+                    0.0,
+                )
+                normal_leak = np.exp(
+                    -self.position_integral_leak_rate * sample.period
+                )
+                candidate = (
+                    normal_leak * self._position_integral_wrench
+                ) + (
+                    self.position_integral_gain
+                    * effective_error
+                    * sample.period
+                )
+                candidate, integral_limited = limit_cartesian_wrench(
+                    candidate,
+                    self.position_integral_max_force,
+                    self.position_integral_max_torque,
+                )
+                self._position_integral_wrench = candidate
+                integral_state_updated = True
+                integral_active = bool(np.any(effective_error != 0.0))
+                integral_pause_reason = (
+                    "active" if integral_active else "error_deadband"
+                )
+        if not integral_state_updated:
+            decay_rate = (
+                self.position_integral_saturation_leak_rate
+                if saturation_active
+                else self.position_integral_leak_rate
+            )
+            self._position_integral_wrench *= np.exp(
+                -decay_rate * sample.period
+            )
         signals = {
             "pose_error": raw.pose_error,
             "desired_twist": raw.desired_twist,
@@ -312,6 +540,22 @@ class CartesianImpedanceController:
             "commanded_wrench": raw.commanded_wrench,
             "raw_commanded_wrench": raw.raw_commanded_wrench,
             "wrench_limited": raw.wrench_limited,
+            "position_integral_wrench": raw.integral_wrench,
+            "position_integral_next_wrench": (
+                self._position_integral_wrench
+            ),
+            "position_integral_active": integral_active,
+            "position_integral_limited": integral_limited,
+            "position_integral_pause_reason": integral_pause_reason,
+            "position_integral_push_active": (
+                self._position_integral_push_active
+            ),
+            "position_integral_decay_rate": (
+                self.position_integral_saturation_leak_rate
+                if saturation_active and not integral_state_updated
+                else self.position_integral_leak_rate
+            ),
+            "external_wrench_valid": reference.external_wrench_valid,
             "task_torque": raw.task_torque,
             "nullspace_torque": raw.nullspace_torque,
             "joint_posture_torque": joint_posture_torque,

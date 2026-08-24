@@ -264,7 +264,12 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "firmware:" not in common
     assert "nero_mount: side" in nero
     assert "nero_mount:=side" not in nero_start
-    assert "reset_emergency_stop_on_start:=false" in nero_start
+    assert "select_nero_mount.sh" in nero_start
+    assert 'nero_mount:="${NERO_MOUNT}"' in nero_start
+    assert nero_start.index("select_input_device.sh") < nero_start.index(
+        "select_nero_mount.sh"
+    )
+    assert "reset_emergency_stop_on_start:=true" in nero_start
     assert "tool_configuration: none" in nero
     assert "nero_velocity_estimation_enabled: true" in nero
     assert "admittance_mode: zero_force" in nero
@@ -283,6 +288,13 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "cartesian_impedance_translation_stiffness: 70.0" in nero
     assert "cartesian_impedance_rotation_damping: 0.24" in nero
     assert "cartesian_impedance_translation_damping: 1.4" in nero
+    assert "cartesian_impedance_position_integral_gain" in nero
+    assert "[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]" in nero
+    assert "cartesian_impedance_position_integral_max_force: 0.75" in nero
+    assert (
+        "cartesian_impedance_position_integral_saturation_leak_rate: 0.1"
+        in nero
+    )
     assert "cartesian_impedance_joint_posture_stiffness" in nero
     assert "[0.0, 0.5, 0.5, 0.6, 0.0, 0.0, 0.0]" in nero
     assert "cartesian_impedance_joint_posture_damping" in nero
@@ -329,6 +341,47 @@ def test_input_selector_expands_numeric_event_device():
             "keyboard device is not readable: /dev/input/event3",
         )
     )
+
+
+@pytest.mark.parametrize(("choice", "expected"), [
+    ("1\n", "side"),
+    ("2\n", "horizontal"),
+])
+def test_nero_mount_selector_maps_interactive_choice(choice, expected):
+    selector = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "select_nero_mount.sh"
+    )
+
+    result = subprocess.run(
+        ["script", "-qfec", str(selector), "/dev/null"],
+        input=choice,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.rstrip().endswith(expected)
+
+
+def test_nero_mount_selector_honors_explicit_launch_override():
+    selector = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "select_nero_mount.sh"
+    )
+
+    result = subprocess.run(
+        [selector, "nero_mount:=horizontal"],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "horizontal"
 
 
 def test_launch_selects_one_robot_specific_config_filename():
@@ -1013,9 +1066,63 @@ def test_home_is_edge_triggered():
     jog = ArmJointJogState(LIMITS, 0.1, [0.2] * 7)
     first = jog.update(keys(KEY_HOME))
     second = jog.update(keys(KEY_HOME))
-    assert first.home_requested and first.target_changed
+    assert first.home_requested and not first.target_changed
     assert not second.home_requested
-    assert jog.target_joints == [0.0] * 7
+    assert jog.target_joints == [0.2] * 7
+
+
+def test_space_runs_the_strict_sequential_home_path(monkeypatch):
+    controller = object.__new__(ArmKeyboardController)
+    controller.key_state = keys(KEY_HOME)
+    controller.last_keyboard_time = time.monotonic()
+    controller.keyboard_timeout = 1.0
+    controller.admittance_enabled = False
+    controller.hybrid_enabled = False
+    controller.impedance_enabled = True
+    controller.interaction_transitioning = False
+    controller.emergency_stopped = False
+    controller.control_mode = "joint"
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.jog = ArmJointJogState(LIMITS, 0.1, [0.2] * 7)
+    controller.ik_target_position = np.ones(3)
+    controller.ik_target_rotation = np.eye(3)
+    transitions = []
+    homes = []
+    estops = []
+    sent_targets = []
+    controller._enter_normal_interaction_mode = (
+        lambda reason: transitions.append(reason) or True
+    )
+
+    def start_home():
+        homes.append(True)
+        controller._sequential_home_active = True
+        return True
+
+    controller.start_sequential_home = start_home
+    controller.trigger_emergency_stop = lambda: estops.append(True)
+    controller.send_target = lambda reason: sent_targets.append(reason)
+    monkeypatch.setattr(
+        ArmKeyboardController,
+        "get_logger",
+        lambda self: SimpleNamespace(
+            info=lambda *args, **kwargs: None,
+            warning=lambda *args, **kwargs: None,
+        ),
+    )
+
+    controller.control_tick()
+
+    assert transitions == ["SPACE sequential home"]
+    assert homes == [True]
+    assert sent_targets == []
+    assert controller.jog.target_joints == [0.2] * 7
+
+    controller.key_state = keys(KEY_ESTOP)
+    controller.control_tick()
+
+    assert estops == [True]
 
 
 def test_estop_and_mode_toggle_are_edge_triggered_and_suppress_jog():
@@ -2693,6 +2800,114 @@ def test_startup_home_zeros_joints_strictly_in_order(monkeypatch):
         [0.0, 0.0, 0.0],
     ]
     assert controller.arm.limit_changes == []
+
+
+@pytest.mark.parametrize(("mount", "joint2_goal", "first", "second"), [
+    (
+        "side",
+        math.pi / 2.0,
+        [0.0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
+        [0.0, math.pi / 2.0, 0.2, 0.2, 0.2, 0.2, 0.2],
+    ),
+    (
+        "horizontal",
+        0.0,
+        [0.2, 0.0, 0.2, 0.2, 0.2, 0.2, 0.2],
+        [0.0, 0.0, 0.2, 0.2, 0.2, 0.2, 0.2],
+    ),
+])
+def test_nero_mount_selects_second_joint_home(
+    monkeypatch, mount, joint2_goal, first, second
+):
+    class FakeArm:
+        def __init__(self):
+            self.joints = [0.2] * 7
+            self.commands = []
+
+        def get_joint_angles(self):
+            return list(self.joints)
+
+        def move_j(self, target):
+            self.commands.append(list(target))
+            self.joints = list(target)
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.arm = FakeArm()
+    controller.robot_model = "nero"
+    controller.nero_mount = mount
+    controller.joint_count = 7
+    controller.joint_limits = [(-3.0, 3.0)] * 7
+    controller.startup_home_timeout = 0.1
+    controller.startup_home_tolerance = 0.01
+    controller.jog = ArmJointJogState(controller.joint_limits, 0.1)
+    controller.get_logger = lambda: SimpleNamespace(
+        info=lambda message, **kwargs: None,
+        error=lambda message, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.node.time.sleep", lambda duration: None
+    )
+
+    assert controller.move_home_and_wait()
+    assert controller.arm.commands[0] == pytest.approx(first)
+    assert controller.arm.commands[1] == pytest.approx(second)
+    assert controller.arm.commands[-1] == pytest.approx(
+        [0.0, joint2_goal, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+    assert controller.jog.target_joints == pytest.approx(
+        [0.0, joint2_goal, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
+
+
+def test_nero_side_home_recovers_one_out_of_limit_joint_inward(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.joints = [0.2, 1.9473, 0.2, 0.2, 0.2, 0.2, 0.2]
+            self.commands = []
+
+        def get_joint_angles(self):
+            return list(self.joints)
+
+        def move_j(self, target):
+            self.commands.append(list(target))
+            self.joints = list(target)
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.arm = FakeArm()
+    controller.robot_model = "nero"
+    controller.nero_mount = "side"
+    controller.joint_count = 7
+    controller.joint_limits = [
+        (-2.705261, 2.705261),
+        (-1.74533, 1.74533),
+        (-2.757621, 2.757621),
+        (-1.012291, 2.146755),
+        (-2.757621, 2.757621),
+        (-0.733039, 0.959932),
+        (-1.570797, 1.570797),
+    ]
+    controller.startup_home_timeout = 0.1
+    controller.startup_home_tolerance = 0.01
+    controller.jog = ArmJointJogState(controller.joint_limits, 0.1)
+    controller.get_logger = lambda: SimpleNamespace(
+        info=lambda message, **kwargs: None,
+        warning=lambda message, **kwargs: None,
+        error=lambda message, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.node.time.sleep", lambda duration: None
+    )
+
+    assert controller.move_home_and_wait()
+    assert controller.arm.commands[0] == pytest.approx(
+        [0.2, 1.74533, 0.2, 0.2, 0.2, 0.2, 0.2]
+    )
+    assert controller.arm.commands[1] == pytest.approx(
+        [0.0, 1.74533, 0.2, 0.2, 0.2, 0.2, 0.2]
+    )
+    assert controller.arm.commands[-1] == pytest.approx(
+        [0.0, math.pi / 2.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    )
 
 
 def test_startup_home_refuses_out_of_limit_feedback(monkeypatch):

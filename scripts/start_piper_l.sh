@@ -41,5 +41,5 @@ exec ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
   move_home_on_start:=false \
-  reset_emergency_stop_on_start:=false \
+  reset_emergency_stop_on_start:=true \
   "$@"

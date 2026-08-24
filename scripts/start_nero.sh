@@ -10,6 +10,10 @@ KEYBOARD_DEVICE="$(
   "${SCRIPT_DIRECTORY}/select_input_device.sh" "$@"
 )"
 readonly KEYBOARD_DEVICE
+NERO_MOUNT="$(
+  "${SCRIPT_DIRECTORY}/select_nero_mount.sh" "$@"
+)"
+readonly NERO_MOUNT
 
 SOURCE_WORKSPACE_DIRECTORY="$(
   cd -- "${SCRIPT_DIRECTORY}/../../.." && pwd
@@ -40,6 +44,7 @@ exec ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   execute_motion:=true \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
+  nero_mount:="${NERO_MOUNT}" \
   move_home_on_start:=false \
-  reset_emergency_stop_on_start:=false \
+  reset_emergency_stop_on_start:=true \
   "$@"

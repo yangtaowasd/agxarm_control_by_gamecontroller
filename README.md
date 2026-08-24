@@ -58,6 +58,19 @@ that Piper-L-specific reinforcement and uses isotropic
 stiffness is `70 N/m`; rotational and translational damping are respectively
 `0.24 N.m.s/rad` and `1.4 N.s/m`.
 
+Nero also supports an experimental, default-off, translation-only position-I
+return term for slowly removing residual pose error after a push. A guarded
+trial starts with `[0,0,0,2,2,2] N/(m.s)`. It is capped at `0.75 N`, leaks at
+`0.05 1/s`, and accumulates only within `0.02 m` of the target. Push/release
+hysteresis is `1.0/0.5 N` and `0.2/0.1 N.m`; stale observations pause it and
+re-arm the release gate, so accumulation cannot resume from the hysteresis
+band after an observation gap.
+Wrench or joint-torque saturation applies a separate `0.1 1/s` decay rate
+(10 s time constant). Cartesian-target changes and impedance-mode reset clear
+the integral, while a nullspace-only reference change does not. Enable the
+trial explicitly with
+`cartesian_impedance_position_integral_gain: [0,0,0,2,2,2]`.
+
 Nero's seventh joint is controlled by a dynamically consistent nullspace
 impedance. Its defaults are `0.4 N.m/rad` stiffness and `0.1 N.m.s/rad`
 damping. The torque projector uses the URDF mass matrix and keeps
@@ -295,17 +308,21 @@ configure CAN without starting a robot, run:
 Start the required robot directly:
 
 ```bash
-# Nero on a horizontal base; YAML still defaults to side mounting
-./scripts/start_nero.sh nero_mount:=horizontal
+# Nero; interactively choose keyboard input, then mounting posture
+./scripts/start_nero.sh
+
+# Non-interactive horizontal-base override
+./scripts/start_nero.sh nero_mount:=horizontal device:=x11
 
 # Or Piper-L
 ./scripts/start_piper_l.sh
 ```
 
-The robot scripts configure CAN but do not automatically move home or reset a
-latched electronic stop. If the arm reports an electronic stop, startup remains
-disabled until the operator inspects the arm and explicitly adds
-`reset_emergency_stop_on_start:=true`.
+The robot scripts configure CAN and do not automatically move home. The current
+Nero wrapper explicitly resets a latched electronic stop; inspect and support
+the arm before starting it. The Piper-L wrapper and direct launch retain the
+safer `reset_emergency_stop_on_start:=false` default unless explicitly
+overridden.
 CAN setup uses `sudo` when the current user is not root. The scripts use the
 interactive terminal to select either the X11 keyboard backend for NoMachine
 or a local `/dev/input/eventN` evdev keyboard. In non-interactive use they
@@ -354,10 +371,15 @@ Both arms use `/arm_keyboard_state` and exactly the same keys:
 - IK mode: `W/S` = `+X/-X`, `A/D` = `+Y/-Y`, `Z/X` = `+Z/-Z`
 - IK mode: arrows point the end effector up/down/left/right
 - IK mode: `PageUp/PageDown` tilt the end effector left/right
-- `SPACE`: all joints return to zero
+- `SPACE`: leave impedance if necessary, then move strictly one joint at a time
+  to the mount-specific home: Nero `side` uses
+  `[0°,90°,0°,0°,0°,0°,0°]` in `J1→J2→J3→…` order, while Nero `horizontal`
+  uses all zero in `J2→J1→J3→J4→…` order (Piper-L uses all zero in joint order);
+  each joint must reach tolerance before the next command is sent and `E`
+  remains active (home is locked during admittance or hybrid control)
 - `E`: electronic emergency stop
 
-For keyboard IK through MIT, wait for startup zeroing, press `I` to enter MIT,
+For keyboard IK through MIT, wait for startup homing, press `I` to enter MIT,
 then press `P` to enter IK. `W/S/A/D/Z/X`, arrows, and PageUp/PageDown update
 the IK joint target. Both IK target generation and the MIT command loop run at
 100 Hz. A jerk-limited joint trajectory supplies continuous `q_des`, `dq_des`,
@@ -399,7 +421,12 @@ YAML files, including MIT gains, total-torque bounds, joint-velocity bounds,
 task weights, and DLS damping. Nero velocity, nullspace, and joint-selective
 posture parameters remain Nero-only.
 
-The Nero profile explicitly uses `nero_mount: side` and
+The Nero profile defaults to `nero_mount: side`, while `start_nero.sh` asks for
+`side` (横置) or `horizontal` (平置) and passes the choice explicitly. Side
+mounting uses home `[0°,90°,0°,0°,0°,0°,0°]`; horizontal uses all zero.
+Side homing runs `J1→J2→J3→…`; horizontal homing runs
+`J2→J1→J3→J4→…`.
+The profile also uses
 `tool_configuration: none`, so it loads the bare `nero_description.urdf`.
 The Piper-L profile independently uses `tool_configuration: gripper`.
 The physical tool and mount must match the selected robot profile.

@@ -78,6 +78,7 @@ class ControlReference:
     velocity: np.ndarray
     acceleration: np.ndarray
     external_wrench: np.ndarray
+    external_wrench_valid: bool = True
 
     def __post_init__(self):
         position = _vector(self.position, "reference.position")
@@ -98,6 +99,9 @@ class ControlReference:
             "external_wrench",
             _vector(self.external_wrench, "reference.external_wrench", 6),
         )
+        object.__setattr__(
+            self, "external_wrench_valid", bool(self.external_wrench_valid)
+        )
 
     @classmethod
     def hold(cls, position, external_wrench=None):
@@ -108,6 +112,7 @@ class ControlReference:
             zeros,
             zeros,
             np.zeros(6) if external_wrench is None else external_wrench,
+            external_wrench is not None,
         )
 
 

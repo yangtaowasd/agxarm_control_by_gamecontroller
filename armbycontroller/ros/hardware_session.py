@@ -259,78 +259,187 @@ class HardwareSessionMixin:
             time.sleep(0.05)
         return None
 
-    def move_home_and_wait(self):
+    def start_sequential_home(self):
+        """Start non-blocking J1-to-Jn homing from measured joints."""
         try:
             joints = extract_joint_angles(
                 self.arm.get_joint_angles(), self.joint_count
             )
         except Exception as error:
             self.get_logger().error(
-                f"cannot read feedback before startup zeroing: {error}"
+                f"cannot read feedback before sequential homing: {error}"
             )
             return False
         if joints is None:
             self.get_logger().error(
-                "cannot start sequential zeroing without joint feedback"
+                "cannot start sequential homing without joint feedback"
             )
             return False
 
-        target = list(joints)
+        home_goal = [0.0] * self.joint_count
+        if (
+            getattr(self, "robot_model", "") == "nero"
+            and getattr(self, "nero_mount", "") == "side"
+        ):
+            home_goal[1] = math.pi / 2.0
+        if any(
+            target < low or target > high
+            for target, (low, high) in zip(home_goal, self.joint_limits)
+        ):
+            self.get_logger().error(
+                f"home target is outside soft limits: {home_goal}"
+            )
+            return False
+
         outside = [
-            index
+            index - 1
             for index, (value, (low, high)) in enumerate(
                 zip(joints, self.joint_limits), start=1
             )
             if value < low or value > high
         ]
-        if outside:
+        recoverable_outside = (
+            getattr(self, "robot_model", "") == "nero"
+            and len(outside) == 1
+        )
+        if outside and not recoverable_outside:
             self.get_logger().error(
-                "startup zeroing refused because feedback is outside soft "
-                f"limits on joints {outside}"
+                "sequential homing refused because feedback is outside soft "
+                f"limits on joints {[index + 1 for index in outside]}"
             )
             return False
-        motion_started = False
+
+        self._sequential_home_goal = home_goal
+        self._sequential_home_target = list(joints)
+        self._sequential_home_order = list(range(self.joint_count))
+        if (
+            getattr(self, "robot_model", "") == "nero"
+            and getattr(self, "nero_mount", "") == "horizontal"
+        ):
+            self._sequential_home_order = [
+                1,
+                0,
+                *range(2, self.joint_count),
+            ]
+        self._sequential_home_index = 0
+        self._sequential_home_active = True
+        self._sequential_home_recovery_index = (
+            outside[0] if recoverable_outside else None
+        )
+        self._sequential_home_recovery_goal = None
+        if self._sequential_home_recovery_index is not None:
+            recovery_index = self._sequential_home_recovery_index
+            low, high = self.joint_limits[recovery_index]
+            self._sequential_home_recovery_goal = (
+                low if joints[recovery_index] < low else high
+            )
         try:
-            for index in range(self.joint_count):
-                target[index] = 0.0
-                self.get_logger().info(
-                    f"forcing startup zero joint {index + 1}/"
-                    f"{self.joint_count}: "
-                    f"{[round(value, 4) for value in target]}"
-                )
-                motion_started = True
-                self.arm.move_j(list(target))
-                deadline = time.monotonic() + self.startup_home_timeout
-
-                while time.monotonic() < deadline:
-                    feedback = extract_joint_angles(
-                        self.arm.get_joint_angles(), self.joint_count
-                    )
-                    if (feedback is not None and
-                            abs(feedback[index]) <=
-                            self.startup_home_tolerance):
-                        self.get_logger().info(
-                            f"joint {index + 1} zero reached: "
-                            f"error={abs(feedback[index]):.6f} rad"
-                        )
-                        break
-                    time.sleep(0.05)
-                else:
-                    self.get_logger().error(
-                        f"joint {index + 1} sequential zero timed out"
-                    )
-                    self.trigger_emergency_stop()
-                    return False
-
-            home = [0.0] * self.joint_count
-            self.jog.sync_target(home)
-            self.get_logger().info("sequential startup zero complete")
+            if self._sequential_home_recovery_index is None:
+                self._command_sequential_home_joint()
+            else:
+                self._command_sequential_home_recovery()
             return True
         except Exception as error:
-            self.get_logger().error(f"startup zeroing failed: {error}")
-            if motion_started:
-                self.trigger_emergency_stop()
+            self._sequential_home_active = False
+            self.get_logger().error(f"sequential homing failed: {error}")
+            self.trigger_emergency_stop()
             return False
+
+    def _command_sequential_home_recovery(self):
+        index = self._sequential_home_recovery_index
+        self._sequential_home_target[index] = (
+            self._sequential_home_recovery_goal
+        )
+        self.get_logger().warning(
+            f"recovering out-of-limit joint {index + 1} inward before "
+            f"sequential home: {self._sequential_home_target}"
+        )
+        self.arm.move_j(list(self._sequential_home_target))
+        self._sequential_home_deadline = (
+            time.monotonic() + self.startup_home_timeout
+        )
+
+    def _command_sequential_home_joint(self):
+        step = self._sequential_home_index
+        index = self._sequential_home_order[step]
+        self._sequential_home_target[index] = self._sequential_home_goal[index]
+        self.get_logger().info(
+            f"commanding sequential home step {step + 1}/"
+            f"{self.joint_count}: J{index + 1} "
+            f"{[round(value, 4) for value in self._sequential_home_target]}"
+        )
+        self.arm.move_j(list(self._sequential_home_target))
+        self._sequential_home_deadline = (
+            time.monotonic() + self.startup_home_timeout
+        )
+
+    def poll_sequential_home(self):
+        """Advance active homing once; return None while it is pending."""
+        if not getattr(self, "_sequential_home_active", False):
+            return True
+        recovery_index = self._sequential_home_recovery_index
+        index = (
+            recovery_index
+            if recovery_index is not None
+            else self._sequential_home_order[self._sequential_home_index]
+        )
+        target = (
+            self._sequential_home_recovery_goal
+            if recovery_index is not None
+            else self._sequential_home_goal[index]
+        )
+        try:
+            feedback = extract_joint_angles(
+                self.arm.get_joint_angles(), self.joint_count
+            )
+            if (
+                feedback is not None
+                and abs(feedback[index] - target)
+                <= self.startup_home_tolerance
+            ):
+                self.get_logger().info(
+                    f"joint {index + 1} home reached: error="
+                    f"{abs(feedback[index] - target):.6f} "
+                    "rad"
+                )
+                if recovery_index is not None:
+                    self._sequential_home_recovery_index = None
+                    self._sequential_home_target = list(feedback)
+                    self._command_sequential_home_joint()
+                    return None
+                self._sequential_home_index += 1
+                if self._sequential_home_index >= self.joint_count:
+                    self._sequential_home_active = False
+                    self.jog.sync_target(self._sequential_home_goal)
+                    self.get_logger().info(
+                        f"sequential home complete: {self._sequential_home_goal}"
+                    )
+                    return True
+                self._command_sequential_home_joint()
+                return None
+            if time.monotonic() >= self._sequential_home_deadline:
+                self._sequential_home_active = False
+                self.get_logger().error(
+                    f"joint {index + 1} sequential home timed out"
+                )
+                self.trigger_emergency_stop()
+                return False
+            return None
+        except Exception as error:
+            self._sequential_home_active = False
+            self.get_logger().error(f"sequential homing failed: {error}")
+            self.trigger_emergency_stop()
+            return False
+
+    def move_home_and_wait(self):
+        """Run sequential homing synchronously during startup."""
+        if not self.start_sequential_home():
+            return False
+        while True:
+            result = self.poll_sequential_home()
+            if result is not None:
+                return result
+            time.sleep(0.05)
 
     def external_torque_callback(self, message):
         """Convert observer residual torque to a base-frame wrench."""
@@ -522,6 +631,7 @@ class HardwareSessionMixin:
             self.get_logger().error(f"move_j failed: {exc}")
 
     def trigger_emergency_stop(self):
+        self._sequential_home_active = False
         self.emergency_stopped = True
         self.arm_ready = False
         self.get_logger().error("ELECTRONIC EMERGENCY STOP requested")

@@ -104,6 +104,61 @@ class ControllerRuntimeMixin:
                 maximum_torque=getattr(
                     self, "cartesian_max_torque", float("inf")
                 ),
+                position_integral_gain=getattr(
+                    self, "cartesian_position_integral_gain", None
+                ),
+                position_integral_deadband=getattr(
+                    self, "cartesian_position_integral_deadband", None
+                ),
+                position_integral_max_rotation_error=getattr(
+                    self,
+                    "cartesian_position_integral_max_rotation_error",
+                    float("inf"),
+                ),
+                position_integral_max_translation_error=getattr(
+                    self,
+                    "cartesian_position_integral_max_translation_error",
+                    float("inf"),
+                ),
+                position_integral_max_force=getattr(
+                    self, "cartesian_position_integral_max_force", 1.0
+                ),
+                position_integral_max_torque=getattr(
+                    self, "cartesian_position_integral_max_torque", 0.25
+                ),
+                position_integral_leak_rate=getattr(
+                    self, "cartesian_position_integral_leak_rate", 0.0
+                ),
+                position_integral_saturation_leak_rate=getattr(
+                    self,
+                    "cartesian_position_integral_saturation_leak_rate",
+                    0.1,
+                ),
+                position_integral_external_force_gate=getattr(
+                    self,
+                    "cartesian_position_integral_external_force_gate",
+                    float("inf"),
+                ),
+                position_integral_external_force_release=getattr(
+                    self,
+                    "cartesian_position_integral_external_force_release",
+                    0.5,
+                ),
+                position_integral_external_torque_gate=getattr(
+                    self,
+                    "cartesian_position_integral_external_torque_gate",
+                    float("inf"),
+                ),
+                position_integral_external_torque_release=getattr(
+                    self,
+                    "cartesian_position_integral_external_torque_release",
+                    0.1,
+                ),
+                position_integral_requires_external_wrench=getattr(
+                    self,
+                    "cartesian_position_integral_requires_external_wrench",
+                    False,
+                ),
             ))
         admittance_settings = (
             "admittance_mit_kp",
@@ -309,6 +364,7 @@ class ControllerRuntimeMixin:
             reference_velocity,
             reference_acceleration,
             np.zeros(6) if external_wrench is None else external_wrench,
+            external_wrench is not None,
         )
         return ControlInput(now, period, state, reference)
 

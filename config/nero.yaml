@@ -26,6 +26,23 @@ arm_keyboard_controller:
     cartesian_impedance_translation_stiffness: 70.0
     cartesian_impedance_rotation_damping: 0.24
     cartesian_impedance_translation_damping: 1.4
+    # Experimental Cartesian position-I return, disabled by default. Spatial
+    # order is [Rx, Ry, Rz, X, Y, Z]. For a guarded trial, use translation
+    # gains [0, 0, 0, 2, 2, 2]. It accumulates only near the target, after the
+    # observer wrench crosses the release threshold, and is bounded to 0.75 N.
+    cartesian_impedance_position_integral_gain: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    cartesian_impedance_position_integral_deadband: [0.0, 0.0, 0.0, 0.001, 0.001, 0.001]
+    cartesian_impedance_position_integral_max_rotation_error: 0.05
+    cartesian_impedance_position_integral_max_translation_error: 0.02
+    cartesian_impedance_position_integral_max_force: 0.75
+    cartesian_impedance_position_integral_max_torque: 0.2
+    cartesian_impedance_position_integral_leak_rate: 0.05
+    cartesian_impedance_position_integral_saturation_leak_rate: 0.1
+    cartesian_impedance_position_integral_external_force_gate: 1.0
+    cartesian_impedance_position_integral_external_force_release: 0.5
+    cartesian_impedance_position_integral_external_torque_gate: 0.2
+    cartesian_impedance_position_integral_external_torque_release: 0.1
+    cartesian_impedance_position_integral_requires_external_wrench: true
     cartesian_impedance_nullspace_stiffness: [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4]
     cartesian_impedance_nullspace_damping: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
 

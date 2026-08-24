@@ -81,9 +81,35 @@ It first computes a desired wrench, then maps it to joint torque by virtual
 work:
 
 ```text
-F_c   = Kx e_x + Dx (xdot_d - xdot)
+F_c   = Kx e_x + Dx (xdot_d - xdot) + F_I
 tau_x = Jg(q)^T F_c
 ```
+
+Nero 支持一个默认关闭、刻意很弱的平移位置积分试验，用于慢慢消除摩擦、死区和
+模型偏差留下的回正误差；它不是恒力控制器。积分状态直接用附加 wrench 表示，
+并带泄漏、死区、近目标门控、推/松手滞回和范数上限： / Nero supports a
+default-off, deliberately weak translational position-integral experiment for
+slowly removing residual return error from friction, deadband, and model
+mismatch; it is not a constant-force controller. The state is stored directly
+as an additive wrench and has leak, deadband, near-target gating, push/release
+hysteresis, and norm limits:
+
+```text
+e_eff = deadband(e_x)
+F_I[k] = limit(exp(-lambda dt) F_I[k-1] + Ki e_eff dt)
+```
+
+只有动量观测 wrench 新鲜且已从 `1.0 N/0.2 N·m` 推动门限降到
+`0.5 N/0.1 N·m` 松手门限以下、位姿误差位于近目标窗口、笛卡尔 wrench 和关节
+总力矩都未饱和时才累积。笛卡尔目标变化和模式复位会清零；普通暂停按
+`0.05 s^-1` 泄漏，饱和暂停按 `0.1 s^-1`（10 s 时间常数）衰减。 /
+Accumulation occurs only with a fresh momentum-observer wrench that has
+fallen from the `1.0 N/0.2 N.m` push thresholds below the
+`0.5 N/0.1 N.m` release thresholds, with pose error inside the near-target
+window and neither Cartesian wrench nor total joint torque saturated.
+Cartesian-target changes and mode resets clear the state; ordinary pauses
+leak at `0.05 s^-1`, while saturation pauses decay at `0.1 s^-1` (a 10 s time
+constant).
 
 Nero 默认的“零力”是柔顺零力，不是自由积分器。它用弱保持、速度阻尼与有限
 粘/滑阻力抑制动量观测偏置和摩擦；Piper-L 默认的 `resistive` 使用更明确的
@@ -783,12 +809,25 @@ implementation.
 | `cartesian_impedance_translation_damping` | scalar | N·s/m | Nero=`1.4`; Piper-L=`0.8` |
 | `cartesian_impedance_max_force` | scalar | N | `10.0`；`Jg^T` 前的平移力向量范数上限 / translational-force norm limit before `Jg^T` |
 | `cartesian_impedance_max_torque` | scalar | N·m | `4.0`；`Jg^T` 前的旋转力矩向量范数上限 / rotational-torque norm limit before `Jg^T` |
+| `cartesian_impedance_position_integral_gain` | 6 | N·m/(rad·s), N/(m·s) | `0`，默认关闭；Nero 平移试验建议 `[0,0,0,2,2,2]` / default off; suggested Nero translation trial value |
+| `cartesian_impedance_position_integral_deadband` | 6 | rad, m | Nero=`[0,0,0,0.001,0.001,0.001]` / Nero translational deadband |
+| `cartesian_impedance_position_integral_max_rotation_error` | scalar | rad | `0.05`；超过则暂停累积 / pause above this error |
+| `cartesian_impedance_position_integral_max_translation_error` | scalar | m | `0.02`；超过则暂停累积 / pause above this error |
+| `cartesian_impedance_position_integral_max_force` | scalar | N | `0.75`；积分平移 wrench 范数上限 / integral translational-wrench norm cap |
+| `cartesian_impedance_position_integral_max_torque` | scalar | N·m | `0.2`；积分旋转 wrench 范数上限 / integral rotational-wrench norm cap |
+| `cartesian_impedance_position_integral_leak_rate` | scalar | 1/s | `0.05`；历史以 `exp(-lambda dt)` 衰减 / exponential history decay |
+| `cartesian_impedance_position_integral_saturation_leak_rate` | scalar | 1/s | `0.1`；饱和时 10 s 时间常数 / 10 s saturation-decay time constant |
+| `cartesian_impedance_position_integral_external_force_gate` | scalar | N | `1.0`；进入推动状态 / enter pushed state |
+| `cartesian_impedance_position_integral_external_force_release` | scalar | N | `0.5`；低于后退出推动状态 / leave pushed state below this value |
+| `cartesian_impedance_position_integral_external_torque_gate` | scalar | N·m | `0.2`；进入推动状态 / enter pushed state |
+| `cartesian_impedance_position_integral_external_torque_release` | scalar | N·m | `0.1`；低于后退出推动状态 / leave pushed state below this value |
+| `cartesian_impedance_position_integral_requires_external_wrench` | bool | — | `true`；无新鲜观测时不累积 / no accumulation without a fresh observation |
 | `cartesian_impedance_nullspace_stiffness` | 1 or n | N·m/rad | `0.4`，仅 Nero / Nero only |
 | `cartesian_impedance_nullspace_damping` | 1 or n | N·m·s/rad | `0.1`，仅 Nero / Nero only |
 | `cartesian_impedance_joint_posture_stiffness` | 1 or n | N·m/rad | Nero=`[0,0.5,0.5,0.6,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
-| `nero_mount` | string | — | YAML 为 `side`；也可用 `horizontal` / YAML uses `side`; `horizontal` is valid |
+| `nero_mount` | string | — | YAML=`side`（横置，home=`[0°,90°,0°,0°,0°,0°,0°]`，顺序 J1→J2→J3…）；`horizontal`（平置，home=全零，顺序 J2→J1→J3→J4…） / `side`: J2 home at 90° in joint order; `horizontal`: all-zero home with J2 first |
 | `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
 | `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
 | `velocity_filter_time_constant` | scalar | s | `0.03`，一阶低通差分 / first-order filtered finite difference |
@@ -916,6 +955,23 @@ in joint space before the total torque clip.
   包络；奇异停止阈值也不能替代物理急停。 / Cartesian wrench norm limits act
   before `Jg^T` but do not replace the downstream per-joint total-torque/rate
   envelope; the singularity stop threshold does not replace a physical E-stop.
+- 位置积分默认关闭，也不是无界理想积分器。Nero 平移试验建议从
+  `Ki=2 N/(m·s)` 开始，附加力限制为 `0.75 N`。大推力、误差超过 `0.02 m`、
+  观测失效、wrench 饱和或关节总力矩饱和都会阻止继续蓄能；观测失效还会重新
+  锁定松手门控，恢复后必须再次低于松手阈值。饱和时已有状态按 10 s 时间常数
+  衰减。笛卡尔目标变化和模式进入/退出清零，但仅零空间关节参考
+  变化不会误清零。动量观测值不是经标定的力传感器读数，因此这些门限不能作为
+  碰撞安全认证。 / Position integration is default-off and is not an
+  unbounded ideal integrator. A Nero translation trial should start at
+  `Ki=2 N/(m·s)`, capped at `0.75 N`. A large push, error above `0.02 m`, stale
+  observation, wrench saturation, or total-joint-torque saturation prevents
+  further accumulation. A stale observation also re-arms the release gate, so
+  the wrench must fall below the release thresholds again after recovery.
+  Existing state decays with a 10 s time constant while saturated.
+  Cartesian-target and mode changes clear it, while a nullspace-
+  only joint-reference change does not. The momentum-observer estimate is not
+  a calibrated force sensor, so these gates are not certified collision
+  limits.
 - Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
   Nero nullspace gains must be nonnegative, and nullspace torque shares the
   same ±8 N·m total-torque envelope.
@@ -931,6 +987,25 @@ in joint space before the total torque clip.
 - `move_mit()` 对各轴依次调用，CAN 层不提供整批原子提交或逐帧 ACK。 /
   `move_mit()` is called sequentially per axis; CAN provides neither atomic
   batch commit nor per-frame acknowledgement here.
+- Space 归位不会一次下发整组目标。若正在阻抗模式，它先确认恢复普通
+  planned-position 模式，然后按安装姿态对应的顺序逐轴进入 home：
+  Nero 横置 `side` 为 `[0°,90°,0°,0°,0°,0°,0°]`，顺序为
+  J1→J2→J3→…；平置 `horizontal` 为全零，顺序为 J2→J1→J3→J4→…。
+  若 Nero 只有一个轴在软限位外，先将该轴最小幅度拉回最近软限位，再开始正式
+  顺序；多个轴越界仍拒绝。每轴反馈进入
+  `startup_home_tolerance` 后才移动下一轴，任一轴超过 `startup_home_timeout`
+  会触发电子急停；该流程按控制周期轮询，因此键盘 `E` 始终可响应。导纳和混合
+  模式继续锁定 home。 / Space homing never sends one whole-pose target. If
+  impedance is active, it first confirms restoration of normal planned-position
+  mode, then moves one joint at a time to the mount-specific home. Nero `side`
+  uses `[0°,90°,0°,0°,0°,0°,0°]` in J1→J2→J3→… order; `horizontal` uses all
+  zero in J2→J1→J3→J4→… order. If exactly
+  one Nero joint starts outside its soft limit, it first makes the minimum
+  inward recovery to the nearest limit; multiple out-of-limit joints are still
+  rejected. Each joint must enter `startup_home_tolerance` before the next moves;
+  exceeding `startup_home_timeout` on any joint triggers the electronic stop.
+  The sequence is polled once per control cycle, so keyboard `E` remains
+  responsive. Home remains locked during admittance and hybrid control.
 - 软件计算上限不是驱动器电流硬限，也不是力传感器测量。 / A software
   command limit is neither a drive-current hard limit nor a force-sensor
   measurement.
@@ -1300,6 +1375,15 @@ name `event3`, or full path `/dev/input/event3`; the startup script normalizes
 all forms to the full device path. The `device:=3` command-line shorthand uses
 the same rule.
 
+`scripts/start_nero.sh` 会先选择键盘输入，最后询问安装姿态：`1` 为横置 `side`，home 是
+`[0°,90°,0°,0°,0°,0°,0°]`、顺序 J1→J2→J3→…；`2` 为平置
+`horizontal`，home 是全零、顺序 J2→J1→J3→J4→…。显式传入
+`nero_mount:=side|horizontal` 时跳过该问题。 / `scripts/start_nero.sh` also
+asks for the mounting posture last, after keyboard input: `1` selects side mounting with J2 home at 90°
+and joint-number order; `2` selects horizontal mounting with an all-zero home
+and J2→J1→J3→… order. Passing
+`nero_mount:=side|horizontal` skips this prompt.
+
 YAML 默认保持 `nero_mount=side`。上面的指令只为本次平置实机启动显式传
 `nero_mount:=horizontal`，不修改默认。启动后保持机械臂被支撑，按 `I` 同时
 捕获当前末端位姿、7 轴零空间姿态和 J2/J3/J4 姿态参考，再进入 Cartesian MIT。
@@ -1428,6 +1512,10 @@ and disables keyboard motion commands.
 electronic stop is latched. After inspection, an operator may explicitly pass
 `true` for one launch. Initialization failures after enable actively call
 `disable()`, while a homing timeout triggers the electronic stop.
+当前 `start_nero.sh` 封装脚本显式传入 `true`，因此运行脚本前必须先检查机械臂和
+故障原因；直接 `ros2 launch` 仍使用上述 `false` 默认值。 / The current
+`start_nero.sh` wrapper explicitly passes `true`, so inspect the arm and fault
+cause before running it; direct `ros2 launch` retains the `false` default.
 
 UI 服务返回 `success=false` 时，先解析 response `message` 中的 schema-v1 JSON，
 再查看 `/arm/interaction_state` 的 `interaction_mode`、`arm_ready`、
@@ -1467,7 +1555,21 @@ checks.
    torque compose `torque_total_requested`; does sent feedforward plus feedback
    equal `torque_total_estimated`; and is a saturation reason present when
    clipping occurs?
-11. `/arm_dynamics_state` 是否约为 100 Hz，实验 `summary.period.mean` 是否接近
+11. Nero 位置积分的 `position_integral_active`、`position_integral_limited`、
+    `position_integral_pause_reason`、`position_integral_wrench` 与
+    `position_integral_next_wrench` 是否表明积分只在松手、近目标且未饱和时增长；
+    推动时应看到 `external_force_gate`/`external_torque_gate`，滞回区应看到
+    `external_wrench_hysteresis`，观测过期应看到
+    `external_wrench_unavailable` 并重新锁定 `position_integral_push_active`；
+    饱和时 `position_integral_decay_rate` 应为 `0.1 s^-1`。 / Do the Nero
+    position-integral signals show growth only after
+    release, near target, and without saturation? A push should report an
+    external force/torque gate, the hysteresis band should report
+    `external_wrench_hysteresis`; a stale observation should report
+    `external_wrench_unavailable` and re-arm `position_integral_push_active`;
+    and saturation should report a
+    `position_integral_decay_rate` of `0.1 s^-1`.
+12. `/arm_dynamics_state` 是否约为 100 Hz，实验 `summary.period.mean` 是否接近
     `0.01 s`；Nero v111/v112 的 `velocity` 是否为位置差分估计，其余 profile
     是否来自 SDK。 / Is
     `/arm_dynamics_state` near 100 Hz, with finite-difference `velocity` for
@@ -1588,6 +1690,14 @@ checks.
     `S_a=diag(0,0,0,0,0,1)`, verify `S_i=I-S_a` and `S_a S_i=0`, and explain
     why translational Z is the sixth rather than third component in this
     project.
+12. 显式启用 Nero 平移位置积分 `2 N/(m·s)`，依次模拟 `1.2 N -> 0.8 N ->
+    0.4 N` 推力和 wrench 饱和，验证控制器依次处于推动、滞回、松手状态，仅最后
+    一种未饱和周期会累积；附加力不超过 `0.75 N`，饱和衰减时间常数为 10 s。 /
+    Explicitly enable Nero translation position integration at `2 N/(m·s)`;
+    simulate `1.2 N -> 0.8 N -> 0.4 N` followed by wrench saturation, and
+    verify pushed, hysteresis, then released states. Only the released,
+    unsaturated case may accumulate; additive force stays below `0.75 N` and
+    saturation decay has a 10 s time constant.
 
 ## 16. 术语表 / Glossary
 

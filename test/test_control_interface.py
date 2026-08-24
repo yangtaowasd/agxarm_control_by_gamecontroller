@@ -448,8 +448,17 @@ def sample(position=None, target=None, wrench=None, velocity=None):
         ControlReference(
             target, np.zeros(6), np.zeros(6),
             np.zeros(6) if wrench is None else wrench,
+            wrench is not None,
         ),
     )
+
+
+def test_control_reference_four_argument_constructor_remains_compatible():
+    reference = ControlReference(
+        np.zeros(6), np.zeros(6), np.zeros(6), np.zeros(6)
+    )
+
+    assert reference.external_wrench_valid
 
 
 def test_engine_runs_joint_mit_through_one_interface():
@@ -600,6 +609,261 @@ def test_cartesian_adapter_reuses_unchanged_reference_kinematics():
 
     assert model.fk_calls == 5
     assert model.jacobian_calls == 5
+
+
+def test_cartesian_position_integral_is_weak_bounded_and_one_cycle_delayed():
+    class ZeroModel(IdentityModel):
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(6)
+
+    controller = CartesianImpedanceController(
+        ZeroModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        position_integral_gain=[0, 0, 0, 1000, 0, 0],
+        position_integral_deadband=[0, 0, 0, 0.001, 0, 0],
+        position_integral_max_force=0.05,
+        position_integral_max_torque=0.1,
+        position_integral_requires_external_wrench=True,
+    )
+    held = sample(target=[0, 0, 0, 0.01, 0, 0], wrench=np.zeros(6))
+
+    first = controller.step(held)
+    second = controller.step(held)
+    third = controller.step(held)
+
+    assert first.signals["position_integral_pause_reason"] == (
+        "reference_changed"
+    )
+    assert second.signals["position_integral_limited"]
+    assert second.signals["position_integral_next_wrench"] == pytest.approx(
+        [0, 0, 0, 0.05, 0, 0]
+    )
+    assert third.signals["position_integral_wrench"] == pytest.approx(
+        [0, 0, 0, 0.05, 0, 0]
+    )
+    assert third.command.feedforward == pytest.approx(
+        [0, 0, 0, 0.05, 0, 0]
+    )
+
+
+def test_cartesian_position_integral_pauses_for_push_and_saturation():
+    class ZeroModel(IdentityModel):
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(6)
+
+    controller = CartesianImpedanceController(
+        ZeroModel(),
+        stiffness=[0, 0, 0, 10, 0, 0],
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        maximum_force=0.05,
+        position_integral_gain=[0, 0, 0, 2, 0, 0],
+        position_integral_external_force_gate=1.0,
+        position_integral_requires_external_wrench=True,
+    )
+    target = [0, 0, 0, 0.01, 0, 0]
+    controller.step(sample(target=target, wrench=np.zeros(6)))
+
+    unavailable = controller.step(sample(target=target))
+    pushed = controller.step(sample(
+        target=target, wrench=[0, 0, 0, 2.0, 0, 0]
+    ))
+    hysteresis = controller.step(sample(
+        target=target, wrench=[0, 0, 0, 0.8, 0, 0]
+    ))
+    saturated = controller.step(sample(
+        target=target, wrench=[0, 0, 0, 0.4, 0, 0]
+    ))
+
+    assert unavailable.signals["position_integral_pause_reason"] == (
+        "external_wrench_unavailable"
+    )
+    assert pushed.signals["position_integral_pause_reason"] == (
+        "external_force_gate"
+    )
+    assert hysteresis.signals["position_integral_pause_reason"] == (
+        "external_wrench_hysteresis"
+    )
+    assert hysteresis.signals["position_integral_push_active"]
+    assert saturated.signals["position_integral_pause_reason"] == (
+        "wrench_saturated"
+    )
+    assert not saturated.signals["position_integral_push_active"]
+    assert saturated.signals["position_integral_next_wrench"] == (
+        pytest.approx(np.zeros(6))
+    )
+
+    controller.reset(sample(target=target).state)
+    controller.step(sample(
+        target=target, wrench=[0, 0, 0, 0.8, 0, 0]
+    ))
+    initial_hysteresis = controller.step(sample(
+        target=target, wrench=[0, 0, 0, 0.8, 0, 0]
+    ))
+    assert initial_hysteresis.signals[
+        "position_integral_pause_reason"
+    ] == "external_wrench_hysteresis"
+
+
+def test_cartesian_position_integral_rearms_after_wrench_becomes_unavailable():
+    class ZeroModel(IdentityModel):
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(6)
+
+    controller = CartesianImpedanceController(
+        ZeroModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        position_integral_gain=[0, 0, 0, 2, 0, 0],
+        position_integral_external_force_gate=1.0,
+        position_integral_external_force_release=0.5,
+        position_integral_requires_external_wrench=True,
+    )
+    target = [0, 0, 0, 0.01, 0, 0]
+    controller.step(sample(target=target, wrench=np.zeros(6)))
+    controller.step(sample(target=target, wrench=np.zeros(6)))
+
+    unavailable = controller.step(sample(target=target))
+    hysteresis = controller.step(sample(
+        target=target, wrench=[0, 0, 0, 0.8, 0, 0]
+    ))
+
+    assert unavailable.signals["position_integral_pause_reason"] == (
+        "external_wrench_unavailable"
+    )
+    assert unavailable.signals["position_integral_push_active"]
+    assert hysteresis.signals["position_integral_pause_reason"] == (
+        "external_wrench_hysteresis"
+    )
+    assert hysteresis.signals["position_integral_push_active"]
+
+
+def test_cartesian_position_integral_resets_with_controller_and_reference():
+    class ZeroModel(IdentityModel):
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(6)
+
+    controller = CartesianImpedanceController(
+        ZeroModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        position_integral_gain=[0, 0, 0, 2, 0, 0],
+    )
+    held = sample(target=[0, 0, 0, 0.01, 0, 0])
+    controller.step(held)
+    accumulated = controller.step(held)
+    assert accumulated.signals["position_integral_next_wrench"][3] > 0.0
+
+    changed = controller.step(sample(target=[0, 0, 0, 0.02, 0, 0]))
+    assert changed.signals["position_integral_wrench"] == pytest.approx(
+        np.zeros(6)
+    )
+    controller.step(held)
+    controller.step(held)
+    controller.reset(held.state)
+    reset = controller.step(held)
+    assert reset.signals["position_integral_wrench"] == pytest.approx(
+        np.zeros(6)
+    )
+
+
+def test_cartesian_position_integral_uses_ten_second_saturation_decay():
+    class ZeroModel(IdentityModel):
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(6)
+
+    controller = CartesianImpedanceController(
+        ZeroModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(6) * 8.0,
+        maximum_force=0.01,
+        position_integral_gain=[0, 0, 0, 1000, 0, 0],
+        position_integral_max_force=0.1,
+        position_integral_max_torque=0.1,
+        position_integral_leak_rate=0.05,
+        position_integral_saturation_leak_rate=0.1,
+    )
+    held = sample(target=[0, 0, 0, 0.01, 0, 0])
+    controller.step(held)
+    accumulated = controller.step(held)
+    state_before_saturation = accumulated.signals[
+        "position_integral_next_wrench"
+    ][3]
+
+    saturated = controller.step(held)
+
+    assert saturated.signals["position_integral_pause_reason"] == (
+        "wrench_saturated"
+    )
+    assert saturated.signals["position_integral_decay_rate"] == pytest.approx(
+        0.1
+    )
+    assert saturated.signals["position_integral_next_wrench"][3] == (
+        pytest.approx(state_before_saturation * np.exp(-0.1 * held.period))
+    )
+
+
+def test_cartesian_integral_survives_joint_only_reference_change():
+    class RedundantModel:
+        joint_limits = np.asarray([[-1.0, 1.0]] * 7)
+
+        def forward_kinematics(self, joints):
+            pose = np.eye(4)
+            pose[:3, 3] = np.asarray(joints)[3:6]
+            return pose
+
+        def space_jacobian(self, joints):
+            del joints
+            return np.hstack((np.eye(6), np.zeros((6, 1))))
+
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.zeros(7)
+
+    def redundant_sample(target):
+        return ControlInput(
+            12.5,
+            0.01,
+            ControlState(np.zeros(7), np.zeros(7), np.zeros(7)),
+            ControlReference(
+                np.asarray(target),
+                np.zeros(7),
+                np.zeros(7),
+                np.zeros(6),
+                False,
+            ),
+        )
+
+    controller = CartesianImpedanceController(
+        RedundantModel(),
+        stiffness=np.zeros(6),
+        damping=np.zeros(6),
+        torque_limit=np.ones(7) * 8.0,
+        position_integral_gain=[0, 0, 0, 2, 0, 0],
+    )
+    target = np.asarray([0, 0, 0, 0.01, 0, 0, 0], dtype=float)
+    held = redundant_sample(target)
+    controller.step(held)
+    accumulated = controller.step(held)
+    assert accumulated.signals["position_integral_next_wrench"][3] > 0.0
+
+    target[6] = 0.2
+    joint_only_change = controller.step(redundant_sample(target))
+
+    assert joint_only_change.signals["position_integral_pause_reason"] == (
+        "active"
+    )
+    assert joint_only_change.signals["position_integral_wrench"][3] > 0.0
 
 
 def test_admittance_adapter_produces_reanchored_mit_command():

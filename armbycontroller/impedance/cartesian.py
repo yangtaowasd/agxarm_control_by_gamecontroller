@@ -19,6 +19,7 @@ class CartesianImpedanceCommand:
     pose_error: np.ndarray
     desired_twist: np.ndarray
     measured_twist: np.ndarray
+    integral_wrench: np.ndarray
     raw_commanded_wrench: np.ndarray
     commanded_wrench: np.ndarray
     wrench_limited: bool
@@ -195,6 +196,7 @@ def cartesian_impedance_command(
     nullspace_damping=0.0,
     model_scale=1.0,
     model_torque_override=None,
+    integral_wrench=None,
     maximum_force=math.inf,
     maximum_torque=math.inf,
 ):
@@ -206,7 +208,7 @@ def cartesian_impedance_command(
 
         e_x     = [Log(R_d R.T)^vee; p_d - p]
         x_dot   = J_g(q) q_dot
-        wrench  = K_x e_x + D_x (x_dot_d - x_dot)
+        wrench  = K_x e_x + D_x (x_dot_d - x_dot) + wrench_I
         tau_x   = J_g(q).T wrench
         tau_0   = K_0 (q_0 - q) + D_0 (qdot_0 - qdot)
         N_tau   = I - J.T (J M^-1 J.T)^+ J M^-1
@@ -237,6 +239,10 @@ def cartesian_impedance_command(
     target_twist = spatial_vector(desired_twist, "desired_twist")
     stiffness = _impedance_matrix(cartesian_stiffness, "stiffness")
     damping = _impedance_matrix(cartesian_damping, "damping")
+    integral = spatial_vector(
+        np.zeros(6) if integral_wrench is None else integral_wrench,
+        "integral_wrench",
+    )
 
     jacobian, current_pose = geometric_jacobian(
         kinematic_model, positions
@@ -246,6 +252,7 @@ def cartesian_impedance_command(
     raw_wrench = (
         stiffness @ pose_error
         + damping @ (target_twist - measured_twist)
+        + integral
     )
     wrench, wrench_limited = limit_cartesian_wrench(
         raw_wrench, maximum_force, maximum_torque
@@ -359,6 +366,7 @@ def cartesian_impedance_command(
         pose_error=pose_error.copy(),
         desired_twist=target_twist.copy(),
         measured_twist=measured_twist.copy(),
+        integral_wrench=integral.copy(),
         raw_commanded_wrench=raw_wrench.copy(),
         commanded_wrench=wrench.copy(),
         wrench_limited=wrench_limited,

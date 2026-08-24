@@ -167,6 +167,51 @@ class ArmKeyboardController(
         self.cartesian_max_torque = float(
             self.get_parameter("cartesian_impedance_max_torque").value
         )
+        self.cartesian_position_integral_gain = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_position_integral_gain"
+                ).value,
+                6,
+                "cartesian_impedance_position_integral_gain",
+            ),
+            dtype=float,
+        )
+        self.cartesian_position_integral_deadband = np.asarray(
+            expand_joint_values(
+                self.get_parameter(
+                    "cartesian_impedance_position_integral_deadband"
+                ).value,
+                6,
+                "cartesian_impedance_position_integral_deadband",
+            ),
+            dtype=float,
+        )
+        integral_scalar_names = (
+            "max_rotation_error",
+            "max_translation_error",
+            "max_force",
+            "max_torque",
+            "leak_rate",
+            "saturation_leak_rate",
+            "external_force_gate",
+            "external_force_release",
+            "external_torque_gate",
+            "external_torque_release",
+        )
+        for suffix in integral_scalar_names:
+            setattr(
+                self,
+                f"cartesian_position_integral_{suffix}",
+                float(self.get_parameter(
+                    f"cartesian_impedance_position_integral_{suffix}"
+                ).value),
+            )
+        self.cartesian_position_integral_requires_external_wrench = bool(
+            self.get_parameter(
+                "cartesian_impedance_position_integral_requires_external_wrench"
+            ).value
+        )
         self.cartesian_nullspace_stiffness = np.asarray(
             expand_joint_values(
                 self.get_parameter(
@@ -421,6 +466,25 @@ class ArmKeyboardController(
             )
         if self.cartesian_max_force <= 0.0 or self.cartesian_max_torque <= 0.0:
             raise ValueError("Cartesian wrench limits must be positive")
+        if (
+            np.any(self.cartesian_position_integral_gain < 0.0)
+            or np.any(self.cartesian_position_integral_deadband < 0.0)
+            or self.cartesian_position_integral_max_rotation_error <= 0.0
+            or self.cartesian_position_integral_max_translation_error <= 0.0
+            or self.cartesian_position_integral_max_force <= 0.0
+            or self.cartesian_position_integral_max_torque <= 0.0
+            or self.cartesian_position_integral_leak_rate < 0.0
+            or self.cartesian_position_integral_saturation_leak_rate <= 0.0
+            or self.cartesian_position_integral_external_force_gate <= 0.0
+            or self.cartesian_position_integral_external_force_release <= 0.0
+            or self.cartesian_position_integral_external_torque_gate <= 0.0
+            or self.cartesian_position_integral_external_torque_release <= 0.0
+            or self.cartesian_position_integral_external_force_release
+            >= self.cartesian_position_integral_external_force_gate
+            or self.cartesian_position_integral_external_torque_release
+            >= self.cartesian_position_integral_external_torque_gate
+        ):
+            raise ValueError("Cartesian position-integral settings are invalid")
         if any(
             not 0.0 <= value <= 500.0
             for value in self.admittance_mit_kp

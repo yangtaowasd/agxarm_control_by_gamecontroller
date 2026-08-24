@@ -91,6 +91,10 @@ class ControlCycleMixin:
             return
         if self.emergency_stopped:
             return
+        if getattr(self, "_sequential_home_active", False):
+            if self.poll_sequential_home() is False:
+                self.get_logger().error("SPACE sequential home failed")
+            return
         if getattr(self, "interaction_transitioning", False):
             return
 
@@ -131,8 +135,24 @@ class ControlCycleMixin:
         if update.home_requested:
             self.ik_target_position = None
             self.ik_target_rotation = None
-            if update.target_changed:
-                self.send_target("home")
+            if not self._enter_normal_interaction_mode(
+                "SPACE sequential home"
+            ):
+                self.get_logger().error(
+                    "cannot start sequential home: normal mode was not reached"
+                )
+                return
+            if not self.execute_motion:
+                self.jog.sync_target([0.0] * self.joint_count)
+                self.get_logger().info("dry-run sequential home complete")
+                return
+            if not self.arm_ready:
+                self.get_logger().warning(
+                    "arm is not ready; sequential home skipped"
+                )
+                return
+            if not self.start_sequential_home():
+                self.get_logger().error("SPACE sequential home failed")
             return
 
         if self.control_mode == "ik":
@@ -293,6 +313,20 @@ class ControlCycleMixin:
     def _cartesian_mit_tick(self, feedback=None):
         """Evaluate ``J.T F + C*dq + g`` and send it only through t_ff."""
         sample = self._next_control_input(feedback)
+        if self._external_wrench_is_fresh(sample.timestamp):
+            reference = sample.reference
+            sample = ControlInput(
+                sample.timestamp,
+                sample.period,
+                sample.state,
+                ControlReference(
+                    reference.position,
+                    reference.velocity,
+                    reference.acceleration,
+                    self.latest_external_wrench,
+                    True,
+                ),
+            )
         result = self._get_control_engine("cartesian_impedance").step(
             "cartesian_impedance", sample
         )
@@ -312,11 +346,17 @@ class ControlCycleMixin:
                 throttle_duration_sec=1.0,
             )
         self.get_logger().info(
-            "Cartesian MIT error=%s wrench=%s task=%s null=%s posture=%s "
-            "model=%s total=%s sent=%s N·m"
+            "Cartesian MIT error=%s wrench=%s integral=%s I_state=%s "
+            "I_status=%s task=%s null=%s posture=%s model=%s total=%s "
+            "sent=%s N·m"
             % (
                 np.round(raw.pose_error, 4).tolist(),
                 np.round(raw.commanded_wrench, 3).tolist(),
+                np.round(raw.integral_wrench, 3).tolist(),
+                np.round(
+                    result.signals["position_integral_next_wrench"], 3
+                ).tolist(),
+                result.signals["position_integral_pause_reason"],
                 np.round(raw.task_torque, 3).tolist(),
                 np.round(raw.nullspace_torque, 3).tolist(),
                 np.round(

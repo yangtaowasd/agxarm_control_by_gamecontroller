@@ -202,6 +202,50 @@ def declare_controller_parameters(node):
     node.declare_parameter("cartesian_impedance_max_force", 10.0)
     node.declare_parameter("cartesian_impedance_max_torque", 4.0)
     node.declare_parameter(
+        "cartesian_impedance_position_integral_gain",
+        [0.0],
+        scalar_or_array,
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_deadband",
+        [0.0],
+        scalar_or_array,
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_max_rotation_error", 0.05
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_max_translation_error", 0.02
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_max_force", 0.75
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_max_torque", 0.2
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_leak_rate", 0.05
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_saturation_leak_rate", 0.1
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_external_force_gate", 1.0
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_external_force_release", 0.5
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_external_torque_gate", 0.2
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_external_torque_release", 0.1
+    )
+    node.declare_parameter(
+        "cartesian_impedance_position_integral_requires_external_wrench",
+        True,
+    )
+    node.declare_parameter(
         "cartesian_impedance_nullspace_stiffness",
         [0.4],
         scalar_or_array,

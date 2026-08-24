@@ -89,12 +89,7 @@ class ArmJointJogState:
         admittance_toggle = rising[KEY_ADMITTANCE_TOGGLE]
         hybrid_toggle = rising[KEY_HYBRID_TOGGLE]
         changed = False
-        if home:
-            target = [
-                _clamp(0.0, low, high) for low, high in self.joint_limits
-            ]
-            changed, self.target_joints = target != self.target_joints, target
-        elif not any((
+        if not home and not any((
             estop,
             toggle,
             impedance_toggle,
