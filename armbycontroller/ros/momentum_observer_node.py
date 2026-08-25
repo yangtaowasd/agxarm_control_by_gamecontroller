@@ -15,6 +15,10 @@ from armbycontroller.ik.core import resolve_tool_urdf_path
 from armbycontroller.observers.momentum import (
     GeneralizedMomentumObserver,
 )
+from armbycontroller.modeling.gravity_schedule import ScheduledGravityModel
+from armbycontroller.modeling.gravity_schedule import (
+    create_nero_horizontal_gravity_schedule,
+)
 from armbycontroller.modeling.screw_model import project_gravity_vector
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 
@@ -39,6 +43,24 @@ class MomentumObserverNode(Node):
         self.declare_parameter("nero_mount", "")
         self.declare_parameter("tool_configuration", "auto")
         self.declare_parameter("gravity_vector", [0.0, 0.0, -9.80665])
+        self.declare_parameter(
+            "nero_horizontal_gravity_schedule_enabled", True
+        )
+        self.declare_parameter(
+            "nero_horizontal_gravity_transition_angle", 0.03490658503988659
+        )
+        self.declare_parameter(
+            "nero_horizontal_gravity_j2_scale", [1.0, 1.0]
+        )
+        self.declare_parameter(
+            "nero_horizontal_gravity_j2_bias_nm", [0.0, 0.0]
+        )
+        self.declare_parameter(
+            "nero_horizontal_gravity_j4_scale", [1.0, 1.0]
+        )
+        self.declare_parameter(
+            "nero_horizontal_gravity_j4_bias_nm", [0.0, 0.0]
+        )
         self.declare_parameter(
             "dynamics_state_topic", "/arm_dynamics_state"
         )
@@ -112,6 +134,32 @@ class MomentumObserverNode(Node):
             self.joint_count,
             gravity,
         )
+        if (
+            self.robot_model == "nero"
+            and nero_mount == "horizontal"
+            and bool(self.get_parameter(
+                "nero_horizontal_gravity_schedule_enabled"
+            ).value)
+        ):
+            schedule = create_nero_horizontal_gravity_schedule(
+                self.joint_count,
+                float(self.get_parameter(
+                    "nero_horizontal_gravity_transition_angle"
+                ).value),
+                self.get_parameter(
+                    "nero_horizontal_gravity_j2_scale"
+                ).value,
+                self.get_parameter(
+                    "nero_horizontal_gravity_j2_bias_nm"
+                ).value,
+                self.get_parameter(
+                    "nero_horizontal_gravity_j4_scale"
+                ).value,
+                self.get_parameter(
+                    "nero_horizontal_gravity_j4_bias_nm"
+                ).value,
+            )
+            self.model = ScheduledGravityModel(self.model, schedule)
         self.observer = GeneralizedMomentumObserver(
             self.joint_count, gain, self.maximum_period
         )
@@ -135,13 +183,14 @@ class MomentumObserverNode(Node):
         )
         self.get_logger().info(
             "passive momentum observer ready: model=%s rate=%.1f Hz "
-            "gain=%s 1/s input=%s output=%s"
+            "gain=%s 1/s input=%s output=%s gravity_schedule=%s"
             % (
                 model_path,
                 self.rate,
                 np.round(self.observer.gain, 3).tolist(),
                 input_topic,
                 output_topic,
+                isinstance(self.model, ScheduledGravityModel),
             )
         )
 

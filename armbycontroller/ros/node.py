@@ -26,6 +26,10 @@ from armbycontroller.control.mit import (
     limit_mit_combined_torque as _limit_mit,
 )
 from armbycontroller.impedance.cartesian import cartesian_impedance_diagonals
+from armbycontroller.modeling.gravity_schedule import ScheduledGravityModel
+from armbycontroller.modeling.gravity_schedule import (
+    create_nero_horizontal_gravity_schedule,
+)
 from armbycontroller.modeling.screw_model import UrdfScrewModel
 from armbycontroller.ik.core import AgxIkEngine
 from armbycontroller.ik.core import create_screw_solver
@@ -123,6 +127,44 @@ class ArmKeyboardController(
         self.mit_gravity_scale = float(
             self.get_parameter("mit_gravity_scale").value
         )
+        self.nero_horizontal_gravity_schedule_enabled = bool(
+            self.get_parameter(
+                "nero_horizontal_gravity_schedule_enabled"
+            ).value
+        )
+        self.nero_horizontal_gravity_transition_angle = float(
+            self.get_parameter(
+                "nero_horizontal_gravity_transition_angle"
+            ).value
+        )
+        self.nero_horizontal_gravity_j2_scale = expand_joint_values(
+            self.get_parameter(
+                "nero_horizontal_gravity_j2_scale"
+            ).value,
+            2,
+            "nero_horizontal_gravity_j2_scale",
+        )
+        self.nero_horizontal_gravity_j2_bias_nm = expand_joint_values(
+            self.get_parameter(
+                "nero_horizontal_gravity_j2_bias_nm"
+            ).value,
+            2,
+            "nero_horizontal_gravity_j2_bias_nm",
+        )
+        self.nero_horizontal_gravity_j4_scale = expand_joint_values(
+            self.get_parameter(
+                "nero_horizontal_gravity_j4_scale"
+            ).value,
+            2,
+            "nero_horizontal_gravity_j4_scale",
+        )
+        self.nero_horizontal_gravity_j4_bias_nm = expand_joint_values(
+            self.get_parameter(
+                "nero_horizontal_gravity_j4_bias_nm"
+            ).value,
+            2,
+            "nero_horizontal_gravity_j4_bias_nm",
+        )
         self.mit_gravity_torque_limit = (
             self.interaction_safety.torque_limit.tolist()
         )
@@ -209,7 +251,8 @@ class ArmKeyboardController(
             )
         self.cartesian_position_integral_requires_external_wrench = bool(
             self.get_parameter(
-                "cartesian_impedance_position_integral_requires_external_wrench"
+                "cartesian_impedance_position_integral_requires_"
+                "external_wrench"
             ).value
         )
         self.cartesian_nullspace_stiffness = np.asarray(
@@ -484,7 +527,9 @@ class ArmKeyboardController(
             or self.cartesian_position_integral_external_torque_release
             >= self.cartesian_position_integral_external_torque_gate
         ):
-            raise ValueError("Cartesian position-integral settings are invalid")
+            raise ValueError(
+                "Cartesian position-integral settings are invalid"
+            )
         if any(
             not 0.0 <= value <= 500.0
             for value in self.admittance_mit_kp
@@ -590,6 +635,31 @@ class ArmKeyboardController(
                 self.joint_count,
                 self.gravity_vector,
             )
+            if (
+                self.robot_model == "nero"
+                and self.nero_mount == "horizontal"
+                and self.nero_horizontal_gravity_schedule_enabled
+            ):
+                j2_scale = self.nero_horizontal_gravity_j2_scale
+                j2_bias = self.nero_horizontal_gravity_j2_bias_nm
+                j4_scale = self.nero_horizontal_gravity_j4_scale
+                j4_bias = self.nero_horizontal_gravity_j4_bias_nm
+                schedule = create_nero_horizontal_gravity_schedule(
+                    self.joint_count,
+                    self.nero_horizontal_gravity_transition_angle,
+                    j2_scale,
+                    j2_bias,
+                    j4_scale,
+                    j4_bias,
+                )
+                self.gravity_model = ScheduledGravityModel(
+                    self.gravity_model, schedule
+                )
+                self.get_logger().info(
+                    "Nero horizontal gravity scheduling active: "
+                    "J2/J4 [negative, positive], smooth transition="
+                    f"{math.degrees(schedule.transition_angle):.3f} deg"
+                )
             self.get_logger().info(
                 "URDF inverse dynamics ready: "
                 f"{equipped_urdf_path}; "

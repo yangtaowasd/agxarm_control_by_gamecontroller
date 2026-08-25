@@ -272,6 +272,16 @@ def test_robot_configs_separate_nero_and_piper_parameters():
     assert "reset_emergency_stop_on_start:=true" in nero_start
     assert "tool_configuration: none" in nero
     assert "nero_velocity_estimation_enabled: true" in nero
+    assert "nero_horizontal_gravity_schedule_enabled: true" in nero
+    assert "nero_horizontal_gravity_transition_angle" in nero
+    assert "nero_horizontal_gravity_j2_scale: [1.0, 1.0]" in nero
+    assert "nero_horizontal_gravity_j2_bias_nm: [0.0, 0.0]" in nero
+    assert "nero_horizontal_gravity_j4_scale: [1.0, 1.0]" in nero
+    assert "nero_horizontal_gravity_j4_bias_nm: [0.0, 0.0]" in nero
+    assert nero.count("nero_horizontal_gravity_j2_scale") == 2
+    assert nero.count("nero_horizontal_gravity_j4_scale") == 2
+    assert "nero_horizontal_gravity_j2_scale" in launch
+    assert "nero_horizontal_gravity_j4_scale" in launch
     assert "admittance_mode: zero_force" in nero
     assert "admittance_virtual_mass" in nero
     assert "admittance_zero_force_damping" in nero

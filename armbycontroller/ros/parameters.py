@@ -192,6 +192,24 @@ def declare_controller_parameters(node):
     node.declare_parameter("mit_gravity_compensation_enabled", True)
     node.declare_parameter("gravity_urdf_path", "")
     node.declare_parameter("mit_gravity_scale", 1.0)
+    node.declare_parameter(
+        "nero_horizontal_gravity_schedule_enabled", True
+    )
+    node.declare_parameter(
+        "nero_horizontal_gravity_transition_angle", 0.03490658503988659
+    )
+    node.declare_parameter(
+        "nero_horizontal_gravity_j2_scale", [1.0, 1.0]
+    )
+    node.declare_parameter(
+        "nero_horizontal_gravity_j2_bias_nm", [0.0, 0.0]
+    )
+    node.declare_parameter(
+        "nero_horizontal_gravity_j4_scale", [1.0, 1.0]
+    )
+    node.declare_parameter(
+        "nero_horizontal_gravity_j4_bias_nm", [0.0, 0.0]
+    )
     node.declare_parameter("cartesian_impedance_rotation_stiffness", 0.4)
     node.declare_parameter(
         "cartesian_impedance_base_z_rotation_stiffness", 4.0

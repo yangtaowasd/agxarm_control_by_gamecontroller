@@ -29,6 +29,13 @@ from armbycontroller.control import control_sample
 from armbycontroller.impedance.controllers import CartesianImpedanceController
 from armbycontroller.impedance.controllers import JointMitController
 from armbycontroller.ik.screw import BoundedScrewVelocityIk
+from armbycontroller.modeling.gravity_schedule import ScheduledGravityModel
+from armbycontroller.modeling.gravity_schedule import (
+    SignedGravityCalibration,
+)
+from armbycontroller.modeling.gravity_schedule import (
+    SmoothJointGravitySchedule,
+)
 
 
 class IdentityModel:
@@ -141,6 +148,80 @@ def test_shared_model_compensator_selects_gravity_bias_and_dynamics():
     assert model.inverse_calls[0][2] == pytest.approx(np.zeros(6))
     assert dynamics.requested_torque == pytest.approx([4.0] * 6)
     assert model.inverse_calls[1][2] == pytest.approx(acceleration)
+
+
+def test_horizontal_gravity_schedule_blends_signed_j2_j4_calibration():
+    schedule = SmoothJointGravitySchedule(
+        7,
+        transition_angle=np.deg2rad(2.0),
+        calibrations={
+            1: SignedGravityCalibration(0.8, 1.2, -0.1, 0.1),
+            3: SignedGravityCalibration(0.5, 1.5, -0.2, 0.2),
+        },
+    )
+    raw = np.ones(7)
+    negative = np.zeros(7)
+    negative[[1, 3]] = np.deg2rad(-3.0)
+    positive = -negative
+
+    assert schedule.apply(negative, raw) == pytest.approx(
+        [1.0, 0.7, 1.0, 0.3, 1.0, 1.0, 1.0]
+    )
+    assert schedule.apply(positive, raw) == pytest.approx(
+        [1.0, 1.3, 1.0, 1.7, 1.0, 1.0, 1.0]
+    )
+    assert schedule.apply(np.zeros(7), raw) == pytest.approx(raw)
+
+
+def test_scheduled_gravity_model_preserves_non_gravity_dynamics():
+    class DynamicsModel:
+        marker = "delegated"
+
+        def gravity_torque(self, position):
+            del position
+            return np.arange(1.0, 8.0)
+
+        def inverse_dynamics(self, position, velocity, acceleration):
+            del position, velocity, acceleration
+            return np.arange(1.0, 8.0) + 10.0
+
+        def momentum_observer_terms(self, position, velocity):
+            del position, velocity
+            return np.ones(7) * 5.0, np.arange(1.0, 8.0) + 20.0
+
+    schedule = SmoothJointGravitySchedule(
+        7,
+        transition_angle=np.deg2rad(2.0),
+        calibrations={
+            1: SignedGravityCalibration(0.5, 1.5, 0.0, 0.0),
+            3: SignedGravityCalibration(1.0, 1.0, -0.2, 0.2),
+        },
+    )
+    model = ScheduledGravityModel(DynamicsModel(), schedule)
+    position = np.zeros(7)
+    position[1] = np.deg2rad(3.0)
+    position[3] = np.deg2rad(-3.0)
+
+    gravity = model.gravity_torque(position)
+    total = model.inverse_dynamics(position, np.zeros(7), np.zeros(7))
+    momentum, beta = model.momentum_observer_terms(
+        position, np.zeros(7)
+    )
+
+    assert gravity == pytest.approx([1.0, 3.0, 3.0, 3.8, 5.0, 6.0, 7.0])
+    assert total - gravity == pytest.approx([10.0] * 7)
+    assert momentum == pytest.approx([5.0] * 7)
+    assert beta - gravity == pytest.approx([20.0] * 7)
+    assert model.marker == "delegated"
+
+
+def test_horizontal_gravity_schedule_rejects_unsafe_parameters():
+    with pytest.raises(ValueError, match=r"\[0, 2\]"):
+        SignedGravityCalibration(negative_scale=2.1)
+    with pytest.raises(ValueError, match=r"\[-2, 2\]"):
+        SignedGravityCalibration(positive_bias_nm=2.1)
+    with pytest.raises(ValueError, match=r"\[0.5, 15\]"):
+        SmoothJointGravitySchedule(7, np.deg2rad(0.1), {})
 
 
 def test_shared_mit_envelope_reports_one_torque_decomposition():

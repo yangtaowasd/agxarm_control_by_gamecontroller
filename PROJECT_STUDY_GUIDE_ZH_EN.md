@@ -498,6 +498,33 @@ stays within each joint limit. If PD feedback alone
 cannot be counteracted within the allowed `tau_ff`, the cycle is rejected and
 the controller exits to a normal hold.
 
+#### 5.9.1 平置重力平滑调度 / Smooth horizontal gravity scheduling
+
+Nero 平置安装可对 J2、J4 独立使用正负角经验标定。令过渡半宽为 `Delta`，对每个
+被调度关节计算： / A horizontal-mounted Nero can independently apply signed
+empirical calibration to J2 and J4. With transition half-width `Delta`, each
+scheduled joint uses:
+
+```text
+x = clip((q + Delta) / (2 Delta), 0, 1)
+w = x^2 (3 - 2x)
+k(q) = (1-w) k_negative + w k_positive
+b(q) = (1-w) b_negative + w b_positive
+tau_g_scheduled = k(q) tau_g_URDF + b(q)
+```
+
+默认 `Delta=2 deg`、`k_negative=k_positive=1`、`b_negative=b_positive=0`，
+所以未标定时与原 URDF 完全一致。J2、J4不是 2×2 四象限耦合表；每轴只调度自己
+的重力分量。完整逆动力学按
+`tau_ID_scheduled=tau_ID-tau_g_URDF+tau_g_scheduled` 替换重力，因此惯性和
+科氏项不变。控制器和独立动量观测器包装同一个算法，避免把经验修正误报为外力。
+/ Defaults are `Delta=2 deg`, unit scales, and zero biases, leaving an
+uncalibrated system identical to raw URDF gravity. J2 and J4 are independent,
+not a coupled 2-by-2 quadrant table. Full inverse dynamics replaces only
+gravity via `tau_ID_scheduled=tau_ID-tau_g_URDF+tau_g_scheduled`, preserving
+inertia and Coriolis terms. The controller and separate momentum observer use
+the same algorithm so empirical correction is not misreported as contact.
+
 ### 5.10 Twist 层互补混合控制 / Complementary Twist-level hybrid control
 
 混合模式仍遵守 `[rx,ry,rz,x,y,z]=[角;线]`。令 `R_bc` 为柔顺参考系到基座的
@@ -774,10 +801,11 @@ profile is used.
 | `armbycontroller/control/smith_predictor.py` | 严格实现 `y_hat=y+y0-yd` 的离散状态空间 Smith 预估器；尚未接入控制周期 / Discrete state-space Smith predictor implementing `y_hat=y+y0-yd`; not yet wired into the control cycle |
 | `armbycontroller/friction/stribeck.py` | 逐关节经典静态 Stribeck 摩擦公式、标量广播和物理参数校验 / Per-joint classical static Stribeck equation, scalar broadcasting, and physical-parameter validation |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
-| `armbycontroller/experiment/static_friction.py` | 关节测试顺序、反馈门控力矩阶梯、窗口估速/反馈中位数和静摩擦/零偏估计的无硬件纯函数 / Hardware-free joint ordering, feedback-gated torque steps, windowed speed/feedback median, and stiction/offset estimation |
+| `armbycontroller/experiment/static_friction.py` | 关节测试顺序、反馈门控力矩阶梯、窗口估速/反馈中位数、静摩擦估计和原子 YAML 结果存储 / Hardware-free joint ordering, feedback-gated torque steps, windowed speed/feedback median, stiction estimation, and atomic YAML result storage |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射和不中断使能的第二条 profile 连接 / Shared DEFAULT probe, version mapping, and profile-specific second connection without interrupting enable |
 | `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和 Nero 低通差分速度估计 / Side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered Nero velocity estimation |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
+| `armbycontroller/modeling/gravity_schedule.py` | Nero 平置 J2/J4 正负区 `scale+bias` 平滑调度，以及只替换重力分量的动力学模型包装 / Smooth signed J2/J4 `scale+bias` scheduling for horizontal Nero and a dynamics-model decorator that replaces gravity only |
 | `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
 | `armbycontroller/ik/screw.py` | 完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK，共享 PoE 模型 / Full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over one PoE model |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
@@ -867,6 +895,12 @@ implementation.
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
 | `nero_mount` | string | — | YAML=`side`（横置，home=`[0°,90°,0°,0°,0°,0°,0°]`，顺序 J1→J2→J3…）；`horizontal`（平置，home=全零，顺序 J2→J1→J3→J4…） / `side`: J2 home at 90° in joint order; `horizontal`: all-zero home with J2 first |
+| `nero_horizontal_gravity_schedule_enabled` | bool | — | `true`；仅 `nero_mount=horizontal` 生效 / active only for horizontal Nero |
+| `nero_horizontal_gravity_transition_angle` | scalar | rad | `0.0349066`（2°），范围 0.5°–15° / smoothstep half-width |
+| `nero_horizontal_gravity_j2_scale` | 2 | — | `[1,1]`，顺序 `[q2<0,q2>0]`，每项范围 `[0,2]` / signed J2 model scales |
+| `nero_horizontal_gravity_j2_bias_nm` | 2 | N·m | `[0,0]`，顺序 `[q2<0,q2>0]`，每项范围 `[-2,2]` / signed J2 biases |
+| `nero_horizontal_gravity_j4_scale` | 2 | — | `[1,1]`，顺序 `[q4<0,q4>0]`，每项范围 `[0,2]` / signed J4 model scales |
+| `nero_horizontal_gravity_j4_bias_nm` | 2 | N·m | `[0,0]`，顺序 `[q4<0,q4>0]`，每项范围 `[-2,2]` / signed J4 biases |
 | `tool_configuration` | string | — | Nero 文件=`none` 裸臂 / bare arm；Piper-L 文件=`gripper` |
 | `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
 | `velocity_filter_time_constant` | scalar | s | `0.03`，一阶低通差分 / first-order filtered finite difference |
@@ -924,14 +958,16 @@ implementation.
 | `experiment_name` | string | — | `manual_control` |
 | `experiment_flush_every` | scalar | samples/events | `1`; 每条刷新，安全优先 / flush every record, prioritizing recoverability |
 
-启用 URDF 重力/逆动力学补偿时，补偿项严格为经过 `mit_gravity_scale` 和绝对
-力矩限幅的模型输出，不再叠加 `mit_feedforward` 或任何固定标定 bias。
-`mit_feedforward` 只在没有 URDF 补偿的关节对照 backend 中作为显式手动力矩。
-/ With URDF gravity/inverse-dynamics compensation enabled, the compensation
-term is strictly the scaled and absolute-bounded model output; neither
-`mit_feedforward` nor any fixed calibration bias is added. `mit_feedforward`
-remains an explicit manual torque only for the joint comparison backend when
-URDF compensation is absent.
+启用 URDF 重力/逆动力学补偿时，补偿项经过 `mit_gravity_scale` 和统一安全包络；
+不再叠加 `mit_feedforward`。唯一的经验 bias 是 Nero 平置 J2/J4 调度中明确配置的
+`*_bias_nm`，默认全零，它属于重力模型修正而不是摩擦补偿。`mit_feedforward`
+只在没有 URDF 补偿的关节对照 backend 中作为显式手动力矩。 / With URDF
+gravity/inverse-dynamics compensation enabled, model output passes through
+`mit_gravity_scale` and the shared safety envelope without adding
+`mit_feedforward`. The only empirical bias is the explicit, default-zero
+horizontal Nero J2/J4 `*_bias_nm`; it corrects the gravity model and is not
+friction compensation. `mit_feedforward` remains a manual torque only when
+URDF compensation is absent from the joint comparison backend.
 
 `mit_kp/mit_kd` 只属于 `joint` 对照 backend。Cartesian 阻抗 backend 无条件向
 固件发送 `kp=kd=0`，防止关节 PD 与 `J^T F` 重复计算。导纳与混合独立使用低增益
@@ -1027,6 +1063,13 @@ in joint space before the total torque clip.
   `cartesian_impedance_model_scale` can only reduce model support and cannot
   exceed `1.0`; it is not automatic calibration. Support the arm and compare
   measured holding torque at several static poses before changing J4.
+- 平置 J2/J4 调度比例限制为 `[0,2]`，bias 限制为 `[-2,2] N.m`，过渡半宽限制为
+  0.5°–15°；切换后仍通过统一总力矩和变化率包络。标定时必须卸载、支撑机械臂，
+  逐段修改且保持物理急停可触及。 / Horizontal J2/J4 schedule scales are bounded
+  to `[0,2]`, biases to `[-2,2] N.m`, and transition half-width to 0.5–15
+  degrees; the shared total-torque/rate envelope still follows scheduling.
+  Calibrate unloaded with the arm supported, change one region at a time, and
+  keep the physical E-stop reachable.
 - `move_mit()` 对各轴依次调用，CAN 层不提供整批原子提交或逐帧 ACK。 /
   `move_mit()` is called sequentially per axis; CAN provides neither atomic
   batch commit nor per-frame acknowledgement here.
@@ -1107,6 +1150,23 @@ in joint space before the total torque clip.
   computes command-derived and feedback-derived stiction/offset separately.
   Motor torque is drive feedback, not an independently calibrated torque
   sensor, so both results are retained rather than treating feedback as truth.
+  默认输出为项目内 `config/nero_static_friction.yaml`，使用 schema v1 累积多个
+  run。输入 `TEST` 后创建 run，固件识别和每个方向完成后都通过同目录临时文件
+  原子替换；因此 Ctrl-C 或后续安全失败不会丢失先前方向。每个 run 保存 outcome、
+  固件、CAN 接口、全部有效参数、共同姿态、命令区间、反馈中位数和双向汇总。
+  后续控制在最新适用 run 内优先读取
+  `joints.JN.summary.recommended_static_friction_nm`，并检查相邻
+  `recommended_source`；可用 `--output PATH` 改路径。默认实测文件被 git 忽略。 /
+  The default output is `config/nero_static_friction.yaml`, a schema-v1 file
+  accumulating multiple runs. A run is created after `TEST`, then atomically
+  replaced through a same-directory temporary file after firmware detection
+  and every completed direction, preserving earlier data across Ctrl-C or a
+  later safety failure. Each run stores outcome, firmware, CAN interface, all
+  effective parameters, reference pose, command bracket, feedback median, and
+  bidirectional summaries. Within the newest applicable run, downstream
+  control should read `joints.JN.summary.recommended_static_friction_nm` and inspect the adjacent
+  `recommended_source`; `--output PATH` overrides the location. The default
+  hardware-data file is git-ignored.
 - 独立动量观测器进程本身是被动的且不触发急停；其残差不再叠加到阻抗控制力矩，
   仍可作为诊断输出和导纳输入。 / The separate momentum-observer process is
   passive and never triggers an emergency stop. Its residual is no longer
@@ -1217,6 +1277,12 @@ in joint space before the total torque clip.
   task-invariant redundant-posture control.
 - URDF 不包含摩擦、线缆力、齿隙、未知负载和驱动延迟。 / URDF omits
   friction, cable forces, backlash, unknown payload, and drive delay.
+- 平置正负区参数不是在线辨识结果，默认只是单位比例和零 bias。错误标定可能把
+  静摩擦、线缆力或人工接触写进“重力”并造成主动漂移；零点平滑只能消除力矩
+  跳变，不能修复错误系数。 / Horizontal signed parameters are not identified
+  online and default to unit scale and zero bias. Bad calibration can absorb
+  friction, cable force, or contact into “gravity” and cause active drift;
+  zero-angle blending removes a torque jump but cannot repair bad coefficients.
 - 静态 Stribeck 映射不描述零速预滑、滞回或真正的粘住状态；Smith 只补偿已知
   纯延迟，模型/延迟失配仍会进入闭环，且经典结构不应直接用于不稳定对象。 /
   Static Stribeck does not model zero-speed presliding, hysteresis, or a true
@@ -1515,6 +1581,9 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 
 # 只测试 J4 / Test J4 only
 ./scripts/test_nero_static_friction.py --joint 4
+
+# 改用其他累积 YAML / Use another cumulative YAML
+./scripts/test_nero_static_friction.py --joint 4 --output /tmp/j4.yaml
 ```
 
 测试轴采用 `kp=kd=0` 的纯前馈力矩，不计算重力、惯性或科氏补偿。默认每档增加
@@ -1547,6 +1616,26 @@ default runs both directions and estimates stiction as
 gravity and drive bias at the current pose. Use `--help` for bounded ramp
 rate, torque-step, maximum-torque, movement-threshold-in-degrees, and
 sample-rate options.
+默认在确认后创建/更新 `config/nero_static_friction.yaml`。YAML schema v1 的根包含
+`robot_model`、明确单位和 `runs`；每个 run 通过 `run_id` 原位更新而非重复追加。
+正向完成即落盘，负向完成后补充 `summary`，其中
+`recommended_static_friction_nm` 是供后续控制读取的命令区间中点结果。 /
+After confirmation the default `config/nero_static_friction.yaml` is created or
+updated. Schema v1 contains the robot model, explicit units, and `runs`; one
+run is replaced by `run_id` rather than duplicated. Positive completion is
+saved immediately, and negative completion adds the `summary`, whose
+`recommended_static_friction_nm` is the command-bracket result intended for
+downstream control.
+
+```python
+from armbycontroller.experiment.static_friction import (
+    StaticFrictionResultStore,
+)
+
+store = StaticFrictionResultStore("config/nero_static_friction.yaml")
+j4 = store.latest_joint_summary(4)
+friction_nm = None if j4 is None else j4["recommended_static_friction_nm"]
+```
 不传 `--joint` 时按 J1→J7 顺序执行；每个轴先完成正向、回共同姿态、完成反向、
 再回共同姿态，才进入下一轴。安全异常立即停止整个序列；仅“达到最大力矩仍未
 起动”会记录为该轴未完成并继续下一轴。 / Without `--joint`, execution is
@@ -1687,6 +1776,16 @@ electronic stop is latched. After inspection, an operator may explicitly pass
 故障原因；直接 `ros2 launch` 仍使用上述 `false` 默认值。 / The current
 `start_nero.sh` wrapper explicitly passes `true`, so inspect the arm and fault
 cause before running it; direct `ros2 launch` retains the `false` default.
+
+平置启动时应同时看到控制器日志
+`Nero horizontal gravity scheduling active` 和观测器日志
+`gravity_schedule=True`。若缺少任一条，先检查两个节点的 `nero_mount` 以及六个
+`nero_horizontal_gravity_*` 参数；在默认 `[1,1]`/`[0,0]` 下日志会出现但力矩
+仍与原 URDF 相同。 / Horizontal startup should show both controller log
+`Nero horizontal gravity scheduling active` and observer log
+`gravity_schedule=True`. If either is missing, inspect `nero_mount` and the six
+`nero_horizontal_gravity_*` parameters on both nodes. With neutral defaults,
+the logs appear while torque remains identical to raw URDF gravity.
 
 UI 服务返回 `success=false` 时，先解析 response `message` 中的 schema-v1 JSON，
 再查看 `/arm/interaction_state` 的 `interaction_mode`、`arm_ready`、

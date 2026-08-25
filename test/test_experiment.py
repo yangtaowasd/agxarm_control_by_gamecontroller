@@ -2,10 +2,12 @@
 
 import json
 import math
+import sys
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from armbycontroller.experiment import ExperimentRun
 from armbycontroller.experiment import JsonlExperimentSink
@@ -14,9 +16,13 @@ from armbycontroller.experiment.static_friction import BreakawayMeasurement
 from armbycontroller.experiment.static_friction import estimate_stiction
 from armbycontroller.experiment.static_friction import classify_motion
 from armbycontroller.experiment.static_friction import movement_threshold_rad
+from armbycontroller.experiment.static_friction import NoBreakawayMeasurement
 from armbycontroller.experiment.static_friction import resolve_joint_sequence
 from armbycontroller.experiment.static_friction import step_hold_duration
 from armbycontroller.experiment.static_friction import stepped_torque_levels
+from armbycontroller.experiment.static_friction import (
+    StaticFrictionResultStore,
+)
 from armbycontroller.experiment.static_friction import TorqueFeedbackWindow
 from armbycontroller.experiment.static_friction import wait_for_sample
 from armbycontroller.experiment.static_friction import (
@@ -181,10 +187,168 @@ def test_static_friction_breakaway_uses_step_bracket_midpoint():
         trigger_command_torque=0.805,
         feedback_median_torque=0.802,
         movement_rad=math.radians(0.2),
+        reference_position_rad=(0.0,) * 7,
     )
 
     assert measurement.command_estimate == pytest.approx(0.8025)
     assert measurement.command_uncertainty == pytest.approx(0.0025)
+    assert measurement.as_record() == {
+        "status": "breakaway",
+        "stable_command_torque_nm": 0.8,
+        "trigger_command_torque_nm": 0.805,
+        "command_estimate_nm": pytest.approx(0.8025),
+        "command_uncertainty_nm": pytest.approx(0.0025),
+        "feedback_median_torque_nm": 0.802,
+        "movement_rad": pytest.approx(math.radians(0.2)),
+        "reference_position_rad": [0.0] * 7,
+    }
+
+
+def test_static_friction_store_atomically_updates_one_run(tmp_path):
+    path = tmp_path / "nero_static_friction.yaml"
+    store = StaticFrictionResultStore(path)
+    run = {
+        "run_id": "run-001",
+        "started_at": "2026-08-25T00:00:00+00:00",
+        "updated_at": "2026-08-25T00:00:00+00:00",
+        "outcome": "running",
+        "joints": {},
+    }
+
+    store.save_run(run)
+    run["outcome"] = "completed"
+    run["joints"] = {
+        "J1": {
+            "summary": {
+                "recommended_static_friction_nm": 0.9,
+                "recommended_source": "command_bracket_midpoint",
+            }
+        }
+    }
+    store.save_run(run)
+
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert document["schema_version"] == 1
+    assert document["robot_model"] == "nero"
+    assert document["units"]["torque"] == "N.m"
+    assert len(document["runs"]) == 1
+    assert document["runs"][0]["outcome"] == "completed"
+    assert store.latest_joint_summary(1) == run["joints"]["J1"]["summary"]
+    assert not path.with_suffix(".yaml.tmp").exists()
+
+
+def test_static_friction_no_breakaway_record_keeps_tested_bound():
+    result = NoBreakawayMeasurement(
+        tested_to_command_torque=-2.0,
+        reference_position_rad=(0.0,) * 7,
+        reason="maximum_without_breakaway",
+    )
+
+    assert result.as_record() == {
+        "status": "no_breakaway",
+        "reason": "maximum_without_breakaway",
+        "tested_to_command_torque_nm": -2.0,
+        "reference_position_rad": [0.0] * 7,
+    }
+
+
+def test_static_friction_pair_record_exposes_reusable_summary():
+    run = {"joints": {}}
+    positive = BreakawayMeasurement(
+        stable_command_torque=0.8,
+        trigger_command_torque=0.805,
+        feedback_median_torque=0.79,
+        movement_rad=math.radians(0.2),
+        reference_position_rad=(0.0,) * 7,
+    )
+    negative = BreakawayMeasurement(
+        stable_command_torque=-0.9,
+        trigger_command_torque=-0.905,
+        feedback_median_torque=-0.91,
+        movement_rad=math.radians(-0.2),
+        reference_position_rad=(0.0,) * 7,
+    )
+    results = {1: positive}
+
+    friction_script.record_direction_result(run, 1, 1, positive, results)
+    assert "summary" not in run["joints"]["J1"]
+
+    results[-1] = negative
+    friction_script.record_direction_result(run, 1, -1, negative, results)
+    summary = run["joints"]["J1"]["summary"]
+
+    assert summary["command_static_friction_nm"] == pytest.approx(0.8525)
+    assert summary["command_zero_offset_nm"] == pytest.approx(-0.05)
+    assert summary["feedback_static_friction_nm"] == pytest.approx(0.85)
+    assert summary["recommended_static_friction_nm"] == pytest.approx(0.8525)
+    assert summary["recommended_source"] == "command_bracket_midpoint"
+
+
+def test_static_friction_main_saves_completed_yaml_without_hardware(
+    monkeypatch, tmp_path
+):
+    output = tmp_path / "result.yaml"
+    disconnected = []
+
+    class Arm:
+        def disconnect(self):
+            disconnected.append(True)
+
+    def measurement(direction):
+        return BreakawayMeasurement(
+            stable_command_torque=0.8 * direction,
+            trigger_command_torque=0.805 * direction,
+            feedback_median_torque=0.79 * direction,
+            movement_rad=math.radians(0.2) * direction,
+            reference_position_rad=(0.0,) * 7,
+        )
+
+    connection = SimpleNamespace(
+        arm=Arm(),
+        probe_arm=None,
+        firmware_profile="v112",
+        firmware_info={"software_version": "1.121"},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "test_nero_static_friction.py",
+            "--joint",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+    monkeypatch.setattr(friction_script, "confirm_test", lambda args: None)
+    monkeypatch.setattr(
+        friction_script, "connect_nero", lambda interface: connection
+    )
+    monkeypatch.setattr(
+        friction_script, "wait_for_sample", lambda reader, timeout: None
+    )
+    monkeypatch.setattr(friction_script, "joint_limits", lambda: None)
+    monkeypatch.setattr(
+        friction_script,
+        "measure_direction",
+        lambda arm, limits, args, joint, direction: measurement(direction),
+    )
+    monkeypatch.setattr(friction_script, "safe_planned_hold", lambda arm: None)
+    monkeypatch.setattr(friction_script.time, "sleep", lambda period: None)
+
+    assert friction_script.main() == 0
+
+    document = yaml.safe_load(output.read_text(encoding="utf-8"))
+    run = document["runs"][0]
+    assert run["outcome"] == "completed"
+    assert run["firmware"] == {
+        "profile": "v112",
+        "info": {"software_version": "1.121"},
+    }
+    assert run["joints"]["J1"]["summary"][
+        "recommended_static_friction_nm"
+    ] == pytest.approx(0.8025)
+    assert disconnected == [True]
 
 
 def test_static_friction_measurement_waits_for_stable_feedback_step(

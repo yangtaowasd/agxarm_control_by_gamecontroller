@@ -20,3 +20,7 @@ compile_commands.json
 
 # OS files
 .DS_Store
+
+# Hardware measurements (local, cumulative calibration data)
+/config/nero_static_friction.yaml
+/config/nero_static_friction.yaml.tmp

@@ -347,6 +347,9 @@ manually; it is not installed as a launch/startup entry:
 
 # Or test only J4
 ./scripts/test_nero_static_friction.py --joint 4
+
+# Optional alternate cumulative YAML file
+./scripts/test_nero_static_friction.py --joint 4 --output /tmp/j4.yaml
 ```
 
 The tested joint uses pure feedforward torque with `kp=kd=0`: no gravity,
@@ -382,6 +385,29 @@ the speed guard uses a `0.1 s` position window instead of a raw `10 ms`
 difference. Errors name the triggering joint and measured windowed speed. The
 confirmation prompt prints the effective ramp, displacement threshold, and
 speed settings so an older copy of the script is immediately visible.
+
+Results accumulate in `config/nero_static_friction.yaml` by default. A run is
+created after the explicit `TEST` confirmation, then atomically updated after
+firmware detection and after every completed direction; earlier joint results
+therefore survive Ctrl-C or a later safety failure. The versioned YAML keeps
+the run outcome, firmware, CAN interface, all effective parameters, selected
+joints, full reference pose, command breakaway bracket, motor-feedback median,
+and command-/feedback-derived bidirectional summaries. Within the newest
+applicable run, the stable downstream value is
+`joints.JN.summary.recommended_static_friction_nm`, whose source is also
+stored. Use `--output PATH` to choose another YAML file. The default
+hardware-data file is git-ignored so measurements are not committed by
+accident.
+
+```python
+from armbycontroller.experiment.static_friction import (
+    StaticFrictionResultStore,
+)
+
+store = StaticFrictionResultStore("config/nero_static_friction.yaml")
+j4 = store.latest_joint_summary(4)
+friction_nm = None if j4 is None else j4["recommended_static_friction_nm"]
+```
 
 ## Build
 
@@ -481,6 +507,16 @@ The profile also uses
 `tool_configuration: none`, so it loads the bare `nero_description.urdf`.
 The Piper-L profile independently uses `tool_configuration: gripper`.
 The physical tool and mount must match the selected robot profile.
+
+For `nero_mount:=horizontal`, the shared gravity model can apply an empirical
+signed correction independently to J2 and J4. Each YAML pair is ordered
+`[q<0, q>0]` and supplies a scale plus a bias in N.m. Inside the default
+`+/-2 deg` transition band, `smoothstep` continuously blends both sides, so
+crossing zero cannot create a commanded-torque jump. The default scales
+`[1,1]` and biases `[0,0]` are deliberately neutral until supported static
+calibration exists. The same scheduled gravity is used by the controller and
+momentum observer; inertia and Coriolis terms are not rescaled. Final MIT
+total-torque and torque-rate limits still apply after scheduling.
 
 Explicit launch arguments override both files. Use `common_config:=...` to
 replace the shared layer or `controller_config:=...` to replace the selected

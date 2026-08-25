@@ -77,6 +77,15 @@ torque requested outside a control law; each controller adapter selects
 gravity, bias, or full inverse dynamics and uses one model-scaling rule.
 _Avoid_: gravity hidden in impedance, admittance feedforward helper
 
+**平置重力调度 / Horizontal Gravity Scheduling**:
+仅在 Nero 平置安装时，以 J2、J4 各自的角度符号为调度变量，在正负区经验
+`scale+bias` 间连续混合；只替换 URDF 重力分量，并让控制器与动量观测器使用同一
+结果。 / For horizontal-mounted Nero only, independently schedules J2 and J4
+between signed empirical `scale+bias` calibrations with a continuous blend;
+only the URDF gravity component is replaced and the controller and momentum
+observer consume the same result.
+_Avoid_: hard sign switch, four-quadrant friction compensation
+
 **Stribeck 摩擦模型 / Stribeck Friction Model**:
 按关节速度从静摩擦峰值指数过渡至 Coulomb 摩擦并叠加粘性项的纯数学映射；当前未
 接入控制周期。 / A pure mathematical per-joint velocity map with exponential

@@ -15,6 +15,17 @@ arm_keyboard_controller:
     mit_gravity_compensation_enabled: true
     mit_gravity_scale: 1.0
 
+    # Horizontal-mount empirical correction layered over continuous URDF
+    # gravity. Each pair is [q < 0, q > 0]. Defaults are neutral until the
+    # four regions are calibrated. A +/-2 degree smoothstep avoids a torque
+    # jump at J2=0 or J4=0; the scheduler is inactive for side mounting.
+    nero_horizontal_gravity_schedule_enabled: true
+    nero_horizontal_gravity_transition_angle: 0.03490658503988659  # rad
+    nero_horizontal_gravity_j2_scale: [1.0, 1.0]
+    nero_horizontal_gravity_j2_bias_nm: [0.0, 0.0]
+    nero_horizontal_gravity_j4_scale: [1.0, 1.0]
+    nero_horizontal_gravity_j4_bias_nm: [0.0, 0.0]
+
     # Nero keeps more measured-speed headroom than the shared 1.5 default.
     interaction_measured_joint_velocity_stop_limit: [2.5]
     interaction_measured_joint_velocity_hard_limit: [2.8]
@@ -90,5 +101,13 @@ arm_momentum_observer:
   ros__parameters:
     nero_mount: side
     tool_configuration: none
+    # Keep observer gravity identical to the controller so calibrated model
+    # correction is not reported as external torque.
+    nero_horizontal_gravity_schedule_enabled: true
+    nero_horizontal_gravity_transition_angle: 0.03490658503988659  # rad
+    nero_horizontal_gravity_j2_scale: [1.0, 1.0]
+    nero_horizontal_gravity_j2_bias_nm: [0.0, 0.0]
+    nero_horizontal_gravity_j4_scale: [1.0, 1.0]
+    nero_horizontal_gravity_j4_bias_nm: [0.0, 0.0]
     momentum_observer_gain: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
     momentum_observer_max_period: 0.05  # s

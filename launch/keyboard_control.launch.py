@@ -69,6 +69,12 @@ CONFIGURED_PARAMETERS = {
     "mit_feedforward",
     "mit_gravity_compensation_enabled",
     "mit_gravity_scale",
+    "nero_horizontal_gravity_schedule_enabled",
+    "nero_horizontal_gravity_transition_angle",
+    "nero_horizontal_gravity_j2_scale",
+    "nero_horizontal_gravity_j2_bias_nm",
+    "nero_horizontal_gravity_j4_scale",
+    "nero_horizontal_gravity_j4_bias_nm",
     "interaction_torque_limit",
     "interaction_torque_rate_limit",
     "interaction_reference_joint_velocity_limit",
@@ -139,6 +145,12 @@ CONFIGURED_OBSERVER_PARAMETERS = {
     "momentum_observer_rate",
     "momentum_observer_gain",
     "momentum_observer_max_period",
+    "nero_horizontal_gravity_schedule_enabled",
+    "nero_horizontal_gravity_transition_angle",
+    "nero_horizontal_gravity_j2_scale",
+    "nero_horizontal_gravity_j2_bias_nm",
+    "nero_horizontal_gravity_j4_scale",
+    "nero_horizontal_gravity_j4_bias_nm",
 }
 
 

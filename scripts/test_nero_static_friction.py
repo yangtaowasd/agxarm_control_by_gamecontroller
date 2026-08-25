@@ -2,17 +2,21 @@
 """Measure one Nero joint's approximate static breakaway torque."""
 
 import argparse
+from datetime import datetime
+from datetime import timezone
 import math
 from pathlib import Path
 import sys
 import time
+from uuid import uuid4
 
 import numpy as np
 
 from pyAgxArm.api.constants import ROBOT_JOINT_LIMIT_PRESET_RAD
 
 # Permit both a source-tree invocation and an installed ros2-run invocation.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from armbycontroller.control import MitTorqueEnvelope  # noqa: E402
 from armbycontroller.experiment.static_friction import (  # noqa: E402
@@ -28,6 +32,9 @@ from armbycontroller.experiment.static_friction import (  # noqa: E402
     movement_threshold_rad,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
+    NoBreakawayMeasurement,
+)
+from armbycontroller.experiment.static_friction import (  # noqa: E402
     resolve_joint_sequence,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
@@ -35,6 +42,9 @@ from armbycontroller.experiment.static_friction import (  # noqa: E402
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
     stepped_torque_levels,
+)
+from armbycontroller.experiment.static_friction import (  # noqa: E402
+    StaticFrictionResultStore,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
     TorqueFeedbackWindow,
@@ -73,6 +83,7 @@ TORQUE_FEEDBACK_WINDOW = 0.2
 TORQUE_FEEDBACK_MINIMUM_SPAN = 0.05
 TORQUE_FEEDBACK_SETTLE_SPAN = 0.15
 TORQUE_FEEDBACK_MAXIMUM_DEVIATION = 0.02
+DEFAULT_OUTPUT = PROJECT_ROOT / "config" / "nero_static_friction.yaml"
 
 
 def parse_args():
@@ -93,6 +104,15 @@ def parse_args():
         default="both",
     )
     parser.add_argument("--can-interface", default="can0")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help=(
+            "cumulative YAML result file "
+            "(default: config/nero_static_friction.yaml)"
+        ),
+    )
     parser.add_argument("--max-torque", type=float, default=2.0)
     parser.add_argument(
         "--ramp-rate",
@@ -144,6 +164,7 @@ def parse_args():
         args.ramp_rate,
         MINIMUM_STEP_HOLD,
     )
+    args.output = args.output.expanduser().resolve()
     return args
 
 
@@ -415,6 +436,7 @@ def measure_direction(arm, limits, args, joint_number, direction):
                     trigger_command_torque=last_applied_torque,
                     feedback_median_torque=feedback_torque,
                     movement_rad=displacement,
+                    reference_position_rad=tuple(reference.tolist()),
                 )
                 feedback_text = (
                     "unavailable"
@@ -485,7 +507,11 @@ def measure_direction(arm, limits, args, joint_number, direction):
             ):
                 restore_planned_pose(arm, reference)
                 print("total-torque limit reached before breakaway")
-                return None
+                return NoBreakawayMeasurement(
+                    tested_to_command_torque=applied_torque,
+                    reference_position_rad=tuple(reference.tolist()),
+                    reason="total_torque_limit",
+                )
             if plateau_started is None:
                 plateau_started = now
                 plateau_deadline = (
@@ -533,7 +559,136 @@ def measure_direction(arm, limits, args, joint_number, direction):
         f"no breakaway below {args.max_torque:.3f} N.m "
         f"in the {label} direction"
     )
-    return None
+    return NoBreakawayMeasurement(
+        tested_to_command_torque=last_stable_torque,
+        reference_position_rad=tuple(reference.tolist()),
+        reason="maximum_without_breakaway",
+    )
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def new_result_run(args):
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    now = utc_now()
+    return {
+        "run_id": f"{stamp}-{uuid4().hex[:8]}",
+        "started_at": now,
+        "updated_at": now,
+        "completed_at": None,
+        "outcome": "running",
+        "robot_model": "nero",
+        "can_interface": args.can_interface,
+        "firmware": None,
+        "selected_joints": list(args.joints),
+        "requested_direction": args.direction,
+        "parameters": {
+            "maximum_command_torque_nm": args.max_torque,
+            "maximum_average_ramp_nm_s": args.ramp_rate,
+            "torque_step_nm": args.torque_step,
+            "minimum_step_hold_s": args.step_hold,
+            "movement_threshold_deg": args.movement_threshold_deg,
+            "movement_threshold_rad": args.movement_threshold,
+            "maximum_speed_rad_s": args.max_speed,
+            "control_rate_hz": args.rate,
+            "velocity_window_s": VELOCITY_WINDOW,
+            "step_settle_speed_rad_s": STEP_SETTLE_SPEED,
+            "torque_feedback_window_s": TORQUE_FEEDBACK_WINDOW,
+            "torque_feedback_settle_span_s": TORQUE_FEEDBACK_SETTLE_SPAN,
+            "torque_feedback_maximum_mad_nm": (
+                TORQUE_FEEDBACK_MAXIMUM_DEVIATION
+            ),
+            "tested_joint_kp": TEST_KP,
+            "tested_joint_kd": TEST_KD,
+            "other_joint_kp": HOLD_KP,
+            "other_joint_kd": HOLD_KD,
+        },
+        "joints": {},
+    }
+
+
+def joint_summary(results):
+    positive = results.get(1)
+    negative = results.get(-1)
+    if not (
+        isinstance(positive, BreakawayMeasurement)
+        and isinstance(negative, BreakawayMeasurement)
+    ):
+        return None
+    estimate = estimate_stiction(
+        positive.command_estimate,
+        negative.command_estimate,
+    )
+    summary = {
+        "positive_command_estimate_nm": positive.command_estimate,
+        "negative_command_estimate_nm": negative.command_estimate,
+        "command_static_friction_nm": estimate.static_friction,
+        "command_zero_offset_nm": estimate.zero_offset,
+        "command_uncertainty_nm": 0.5 * (
+            positive.command_uncertainty
+            + negative.command_uncertainty
+        ),
+        "recommended_static_friction_nm": estimate.static_friction,
+        "recommended_source": "command_bracket_midpoint",
+    }
+    if (
+        positive.feedback_median_torque is not None
+        and negative.feedback_median_torque is not None
+    ):
+        try:
+            feedback = estimate_stiction(
+                positive.feedback_median_torque,
+                negative.feedback_median_torque,
+            )
+            summary.update(
+                {
+                    "feedback_static_friction_nm": feedback.static_friction,
+                    "feedback_zero_offset_nm": feedback.zero_offset,
+                    "feedback_pair_status": "valid",
+                }
+            )
+        except ValueError:
+            summary["feedback_pair_status"] = "inconsistent_signs"
+    else:
+        summary["feedback_pair_status"] = "unavailable"
+    return summary
+
+
+def record_direction_result(run, joint_number, direction, result, results):
+    name = f"J{joint_number}"
+    joint = run["joints"].setdefault(name, {"directions": {}})
+    direction_name = "positive" if direction > 0 else "negative"
+    joint["directions"][direction_name] = result.as_record()
+    summary = joint_summary(results)
+    if summary is None:
+        joint.pop("summary", None)
+    else:
+        joint["summary"] = summary
+
+
+def persist_result_run(store, run, *, outcome=None, error=None):
+    now = utc_now()
+    run["updated_at"] = now
+    if outcome is not None:
+        run["outcome"] = outcome
+        run["completed_at"] = now
+    if error is not None:
+        run["error"] = str(error)
+    store.save_run(run)
+
+
+def best_effort_persist(store, run, *, outcome, error=None):
+    if store is None or run is None:
+        return
+    try:
+        persist_result_run(store, run, outcome=outcome, error=error)
+    except Exception as save_error:
+        print(
+            f"failed to save static-friction YAML: {save_error}",
+            file=sys.stderr,
+        )
 
 
 def confirm_test(args):
@@ -556,6 +711,7 @@ def confirm_test(args):
         f"torque_feedback_median={TORQUE_FEEDBACK_WINDOW:.3f} s, "
         f"feedback_MAD<="
         f"{TORQUE_FEEDBACK_MAXIMUM_DEVIATION:.3f} N.m\n"
+        f"Output YAML / 输出文件: {args.output}\n"
     )
     if input("Type TEST to continue / 输入 TEST 继续: ").strip() != "TEST":
         raise RuntimeError("test cancelled")
@@ -606,9 +762,20 @@ def safe_planned_hold(arm):
 def main():
     args = parse_args()
     connection = None
+    store = None
+    run = None
     try:
         confirm_test(args)
+        store = StaticFrictionResultStore(args.output)
+        run = new_result_run(args)
+        persist_result_run(store, run)
+        print(f"result run created / 结果记录已创建: {args.output}")
         connection = connect_nero(args.can_interface)
+        run["firmware"] = {
+            "profile": connection.firmware_profile,
+            "info": dict(connection.firmware_info),
+        }
+        persist_result_run(store, run)
         arm = connection.arm
         wait_for_sample(
             lambda: (read_positions(arm), read_motor_torques(arm)),
@@ -626,52 +793,55 @@ def main():
             print(f"\n=== Testing J{joint_number} ===")
             results = {}
             for direction in directions:
-                results[direction] = measure_direction(
+                result = measure_direction(
                     arm, limits, args, joint_number, direction
+                )
+                results[direction] = result
+                record_direction_result(
+                    run,
+                    joint_number,
+                    direction,
+                    result,
+                    results,
+                )
+                persist_result_run(store, run)
+                direction_name = "positive" if direction > 0 else "negative"
+                print(
+                    f"saved J{joint_number} {direction_name} to "
+                    f"{args.output}"
                 )
                 time.sleep(0.5)
 
-            positive = results.get(1)
-            negative = results.get(-1)
-            if positive is not None and negative is not None:
-                estimate = estimate_stiction(
-                    positive.command_estimate,
-                    negative.command_estimate,
-                )
-                uncertainty = 0.5 * (
-                    positive.command_uncertainty
-                    + negative.command_uncertainty
-                )
+            summary = joint_summary(results)
+            if summary is not None:
                 print(
                     "Result / 结果: "
                     f"J{joint_number} command-derived static friction ~= "
-                    f"{estimate.static_friction:.4f} +/- "
-                    f"{uncertainty:.4f} N.m; "
-                    f"zero offset={estimate.zero_offset:+.3f} N.m"
+                    f"{summary['command_static_friction_nm']:.4f} +/- "
+                    f"{summary['command_uncertainty_nm']:.4f} N.m; "
+                    f"zero offset="
+                    f"{summary['command_zero_offset_nm']:+.3f} N.m"
                 )
-                if (
-                    positive.feedback_median_torque is not None
-                    and negative.feedback_median_torque is not None
-                ):
-                    try:
-                        feedback_estimate = estimate_stiction(
-                            positive.feedback_median_torque,
-                            negative.feedback_median_torque,
-                        )
-                        print(
-                            "Feedback result / 反馈结果: "
-                            f"J{joint_number} static friction ~= "
-                            f"{feedback_estimate.static_friction:.4f} "
-                            "N.m; "
-                            f"zero offset="
-                            f"{feedback_estimate.zero_offset:+.4f} N.m"
-                        )
-                    except ValueError:
-                        print(
-                            "Feedback result rejected: positive/negative "
-                            "motor-torque signs are inconsistent"
-                        )
-            elif all(value is not None for value in results.values()):
+                if summary["feedback_pair_status"] == "valid":
+                    print(
+                        "Feedback result / 反馈结果: "
+                        f"J{joint_number} static friction ~= "
+                        f"{summary['feedback_static_friction_nm']:.4f} "
+                        "N.m; "
+                        f"zero offset="
+                        f"{summary['feedback_zero_offset_nm']:+.4f} N.m"
+                    )
+                elif summary["feedback_pair_status"] == "inconsistent_signs":
+                    print(
+                        "Feedback result rejected: positive/negative "
+                        "motor-torque signs are inconsistent"
+                    )
+            elif (
+                len(results) == 1
+                and isinstance(
+                    next(iter(results.values())), BreakawayMeasurement
+                )
+            ):
                 value = next(iter(results.values()))
                 print(
                     f"J{joint_number} breakaway torque / 起动扭矩: "
@@ -680,14 +850,22 @@ def main():
                     f"feedback_median="
                     f"{value.feedback_median_torque}"
                 )
-            else:
+            if not all(
+                isinstance(value, BreakawayMeasurement)
+                for value in results.values()
+            ):
                 complete = False
+        outcome = "completed" if complete else "incomplete"
+        persist_result_run(store, run, outcome=outcome)
+        print(f"YAML result finalized / YAML 结果已完成: {args.output}")
         return 0 if complete else 2
     except KeyboardInterrupt:
         print("\nCtrl-C received; stopping test", file=sys.stderr)
+        best_effort_persist(store, run, outcome="interrupted")
         return 130
     except Exception as error:
         print(f"ERROR: {error}", file=sys.stderr)
+        best_effort_persist(store, run, outcome="error", error=error)
         return 1
     finally:
         if connection is not None:

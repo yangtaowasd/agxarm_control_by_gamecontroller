@@ -1,10 +1,15 @@
 """Small, hardware-independent helpers for breakaway-torque tests."""
 
+from collections.abc import Mapping
 from collections import deque
 from dataclasses import dataclass
+import json
 import math
+from pathlib import Path
 import statistics
 import time
+
+import yaml
 
 
 @dataclass(frozen=True)
@@ -25,12 +30,16 @@ class BreakawayMeasurement:
     trigger_command_torque: float
     feedback_median_torque: float | None
     movement_rad: float
+    reference_position_rad: tuple[float, ...]
 
     def __post_init__(self):
         stable = float(self.stable_command_torque)
         trigger = float(self.trigger_command_torque)
         feedback = self.feedback_median_torque
         movement = float(self.movement_rad)
+        reference = tuple(
+            float(value) for value in self.reference_position_rad
+        )
         if (
             not all(math.isfinite(value) for value in (stable, trigger))
             or trigger == 0.0
@@ -39,6 +48,8 @@ class BreakawayMeasurement:
             or not math.isfinite(movement)
             or movement == 0.0
             or movement * trigger <= 0.0
+            or not reference
+            or not all(math.isfinite(value) for value in reference)
             or (
                 feedback is not None
                 and not math.isfinite(float(feedback))
@@ -48,10 +59,24 @@ class BreakawayMeasurement:
         object.__setattr__(self, "stable_command_torque", stable)
         object.__setattr__(self, "trigger_command_torque", trigger)
         object.__setattr__(self, "movement_rad", movement)
+        object.__setattr__(self, "reference_position_rad", reference)
         if feedback is not None:
             object.__setattr__(
                 self, "feedback_median_torque", float(feedback)
             )
+
+    def as_record(self):
+        """Return one unit-explicit, YAML-safe direction measurement."""
+        return {
+            "status": "breakaway",
+            "stable_command_torque_nm": self.stable_command_torque,
+            "trigger_command_torque_nm": self.trigger_command_torque,
+            "command_estimate_nm": self.command_estimate,
+            "command_uncertainty_nm": self.command_uncertainty,
+            "feedback_median_torque_nm": self.feedback_median_torque,
+            "movement_rad": self.movement_rad,
+            "reference_position_rad": list(self.reference_position_rad),
+        }
 
     @property
     def command_estimate(self):
@@ -66,6 +91,41 @@ class BreakawayMeasurement:
         return 0.5 * abs(
             self.trigger_command_torque - self.stable_command_torque
         )
+
+
+@dataclass(frozen=True)
+class NoBreakawayMeasurement:
+    """One safe direction test that ended without detected breakaway."""
+
+    tested_to_command_torque: float
+    reference_position_rad: tuple[float, ...]
+    reason: str
+
+    def __post_init__(self):
+        torque = float(self.tested_to_command_torque)
+        reference = tuple(
+            float(value) for value in self.reference_position_rad
+        )
+        reason = str(self.reason).strip()
+        if (
+            not math.isfinite(torque)
+            or torque == 0.0
+            or not reference
+            or not all(math.isfinite(value) for value in reference)
+            or not reason
+        ):
+            raise ValueError("no-breakaway measurement is invalid")
+        object.__setattr__(self, "tested_to_command_torque", torque)
+        object.__setattr__(self, "reference_position_rad", reference)
+        object.__setattr__(self, "reason", reason)
+
+    def as_record(self):
+        return {
+            "status": "no_breakaway",
+            "reason": self.reason,
+            "tested_to_command_torque_nm": self.tested_to_command_torque,
+            "reference_position_rad": list(self.reference_position_rad),
+        }
 
 
 class TorqueFeedbackWindow:
@@ -152,6 +212,109 @@ class TorqueFeedbackWindow:
             and deviation is not None
             and deviation <= maximum_deviation
         )
+
+
+class StaticFrictionResultStore:
+    """Atomically accumulate versioned Nero static-friction runs in YAML."""
+
+    schema_version = 1
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser().resolve()
+
+    @classmethod
+    def empty_document(cls):
+        return {
+            "schema_version": cls.schema_version,
+            "robot_model": "nero",
+            "units": {
+                "joint_position": "rad",
+                "movement": "rad",
+                "time": "s",
+                "torque": "N.m",
+            },
+            "runs": [],
+        }
+
+    @staticmethod
+    def _plain_object(value, name):
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{name} must be a mapping")
+        try:
+            encoded = json.dumps(value, allow_nan=False, sort_keys=True)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"{name} must be finite and YAML-compatible"
+            ) from error
+        decoded = json.loads(encoded)
+        if not isinstance(decoded, dict):
+            raise ValueError(f"{name} must encode as an object")
+        return decoded
+
+    def load(self):
+        """Load and validate the complete result document."""
+        if not self.path.exists():
+            return self.empty_document()
+        try:
+            document = yaml.safe_load(
+                self.path.read_text(encoding="utf-8")
+            )
+        except (OSError, yaml.YAMLError) as error:
+            raise ValueError(
+                f"cannot read static-friction YAML: {self.path}"
+            ) from error
+        if (
+            not isinstance(document, dict)
+            or document.get("schema_version") != self.schema_version
+            or document.get("robot_model") != "nero"
+            or not isinstance(document.get("runs"), list)
+        ):
+            raise ValueError(
+                "static-friction YAML schema/model is incompatible"
+            )
+        return self._plain_object(document, "result document")
+
+    def save_run(self, run):
+        """Insert or replace one run and atomically persist the document."""
+        value = self._plain_object(run, "static-friction run")
+        run_id = str(value.get("run_id", "")).strip()
+        if not run_id:
+            raise ValueError("static-friction run_id must not be empty")
+        document = self.load()
+        matches = [
+            index
+            for index, saved in enumerate(document["runs"])
+            if isinstance(saved, dict) and saved.get("run_id") == run_id
+        ]
+        if len(matches) > 1:
+            raise ValueError("static-friction YAML has duplicate run_id")
+        if matches:
+            document["runs"][matches[0]] = value
+        else:
+            document["runs"].append(value)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(
+            yaml.safe_dump(
+                document,
+                allow_unicode=True,
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(self.path)
+
+    def latest_joint_summary(self, joint_number):
+        """Return the newest saved summary for one 1-based joint."""
+        joint = int(joint_number)
+        if joint < 1:
+            raise ValueError("joint_number must be positive")
+        name = f"J{joint}"
+        for run in reversed(self.load()["runs"]):
+            summary = run.get("joints", {}).get(name, {}).get("summary")
+            if isinstance(summary, dict):
+                return dict(summary)
+        return None
 
 
 class WindowedVelocityEstimator:
