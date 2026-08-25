@@ -332,6 +332,57 @@ menu. Local evdev selection accepts `3`, `event3`, or `/dev/input/event3`;
 overridden as a trailing argument, for example
 `./scripts/start_nero.sh reset_emergency_stop_on_start:=true`.
 
+### Manual Nero static-friction check
+
+Stop `start_nero.sh` and every other CAN controller first, remove payloads,
+clear the workspace, and keep the physical E-stop reachable. Place the tested
+axis where gravity torque is as small as practical, then run the source script
+manually; it is not installed as a launch/startup entry:
+
+```bash
+./scripts/setup_can.sh
+
+# Default: J1 -> J2 -> ... -> J7
+./scripts/test_nero_static_friction.py
+
+# Or test only J4
+./scripts/test_nero_static_friction.py --joint 4
+```
+
+The tested joint uses pure feedforward torque with `kp=kd=0`: no gravity,
+inertia, or Coriolis model term is commanded. The default positive/negative
+test advances in `0.005 N.m` plateaus, each held for at least `0.25 s`; it
+advances only after the `0.1 s` position-window speed is at most `0.01 rad/s`
+the MIT envelope is no longer slew-limited, and at least `0.15 s` of motor
+torque feedback has median absolute deviation no greater than `0.02 N.m`.
+This bounds the average ramp at `0.02 N.m/s`, stops at `2 N.m`, and detects
+breakaway at `0.2 deg`.
+Repeated reads of the same SDK cache entry are discarded by CAN-frame
+timestamp, so plateau stability requires genuinely refreshed feedback.
+At first motion it reports the last stable and first moving command levels,
+their midpoint and half-step uncertainty, plus a median of the preceding
+`0.2 s` motor-torque feedback. It then immediately sends 50 ms of
+zero-feedforward MIT damping/position hold and returns to the common test pose.
+The motor torque is drive feedback rather than an independent calibrated
+torque sensor, so command-derived and feedback-derived results are both shown.
+The bidirectional half
+difference rejects approximately constant gravity/drive bias, which is also
+reported separately as zero offset. Estimated total torque remains capped at
+`8 N.m` and slewed at `20 N.m/s`. Use `--help` for bounded overrides. Never run
+this script concurrently with the normal controller.
+The all-joint default completes J1 positive/negative before advancing through
+J2 to J7. A safety exception stops the complete sequence immediately; a safe
+"no breakaway below the configured maximum" result is reported and the next
+joint is still tested.
+After the formal v112 connection is enabled, the script waits up to `3 s` for
+complete joint-angle and motor-torque caches instead of treating an initial
+empty SDK read as a hardware failure.
+Because Nero v112 joint positions arrive in multiple asynchronous CAN frames,
+the speed guard uses a `0.1 s` position window instead of a raw `10 ms`
+difference. Errors name the triggering joint and measured windowed speed. The
+confirmation prompt prints the effective ramp, displacement threshold, and
+speed settings so an older copy of the script is immediately visible.
+
 ## Build
 
 ```bash

@@ -2,9 +2,10 @@
 
 ## 目标 / Goal
 
-这些文件提供与 ROS 无关的李群、URDF 运动学/动力学和外力观测数学。 / These
-files provide ROS-independent Lie-group, URDF kinematics/dynamics, and
-external-disturbance observation mathematics.
+这些文件提供与 ROS 无关的李群、URDF 运动学/动力学、摩擦、时延预估和外力观测
+数学。 / These files provide ROS-independent Lie-group, URDF
+kinematics/dynamics, friction, delay prediction, and external-disturbance
+observation mathematics.
 
 ## 文件 / Files
 
@@ -14,6 +15,8 @@ external-disturbance observation mathematics.
 | `armbycontroller/modeling/lie.py` | SO(3)/SE(3) 指数与对数、空间误差、伴随、空间运动/力叉乘 / SO(3)/SE(3) exp/log, space error, adjoint, motion/force cross products |
 | `armbycontroller/modeling/screw_model.py` | 解析 URDF/Xacro，构造 PoE chain，计算 FK、空间 Jacobian、质量矩阵、RNEA、动量观测项 / parse URDF/Xacro; PoE, FK, space Jacobian, mass matrix, RNEA, observer terms |
 | `armbycontroller/observers/momentum.py` | 不使用加速度微分的广义动量残差积分器 / acceleration-free generalized-momentum residual integrator |
+| `armbycontroller/friction/stribeck.py` | 经典逐关节 Stribeck 静态速度摩擦映射 / classical per-joint static Stribeck velocity-friction map |
+| `armbycontroller/control/smith_predictor.py` | 标称离散状态空间模型和纯样本延迟组成的 Smith 预估器 / Smith predictor composed from a nominal discrete state-space model and pure sample delay |
 | `armbycontroller/ik/screw.py` | 共享 PoE 模型的完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK / full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over the shared PoE model |
 | `armbycontroller/__init__.py` | 顶层 Python package 标识 / top-level Python package marker |
 
@@ -24,6 +27,8 @@ modeling/lie.py <- cartesian/spatial.py <- impedance/ | admittance/
        ^
        +-------- modeling/screw_model.py <- ik/screw.py <- controller adapters
                               \---- observers/momentum.py
+friction/stribeck.py           control/smith_predictor.py
+        (standalone)                  (standalone, not wired)
 ```
 
 数学 module 不应反向依赖 ROS 节点、键盘协议或 AGX SDK。模型数组遵循关节顺序，

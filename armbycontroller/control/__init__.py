@@ -19,6 +19,8 @@ from armbycontroller.control.safety import ControlCycleGuard
 from armbycontroller.control.safety import InteractionSafetyLimits
 from armbycontroller.control.safety import INTERACTION_TORQUE_LIMIT_MAX
 from armbycontroller.control.safety import SustainedVelocityGuard
+from armbycontroller.control.smith_predictor import SmithPrediction
+from armbycontroller.control.smith_predictor import SmithPredictor
 from armbycontroller.control.trajectory import JointTrajectoryState
 
 __all__ = [
@@ -41,5 +43,7 @@ __all__ = [
     "MitTorqueResult",
     "PositionCommand",
     "SustainedVelocityGuard",
+    "SmithPrediction",
+    "SmithPredictor",
     "control_sample",
 ]

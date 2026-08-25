@@ -77,6 +77,20 @@ torque requested outside a control law; each controller adapter selects
 gravity, bias, or full inverse dynamics and uses one model-scaling rule.
 _Avoid_: gravity hidden in impedance, admittance feedforward helper
 
+**Stribeck 摩擦模型 / Stribeck Friction Model**:
+按关节速度从静摩擦峰值指数过渡至 Coulomb 摩擦并叠加粘性项的纯数学映射；当前未
+接入控制周期。 / A pure mathematical per-joint velocity map with exponential
+transition from stiction level to Coulomb friction plus viscosity; currently
+not wired into the control cycle.
+_Avoid_: zero-speed stick simulator, enabled friction compensation
+
+**Smith 预估器 / Smith Predictor**:
+以标称离散状态空间模型和纯样本延迟构造 `y_hat=y+y0-yd` 的无 ROS/CAN 反馈预测
+模块；当前未接入控制周期。 / A ROS/CAN-free feedback prediction module using
+`y_hat=y+y0-yd` over a nominal discrete state-space model and pure sample
+delay; currently not wired into the control cycle.
+_Avoid_: observer, generic future-state extrapolator
+
 **MIT 安全包络 / MIT Safety Envelope**:
 统一组合 MIT 的 PD 反馈估计和显式前馈，实施逐关节绝对总力矩上限，并报告请求、
 实际下发、饱和与不可满足原因。 / Combines estimated MIT PD feedback and

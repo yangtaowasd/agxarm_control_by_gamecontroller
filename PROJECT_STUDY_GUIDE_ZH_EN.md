@@ -435,6 +435,40 @@ O(n) through spatial-inertia forward/backward recursion. It obtains
 `C^T qdot` from `Mdot qdot-C qdot`; `Mdot qdot` is one directional derivative
 of `p=M(q)qdot` along `qdot`, without constructing a full Coriolis matrix.
 
+### 5.8.1 Stribeck 摩擦与 Smith 预估 / Stribeck friction and Smith prediction
+
+经典静态 Stribeck 模型严格使用： / The classical static Stribeck model is:
+
+```text
+tau_f(v) = [tau_c + (tau_s-tau_c) exp(-(|v|/v_s)^alpha)] sign(v) + b v
+tau_s >= tau_c >= 0,  v_s > 0,  alpha > 0,  b >= 0
+```
+
+`tau_f` 与运动方向同号；在动力学方程中应从驱动力矩中减去，作为补偿时则同号
+加入。实现明确取 `sign(0)=0`，因此零速输出为零；该速度静态映射不虚构预滑或
+集合值静摩擦。 / `tau_f` has the sign of motion: subtract it as resistance
+in the dynamics, or add it as compensation. The implementation explicitly
+uses `sign(0)=0`, so its zero-speed output is zero; this velocity-static map
+does not invent presliding or set-valued stiction.
+
+离散 Smith 预估器把标称无延迟状态空间模型与纯 `N` 样本延迟分开： / The
+discrete Smith predictor separates a nominal delay-free state-space model
+from a pure `N`-sample delay:
+
+```text
+x[k+1] = A x[k] + B u[k]
+y0[k]  = C x[k] + D u[k]
+yd[k]  = y0[k-N]
+y_hat[k] = y_measured[k] + y0[k] - yd[k]
+```
+
+控制器应反馈 `y_hat`。模型完全匹配时，`y_measured=yd`，故 `y_hat=y0`；模型
+失配则通过 `y_measured-yd` 修正预测。实现顺序为先用 `x[k],u[k]` 计算输出，再
+推进到 `x[k+1]`，不会错一拍。 / A controller should feed back `y_hat`.
+With a perfect model, `y_measured=yd` and therefore `y_hat=y0`; model mismatch
+enters through `y_measured-yd`. Output is evaluated from `x[k],u[k]` before
+the state advances to `x[k+1]`, avoiding an off-by-one sample.
+
 ### 5.9 导纳受限旋量速度 IK 与 MIT / Bounded screw velocity IK and MIT
 
 导纳状态输出基坐标系 twist `v_a=[omega;v]`。受限旋量速度 IK 从同一 PoE 模型
@@ -737,7 +771,10 @@ profile is used.
 | `armbycontroller/control/safety.py` | `InteractionSafetyLimits` 统一四个 MIT adapter 的力矩幅值/变化率、参考/实测速度和关节边界，并提供反馈完整性、周期及持续/硬速度 guard / `InteractionSafetyLimits` unifies torque magnitude/rate, reference/measured speed, and joint boundaries for all four MIT adapters and provides feedback, period, and sustained/hard-speed guards |
 | `armbycontroller/control/interaction.py` | `normal/impedance/admittance/hybrid` 互锁和强制经过普通模式的迁移路径 / Normal/impedance/admittance/hybrid interlock and normal-mediated transition paths |
 | `armbycontroller/control/trajectory.py` | 无 ROS/CAN 的限加加速度、限加速度和限速度关节参考轨迹 / ROS/CAN-free jerk-, acceleration-, and velocity-limited joint-reference trajectory |
+| `armbycontroller/control/smith_predictor.py` | 严格实现 `y_hat=y+y0-yd` 的离散状态空间 Smith 预估器；尚未接入控制周期 / Discrete state-space Smith predictor implementing `y_hat=y+y0-yd`; not yet wired into the control cycle |
+| `armbycontroller/friction/stribeck.py` | 逐关节经典静态 Stribeck 摩擦公式、标量广播和物理参数校验 / Per-joint classical static Stribeck equation, scalar broadcasting, and physical-parameter validation |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
+| `armbycontroller/experiment/static_friction.py` | 关节测试顺序、反馈门控力矩阶梯、窗口估速/反馈中位数和静摩擦/零偏估计的无硬件纯函数 / Hardware-free joint ordering, feedback-gated torque steps, windowed speed/feedback median, and stiction/offset estimation |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射和不中断使能的第二条 profile 连接 / Shared DEFAULT probe, version mapping, and profile-specific second connection without interrupting enable |
 | `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和 Nero 低通差分速度估计 / Side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered Nero velocity estimation |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
@@ -765,11 +802,13 @@ profile is used.
 | `test/test_cartesian_impedance.py` | 阻抗符号、耦合、零空间与模型支撑契约 / Impedance sign, coupling, nullspace, and model-support contracts |
 | `test/test_arm_control.py` | 现有关节控制、IK、动力学和硬件 adapter 回归 / Existing joint control, IK, dynamics, and hardware-adapter regression |
 | `test/test_momentum_observer.py` | 空间动量、动能梯度、残差收敛、离散稳定性及禁止 SDK/CAN 访问 / Spatial momentum, kinetic gradient, residual convergence, discrete stability, and forbidden SDK/CAN-access contracts |
+| `test/test_friction_and_smith.py` | Stribeck 公式、零速约定、Smith 延迟时序、完美模型消延迟和失配修正契约 / Stribeck equation, zero-speed convention, Smith delay timing, perfect-model cancellation, and mismatch-correction contracts |
 | `test/test_cartesian_admittance.py` | 抗漂移柔顺零力、阻力平衡、旋转向量、边界和重置契约 / Anti-drift soft-zero-force, resistive-equilibrium, rotation-vector, bound, and reset contracts |
 | `test/test_control_interface.py` | 四种交互模式的共用 interface、命令、sample schema 和互锁契约 / Shared interface, command, sample-schema, and interlock contracts for four interaction modes |
 | `test/test_hybrid_control.py` | 任务顺序、互补选择、导纳目标力投影和阻抗/导纳输出解耦契约 / Task ordering, complementary selection, desired-wrench projection, and impedance/admittance output-decoupling contracts |
 | `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
 | `test/test_hardware_connection.py` | 两次连接顺序、探测连接保活、数据保存和版本到 profile 映射契约 / Two-connection ordering, retained probe, saved data, and version-to-profile mapping contracts |
+| `scripts/test_nero_static_friction.py` | 手动运行的 Nero 单关节准静态双向纯力矩测试；测试轴 `kp=kd=0`，不加入重力、惯性或科氏模型项 / Manually run Nero single-joint quasi-static bidirectional pure-torque test; the tested joint uses `kp=kd=0` with no gravity, inertia, or Coriolis model term |
 
 用户要求排除 `ros/`、`ik/`、`impedance/` 后的详细文件分类，见
 `docs/file_map/README_ZH_EN.md` 及其五个分类子文档。 / For the requested
@@ -837,6 +876,10 @@ implementation.
 | `momentum_observer_rate` | scalar | Hz | `100.0`，预期输入频率；计算由每条输入消息触发 / expected input rate; every input message triggers an update |
 | `momentum_observer_gain` | 1 or n | 1/s | `10.0` |
 | `momentum_observer_max_period` | scalar | s | `0.05`；较大数据间隙时重置 / reset after a larger stream gap |
+| Stribeck `tau_s`, `tau_c` | 1 or n | N·m | 无运行默认；调用方必须标定，且 `tau_s>=tau_c>=0` / no runtime default; caller-calibrated |
+| Stribeck `v_s`, `b`, `alpha` | 1 or n | rad/s, N·m·s/rad, — | 无运行默认；`v_s>0`, `b>=0`, `alpha>0` / no runtime default |
+| Smith `A,B,C,D` | matrices | discrete model dependent | 无运行默认；必须是同一采样周期的离散标称模型 / no runtime default; one discrete nominal model at a common sample period |
+| Smith `delay_samples` | scalar | samples | 无运行默认；非负整数纯延迟 / no runtime default; nonnegative integer pure delay |
 | `external_torque_topic` | string | — | `/arm_external_joint_torque`；`effort` 为 N·m / `effort` is N·m |
 | `admittance_mode` | string | — | Nero=`zero_force`; Piper-L=`resistive` |
 | `admittance_virtual_mass` | 6 | N·m·s²/rad, kg | Nero=`[0.2,0.2,0.2,2,2,2]`; Piper-L=`[0.12,0.12,0.12,1.5,1.5,1.5]` |
@@ -1009,6 +1052,61 @@ in joint space before the total torque clip.
 - 软件计算上限不是驱动器电流硬限，也不是力传感器测量。 / A software
   command limit is neither a drive-current hard limit nor a force-sensor
   measurement.
+- 静摩擦脚本不加入启动项，只能从源码手动运行，并要求普通控制器完全停止、无
+  负载、测试轴处于重力矩尽量小的姿态、工作区清空且物理急停可触及。测试轴使用
+  `kp=kd=0` 的纯前馈力矩，不加入重力、惯性或科氏模型项；正反向同姿态半差近似
+  消除恒定重力/驱动偏置。它默认每档增加 `0.005 N·m`、至少保持 `0.25 s`，仅在
+  `0.1 s` 窗口速度不超过 `0.01 rad/s` 且 MIT 包络不再限制力矩变化时进入下一
+  档；同时要求电机力矩反馈至少覆盖 `0.15 s`，其中位绝对偏差不超过
+  `0.02 N·m`；SDK 缓存时间戳相同的重复读取不计入样本。平均增加率不超过
+  `0.02 N·m/s`，在 `2 N·m` 停止。它同时监视 `0.2°`
+  起动位移、`0.2 rad/s` 速度、`0.05 rad`
+  限位余量、其他轴 `0.005 rad` 位移、±`8 N·m` 估算总力矩和 `20 N·m/s` 总力矩
+  变化率。任一边界失败即回到
+  实测位置保持；若保持恢复失败则请求电子急停。该结果是当前姿态下的近似起动
+  力矩，不是标定证书。 / The static-friction script may run only with the
+  normal controller fully stopped, no payload, the tested axis near a
+  low-gravity-torque pose, a clear workspace, and the physical E-stop
+  reachable. The tested axis uses pure feedforward torque with `kp=kd=0` and
+  no gravity, inertia, or Coriolis model term; the same-pose bidirectional half
+  difference approximately removes constant gravity/drive bias. By default it
+  advances in `0.005 N.m` plateaus held for at least `0.25 s`, and advances
+  only when `0.1 s` windowed speed is at most `0.01 rad/s` and the MIT envelope
+  is no longer slew-limited, with at least `0.15 s` of motor-torque feedback
+  whose median absolute deviation is at most `0.02 N.m`; repeated SDK-cache
+  reads with the same timestamp do not count as samples. The average increase
+  is at most `0.02 N.m/s` up
+  to `2 N.m`; it guards `0.2 deg` breakaway
+  displacement, `0.2 rad/s` speed, a `0.05 rad` limit
+  margin, `0.005 rad` motion on other joints, ±`8 N.m` estimated total torque,
+  and a `20 N.m/s` total-torque slew limit. Any failure restores a
+  measured-position hold; failure to restore
+  hold requests electronic E-stop. The output is an approximate breakaway
+  result at one pose, not a calibration certificate.
+  正式 profile 连接使能后，脚本等待最多 `3 s` 取得完整关节角和电机力矩
+  缓存，避免把 v112 的首帧尚未到达误判为反馈故障。 / After enabling the
+  formal profile connection, the script waits up to `3 s` each for complete
+  joint-angle and motor-torque caches, so a not-yet-arrived first v112 frame is
+  not misclassified as a feedback failure.
+  Nero v112 的关节位置由 J1/2、J3/4、J5/6、J7 多帧异步 CAN 缓存拼接；静摩擦
+  脚本因此使用 `0.1 s` 窗口估速，而不是用相邻 `10 ms` 读取直接差分。超速错误
+  报告具体关节、窗口速度和上限；确认提示也打印本次实际爬升率、位移阈值和速度
+  窗口，便于识别旧脚本。 / Nero v112 joint positions are assembled from
+  asynchronous J1/2, J3/4, J5/6, and J7 CAN caches. The static-friction script
+  therefore estimates speed over a `0.1 s` window instead of differentiating
+  adjacent `10 ms` reads. An overspeed error names the joint, windowed speed,
+  and limit; the confirmation prompt prints the effective ramp, displacement,
+  and speed-window settings so an old script is visible.
+  每档还保存最近 `0.2 s` 电机力矩反馈的中位数。起动结果报告“上一稳定档—首次
+  运动档”的命令区间、中点和半档不确定度，并同时报告反馈中位数；正反方向完成
+  后分别计算命令侧和反馈侧静摩擦/零偏。电机力矩来自驱动反馈而非独立标定力矩
+  传感器，因此两种结果都保留，不把反馈值当作标定真值。 / Each plateau also
+  retains the median of the latest `0.2 s` motor-torque feedback. Breakaway
+  reports the last-stable/first-moving command bracket, its midpoint and
+  half-step uncertainty, and the feedback median. After both directions it
+  computes command-derived and feedback-derived stiction/offset separately.
+  Motor torque is drive feedback, not an independently calibrated torque
+  sensor, so both results are retained rather than treating feedback as truth.
 - 独立动量观测器进程本身是被动的且不触发急停；其残差不再叠加到阻抗控制力矩，
   仍可作为诊断输出和导纳输入。 / The separate momentum-observer process is
   passive and never triggers an emergency stop. Its residual is no longer
@@ -1083,6 +1181,12 @@ in joint space before the total torque clip.
   adapter 的模式与硬件检查。 / Controller adapters must not access ROS, disk,
   or CAN directly; every output still crosses the ROS/AGX adapter's mode and
   hardware checks.
+- Stribeck 与 Smith 当前都是无 ROS/CAN 的未接线数学模块，不会产生硬件命令；在
+  完成实机标定、延迟辨识、总力矩包络和模式退出验证前不得直接启用补偿。 /
+  Stribeck and Smith are currently unwired, ROS/CAN-free mathematical modules
+  and cannot issue hardware commands. Do not enable compensation before
+  hardware calibration, delay identification, total-torque-envelope, and
+  mode-exit validation are complete.
 - experiment recorder 默认不启动、从不连接 CAN；记录失败不能生成机械臂命令。
   JSONL 每条记录独立成行，异常退出时已刷新行仍可恢复。 / The experiment
   recorder is disabled by default and never connects to CAN; recording failure
@@ -1113,6 +1217,12 @@ in joint space before the total torque clip.
   task-invariant redundant-posture control.
 - URDF 不包含摩擦、线缆力、齿隙、未知负载和驱动延迟。 / URDF omits
   friction, cable forces, backlash, unknown payload, and drive delay.
+- 静态 Stribeck 映射不描述零速预滑、滞回或真正的粘住状态；Smith 只补偿已知
+  纯延迟，模型/延迟失配仍会进入闭环，且经典结构不应直接用于不稳定对象。 /
+  Static Stribeck does not model zero-speed presliding, hysteresis, or a true
+  stuck state. Smith compensates only a known pure delay; plant/delay mismatch
+  remains in the loop, and the classical structure should not be applied
+  directly to unstable plants.
 - 因此观测残差包含接触、摩擦、齿隙、负载误差、力矩跟踪误差和编码器噪声；未
   验证前不能把它解释为纯接触力矩或安全碰撞阈值。 / The residual therefore
   combines contact, friction, backlash, payload error, torque-tracking error,
@@ -1256,6 +1366,8 @@ python3 -m pytest -q test/test_cartesian_impedance.py
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_momentum_observer.py
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python3 -m pytest -q test/test_friction_and_smith.py
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_cartesian_admittance.py
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 python3 -m pytest -q test/test_control_interface.py
@@ -1383,6 +1495,65 @@ asks for the mounting posture last, after keyboard input: `1` selects side mount
 and joint-number order; `2` selects horizontal mounting with an all-zero home
 and J2→J1→J3→… order. Passing
 `nero_mount:=side|horizontal` skips this prompt.
+
+### Nero 静摩擦测试 / Nero static-friction test
+
+先停止 `start_nero.sh` 和其他所有 CAN controller，移除负载、清空工作区并保持
+物理急停可触及；将测试轴放在重力矩尽量小的姿态，再手动运行源码脚本。该脚本
+没有加入任何启动项： / First stop
+`start_nero.sh` and every other CAN controller, remove payloads, clear the
+workspace, keep the physical E-stop reachable, and place the tested axis near
+a low-gravity-torque pose. Run the source script manually; it is not a startup
+entry:
+
+```bash
+cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
+./scripts/setup_can.sh
+
+# 默认顺序测试 J1→J2→…→J7 / Default: J1 through J7
+./scripts/test_nero_static_friction.py
+
+# 只测试 J4 / Test J4 only
+./scripts/test_nero_static_friction.py --joint 4
+```
+
+测试轴采用 `kp=kd=0` 的纯前馈力矩，不计算重力、惯性或科氏补偿。默认每档增加
+`0.005 N·m` 并至少保持 `0.25 s`；只有 `0.1 s` 窗口速度不超过 `0.01 rad/s`
+、MIT 力矩包络已稳定，而且至少 `0.15 s` 电机力矩反馈的中位绝对偏差不超过
+`0.02 N·m` 时才进入下一档，因此平均增加率不超过 `0.02 N·m/s`，到
+`2 N·m` 最长约需 100 秒/方向。`0.2°` 位移判据避免把微小反馈抖动当成起动。
+刚起动时记录上一稳定档与首次运动档，以中点作为命令估计、半档作为不确定度，并
+报告起动前最近 `0.2 s` 电机反馈力矩中位数；随后先发送 50 ms 零前馈 MIT 阻尼/
+位置保持，再切回规划模式，使惯性与科氏影响尽可能小。默认执行正、反两个方向，结果按
+`tau_s=(tau_positive-tau_negative)/2` 估计静摩擦，并报告
+`(tau_positive+tau_negative)/2` 零偏；零偏包含当前姿态的恒定重力和驱动
+偏置。使用 `--help` 查看有界的爬升率、最大力矩、位移阈值和采样率选项。 /
+The tested joint uses pure feedforward torque with `kp=kd=0`; no gravity,
+inertia, or Coriolis compensation is computed. By default torque advances in
+`0.005 N.m` plateaus held for at least `0.25 s`. It advances only when `0.1 s`
+windowed speed is at most `0.01 rad/s`, the MIT envelope has settled, and at
+least `0.15 s` of motor-torque feedback has median absolute deviation no more
+than `0.02 N.m`, so the
+average increase stays at or below `0.02 N.m/s` and reaching `2 N.m` takes up
+to about 100 seconds per direction. The `0.2 deg` criterion avoids mistaking
+small feedback jitter for breakaway. First motion records the last-stable and
+first-moving command levels, uses their midpoint with half-step uncertainty,
+and reports the median of the latest `0.2 s` pre-motion motor-torque feedback.
+It is followed by 50 ms of zero-feedforward MIT damping/position hold before
+switching to planned mode. This minimizes inertial and Coriolis effects. The
+default runs both directions and estimates stiction as
+`tau_s=(tau_positive-tau_negative)/2`, and reports
+`(tau_positive+tau_negative)/2` as the zero offset, which includes constant
+gravity and drive bias at the current pose. Use `--help` for bounded ramp
+rate, torque-step, maximum-torque, movement-threshold-in-degrees, and
+sample-rate options.
+不传 `--joint` 时按 J1→J7 顺序执行；每个轴先完成正向、回共同姿态、完成反向、
+再回共同姿态，才进入下一轴。安全异常立即停止整个序列；仅“达到最大力矩仍未
+起动”会记录为该轴未完成并继续下一轴。 / Without `--joint`, execution is
+J1 through J7. Each joint completes positive, returns to the common pose,
+completes negative, and returns again before the next joint. A safety exception
+stops the whole sequence immediately; only a safe no-breakaway-at-maximum
+outcome is recorded as incomplete before continuing to the next joint.
 
 YAML 默认保持 `nero_mount=side`。上面的指令只为本次平置实机启动显式传
 `nero_mount:=horizontal`，不修改默认。启动后保持机械臂被支撑，按 `I` 同时
@@ -1733,6 +1904,8 @@ checks.
 | 空间误差旋量 | Space-error twist | `Log(T_d T^-1)^vee`，表达在基坐标系并与 `J_s` 配对 / Base-frame SE(3) error paired with `J_s` |
 | 广义动量 | Generalized momentum | `p=M(q)qdot` |
 | 动量观测残差 | Momentum-observer residual | 外部关节力矩的一阶低通估计；也包含未建模扰动 / First-order estimate of external joint torque that also contains unmodelled disturbances |
+| Stribeck 摩擦 | Stribeck friction | 从静摩擦峰值随速度指数下降到 Coulomb 摩擦并叠加粘性项的静态映射 / Static velocity map that decays exponentially from stiction level to Coulomb friction and adds a viscous term |
+| Smith 预估器 | Smith predictor | 用 `y_hat=y+y0-yd` 从反馈特征方程中移除标称纯延迟的模型式补偿器 / Model-based compensator using `y_hat=y+y0-yd` to remove nominal pure delay from the feedback characteristic equation |
 | 阻尼最小二乘 | Damped least squares | Regularized solve of `tau_ext=J^T F_ext` near rank loss |
 | MIT 命令 | MIT command | Native motor command with `p_des/v_des/kp/kd/t_ff` |
 | 控制输入 | Control Input | 一个周期的 state、reference、wrench、timestamp 与 period / Same-cycle state, reference, wrench, timestamp, and period |
@@ -1766,6 +1939,13 @@ checks.
   Detection and Hybrid Force/Motion Control,” IEEE ICRA, 2005, pp. 999-1004.
   DOI: 10.1109/ROBOT.2005.1570247. 广义动量残差公式来源。 / Primary source
   for the generalized-momentum residual.
+- Y. F. Liu et al., “Experimental comparison of five friction models on the
+  same test-bed,” *Mechanical Sciences* 6, 2015, pp. 15–28,
+  https://doi.org/10.5194/ms-6-15-2015. 本实现采用其式 (6) 的 Stribeck 静态
+  速度模型。 / Source of the implemented static Stribeck velocity equation.
+- O. J. M. Smith, “Closer Control of Loops with Dead Time,” *Chemical
+  Engineering Progress* 53(5), 1957, pp. 217–219. 经典 Smith 纯时延补偿结构。 /
+  Original Smith dead-time compensation structure.
 - Matthias Mayr and Julian M. Salt-Ducaju, “A C++ Implementation of a
   Cartesian Impedance Controller for Robotic Manipulators,” JOSS 9(93), 5194,
   2024, https://doi.org/10.21105/joss.05194. 本项目采用其 `J^T` 任务力矩
