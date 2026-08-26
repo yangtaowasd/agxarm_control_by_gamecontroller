@@ -717,6 +717,7 @@ class ArmKeyboardController(
         self.feedback_previous_position = None
         self.feedback_previous_velocity = np.zeros(self.joint_count)
         self.feedback_previous_time = None
+        self.feedback_velocity_estimate_ready = False
         self.feedback_source_timestamps = {}
         self.last_complete_motor_feedback = None
         self.last_complete_motor_feedback_at = -math.inf
@@ -760,8 +761,7 @@ class ArmKeyboardController(
         )
         self.connect_arm()
         self.mit_trajectory.reset(self.jog.target_joints)
-        if start_in_impedance:
-            self.toggle_impedance()
+        self._start_impedance_if_requested(start_in_impedance)
         self._publish_interaction_state("startup")
         self.timer = self.create_timer(
             1.0 / self.control_rate, self.control_tick

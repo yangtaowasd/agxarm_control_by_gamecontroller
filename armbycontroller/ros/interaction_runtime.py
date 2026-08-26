@@ -121,7 +121,26 @@ class InteractionRuntimeMixin:
             )
         self._publish_interaction_state("control_mode_changed")
 
-    def toggle_impedance(self):
+    def _start_impedance_if_requested(self, requested):
+        """Enter startup impedance only after feedback is proven live."""
+        if not requested:
+            return
+        feedback = None
+        if self.execute_motion:
+            if not self.arm_ready:
+                self.toggle_impedance()
+                return
+            feedback = self.wait_for_motor_feedback()
+            if feedback is None:
+                self.get_logger().error(
+                    "cannot start in MIT impedance: live q/dq/torque "
+                    "feedback did not arrive before feedback_timeout; "
+                    "remaining in normal mode"
+                )
+                return
+        self.toggle_impedance(feedback=feedback)
+
+    def toggle_impedance(self, feedback=None):
         """Switch between planned motion and the selected MIT backend."""
         transition = self._plan_interaction_mode("impedance")
         if transition.target == "normal":
@@ -138,14 +157,14 @@ class InteractionRuntimeMixin:
             )
             return
         backend = getattr(self, "impedance_backend", "joint")
-        feedback = None
         if self.execute_motion:
             if not self.arm_ready:
                 self.get_logger().error(
                     "cannot enter MIT: arm is not ready"
                 )
                 return
-            feedback = self.read_motor_feedback()
+            if feedback is None:
+                feedback = self.read_motor_feedback()
             if feedback is None:
                 self.get_logger().error(
                     "cannot enter MIT: complete q/dq/torque feedback is "

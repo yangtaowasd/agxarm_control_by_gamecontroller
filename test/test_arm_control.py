@@ -1397,6 +1397,72 @@ def test_motor_feedback_uses_one_complete_cached_sdk_sample():
     assert feedback.torque == pytest.approx([-0.5, -1.0])
 
 
+def test_startup_impedance_waits_for_live_motor_feedback(monkeypatch):
+    class FakeArm:
+        def __init__(self):
+            self.read_count = 0
+            self.timestamp = 100.0
+            self.position = [0.0, 0.0]
+
+        def get_joint_angles(self):
+            self.read_count += 1
+            self.timestamp = 99.0 + self.read_count
+            self.position = [
+                0.001 * (self.read_count - 1),
+                -0.002 * (self.read_count - 1),
+            ]
+            return SimpleNamespace(
+                msg=self.position,
+                timestamp=self.timestamp,
+            )
+
+        def get_motor_states(self, joint_index):
+            del joint_index
+            return SimpleNamespace(
+                msg=SimpleNamespace(velocity=0.0, torque=0.0),
+                timestamp=self.timestamp,
+            )
+
+    clock = [0.0]
+    toggles = []
+
+    controller = object.__new__(ArmKeyboardController)
+    controller.execute_motion = True
+    controller.arm_ready = True
+    controller.arm = FakeArm()
+    controller.joint_count = 2
+    controller.robot_model = "nero"
+    controller.firmware_name = "v112"
+    controller.nero_velocity_estimation_enabled = True
+    controller.velocity_filter_time_constant = 0.0
+    controller.feedback_timeout = 0.1
+    controller.interaction_feedback_timeout = 0.1
+    controller.feedback_source_timestamps = {}
+    controller.last_complete_motor_feedback = None
+    controller.last_complete_motor_feedback_at = -math.inf
+    controller.feedback_previous_position = None
+    controller.feedback_previous_velocity = np.zeros(2)
+    controller.feedback_previous_time = None
+    controller.toggle_impedance = (
+        lambda feedback=None: toggles.append(feedback)
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.hardware_session.time.monotonic",
+        lambda: clock[0],
+    )
+    monkeypatch.setattr(
+        "armbycontroller.ros.hardware_session.time.sleep",
+        lambda duration: clock.__setitem__(0, clock[0] + duration),
+    )
+
+    controller._start_impedance_if_requested(True)
+
+    assert controller.arm.read_count == 3
+    assert len(toggles) == 1
+    assert toggles[0].position == pytest.approx([0.002, -0.004])
+    assert toggles[0].velocity == pytest.approx([0.1, -0.2])
+
+
 def test_motor_feedback_rejects_sdk_cache_when_timestamps_stop(monkeypatch):
     class FakeArm:
         def __init__(self):

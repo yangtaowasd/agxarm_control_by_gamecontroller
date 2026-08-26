@@ -898,6 +898,7 @@ implementation.
 | `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | Nero=`2.8`; Piper-L=`2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
 | `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
 | `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
+| `feedback_timeout` | scalar | s | `3.0`；启动关节反馈以及 `impedance_enabled:=true` 所需完整实时 `q/dq/torque` 反馈的等待时限；超时保留普通模式 / startup deadline for joint feedback and the complete live `q/dq/torque` bundle required by `impedance_enabled:=true`; timeout preserves normal mode |
 | `interaction_feedback_timeout` | scalar | s | `0.10`；SDK 关节角和每轴电机状态源时间戳停止推进后的阻抗退出时限 / impedance exit deadline when any SDK source timestamp stops advancing |
 | `interaction_feedback_handover_max_displacement` | scalar | rad | `0.03`；反馈丢失交接时 `abs(qdot) * sample_age` 的逐关节上限，超限则急停 / per-joint `abs(qdot) * sample_age` bound for feedback-loss handover; exceeding it E-stops |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
@@ -1897,6 +1898,20 @@ ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
 current pose so the first task error is zero; press `P` to update references
 through screw IK. First hardware trials require physical arm support, an
 accessible emergency stop, and a clear workspace.
+
+若显式设置 `impedance_enabled:=true`，启动流程会在切换 MIT 前等待完整且时间戳已
+推进的 `q/dq/torque` 反馈（最长 `feedback_timeout`，默认 `3.0 s`）。首个 SDK
+时间戳包只建立活性基线；若后续实时包未到达，节点保持普通位置模式并报告错误，
+不会带着不完整反馈进入阻抗。Nero v111/v112 还会再等待一个时间戳推进样本，先
+建立差分速度估计，再允许实测速度保护放行 MIT。 / With
+`impedance_enabled:=true`, startup waits
+up to `feedback_timeout` (default `3.0 s`) for a complete `q/dq/torque` bundle
+whose SDK timestamps have advanced before switching to MIT. The first
+timestamped bundle only establishes the liveness baseline; if a subsequent
+live bundle does not arrive, the node reports the error and remains in normal
+position mode. Nero v111/v112 additionally waits for one more advancing
+sample so its finite-difference velocity estimate is initialized before the
+measured-speed guard can permit MIT entry.
 
 Piper-L 默认使用带阻尼和回中刚度的 `resistive` 导纳；追加
 `admittance_mode:=zero_force` 可选择零力版本。保持 `impedance_enabled:=false`，

@@ -572,6 +572,29 @@ class HardwareSessionMixin:
         self.last_complete_motor_feedback_at = received_at
         return feedback
 
+    def wait_for_motor_feedback(self):
+        """Wait for one complete, live motor-feedback bundle."""
+        deadline = time.monotonic() + self.feedback_timeout
+        while time.monotonic() < deadline:
+            feedback = self.read_motor_feedback()
+            if feedback is not None and self._feedback_velocity_is_ready():
+                return feedback
+            time.sleep(0.01)
+        return None
+
+    def _uses_estimated_feedback_velocity(self):
+        return bool(
+            getattr(self, "robot_model", "") == "nero"
+            and getattr(self, "firmware_name", "") in ("v111", "v112")
+            and getattr(self, "nero_velocity_estimation_enabled", True)
+        )
+
+    def _feedback_velocity_is_ready(self):
+        return bool(
+            not self._uses_estimated_feedback_velocity()
+            or getattr(self, "feedback_velocity_estimate_ready", False)
+        )
+
     @staticmethod
     def _feedback_source_timestamp(source):
         """Return a finite SDK receive timestamp, if the source exposes one."""
@@ -686,12 +709,8 @@ class HardwareSessionMixin:
 
     def _select_feedback_velocity(self, positions, sdk_velocities, now=None):
         """Use finite differences for Nero firmware with zero SDK speed."""
-        estimate = (
-            getattr(self, "robot_model", "") == "nero"
-            and getattr(self, "firmware_name", "") in ("v111", "v112")
-            and getattr(self, "nero_velocity_estimation_enabled", True)
-        )
-        if not estimate:
+        if not self._uses_estimated_feedback_velocity():
+            self.feedback_velocity_estimate_ready = True
             return np.asarray(sdk_velocities, dtype=float).copy()
 
         position = np.asarray(positions, dtype=float)
@@ -715,6 +734,7 @@ class HardwareSessionMixin:
             or now <= previous_time
         ):
             velocity = np.zeros(position.size, dtype=float)
+            self.feedback_velocity_estimate_ready = False
         else:
             velocity = estimate_joint_velocity(
                 previous_position,
@@ -723,6 +743,7 @@ class HardwareSessionMixin:
                 now - previous_time,
                 getattr(self, "velocity_filter_time_constant", 0.03),
             )
+            self.feedback_velocity_estimate_ready = True
         self.feedback_previous_position = position.copy()
         self.feedback_previous_velocity = velocity.copy()
         self.feedback_previous_time = now

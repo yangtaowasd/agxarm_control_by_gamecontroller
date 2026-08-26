@@ -636,6 +636,8 @@ ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   cartesian_impedance_base_z_rotation_stiffness:=4.0
 
 # Start directly in MIT impedance mode by adding impedance_enabled:=true.
+# Hardware startup first waits for a complete live q/dq/torque bundle; if it
+# does not arrive before feedback_timeout, the controller stays in normal mode.
 ```
 
 Inspect the observer output after entering MIT with `I`:
