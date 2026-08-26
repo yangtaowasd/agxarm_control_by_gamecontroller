@@ -70,6 +70,14 @@ class RosTelemetry:
         )
         return message
 
+    @staticmethod
+    def _resolved_service_name(node, attribute):
+        name = str(getattr(node, attribute, ""))
+        if not name:
+            return ""
+        resolver = getattr(node, "resolve_service_name", None)
+        return str(resolver(name)) if callable(resolver) else name
+
     def publish_control_result(self, sample, result, interaction_mode):
         """Publish one stable control-sample JSON message."""
         if self.control_sample_publisher is None:
@@ -122,12 +130,14 @@ class RosTelemetry:
             ),
             execute_motion=bool(getattr(node, "execute_motion", False)),
             mode_services={
-                "normal": getattr(node, "normal_mode_service_name", ""),
-                "impedance": getattr(
-                    node, "impedance_mode_service_name", ""
+                "normal": self._resolved_service_name(
+                    node, "normal_mode_service_name"
                 ),
-                "admittance": getattr(
-                    node, "admittance_mode_service_name", ""
+                "impedance": self._resolved_service_name(
+                    node, "impedance_mode_service_name"
+                ),
+                "admittance": self._resolved_service_name(
+                    node, "admittance_mode_service_name"
                 ),
             },
             reason=str(reason),

@@ -25,10 +25,12 @@ they contain no ROS or CAN calls.
 | `armbycontroller/control/core.py` | `ControlState`、`ControlReference`、`ControlInput`、命令类型、`ControlResult`、`ControllerAdapter` interface、`ControlEngine` 和稳定控制样本 schema / normalized types, controller interface, engine, and stable sample schema |
 | `armbycontroller/control/__init__.py` | 控制 module 的稳定导出面 / stable exports for the control module |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、指标、sink interface、内存与 JSONL adapter / experiment lifecycle, metrics, sink interface, in-memory and JSONL adapters |
+| `armbycontroller/experiment/static_friction.py` | 静摩擦测试的窗口二次加速度估计、候选/位移确认、力矩反馈窗口和 YAML 数据契约 / windowed quadratic acceleration, candidate/displacement confirmation, torque-feedback windows, and YAML contracts for static-friction tests |
 | `armbycontroller/experiment/__init__.py` | 实验 module 的稳定导出面 / stable exports for the experiment module |
+| `scripts/test_nero_static_friction.py` | 源码手动运行的 Nero 准静态力矩阶梯；速度仅作安全保护 / source-only manual Nero quasi-static torque ramp with speed used only as a safety guard |
 | `test/test_control_interface.py` | 所有 controller adapter 共用的输入/输出、限幅和 schema 契约 / shared input/output, limit, and schema contracts |
 | `test/test_cartesian_common.py` | 两种控制共同依赖的几何 Jacobian、SE(3) 和虚功双向映射契约 / shared geometric-Jacobian, SE(3), and bidirectional virtual-work contracts |
-| `test/test_experiment.py` | manifest、sample/event 顺序、JSONL 文件和汇总指标契约 / manifest, ordering, JSONL, and summary-metric contracts |
+| `test/test_experiment.py` | manifest、sample/event、JSONL、加速度起动状态机和静摩擦 YAML 契约 / manifest, sample/event, JSONL, acceleration-breakaway state-machine, and static-friction YAML contracts |
 
 ## 数据契约 / Data contracts
 

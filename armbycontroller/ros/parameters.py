@@ -98,7 +98,7 @@ def declare_controller_parameters(node):
     default_mit_feedforward_values = default_mit_feedforward(gain_model)
     admittance_mit_profile = ADMITTANCE_MIT_GAIN_PROFILES[gain_model]
 
-    node.declare_parameter("keyboard_topic", "/arm_keyboard_state")
+    node.declare_parameter("keyboard_topic", "arm_keyboard_state")
     node.declare_parameter("can_interface", "can0")
     node.declare_parameter("firmware", "auto")
     node.declare_parameter("firmware_probe_timeout", 5.0)
@@ -115,6 +115,10 @@ def declare_controller_parameters(node):
     node.declare_parameter("joint_acc_timeout", 2.0)
     node.declare_parameter("position_mode_timeout", 2.0)
     node.declare_parameter("keyboard_timeout", 0.3)
+    node.declare_parameter("interaction_feedback_timeout", 0.1)
+    node.declare_parameter(
+        "interaction_feedback_handover_max_displacement", 0.03
+    )
     node.declare_parameter("enable_timeout", 5.0)
     node.declare_parameter("feedback_timeout", 3.0)
     node.declare_parameter("move_home_on_start", False)
@@ -170,21 +174,21 @@ def declare_controller_parameters(node):
         "interaction_measured_velocity_violation_cycles", 3
     )
     node.declare_parameter("interaction_joint_limit_margin", 0.03)
-    node.declare_parameter("dynamics_state_topic", "/arm_dynamics_state")
+    node.declare_parameter("dynamics_state_topic", "arm_dynamics_state")
     node.declare_parameter(
-        "external_torque_topic", "/arm_external_joint_torque"
+        "external_torque_topic", "arm_external_joint_torque"
     )
-    node.declare_parameter("control_sample_topic", "/arm_control_sample")
-    node.declare_parameter("control_event_topic", "/arm_control_event")
+    node.declare_parameter("control_sample_topic", "arm_control_sample")
+    node.declare_parameter("control_event_topic", "arm_control_event")
     node.declare_parameter(
-        "interaction_state_topic", "/arm/interaction_state"
+        "interaction_state_topic", "arm/interaction_state"
     )
-    node.declare_parameter("normal_mode_service", "/arm/set_normal_mode")
+    node.declare_parameter("normal_mode_service", "arm/set_normal_mode")
     node.declare_parameter(
-        "impedance_mode_service", "/arm/set_impedance_mode"
+        "impedance_mode_service", "arm/set_impedance_mode"
     )
     node.declare_parameter(
-        "admittance_mode_service", "/arm/set_admittance_mode"
+        "admittance_mode_service", "arm/set_admittance_mode"
     )
     node.declare_parameter("mit_kp", default_mit_kp)
     node.declare_parameter("mit_kd", default_mit_kd)

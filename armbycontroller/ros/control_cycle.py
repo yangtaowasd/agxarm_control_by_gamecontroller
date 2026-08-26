@@ -228,6 +228,15 @@ class ControlCycleMixin:
             active_mode = "admittance"
         elif self.impedance_enabled:
             active_mode = "impedance"
+        if active_mode == "impedance" and feedback is None:
+            self.get_logger().error(
+                "impedance feedback lost; returning to normal hold"
+            )
+            self._exit_impedance(
+                "complete motor feedback lost",
+                feedback=self.recent_motor_feedback(),
+            )
+            return
         if (
             active_mode is not None
             and getattr(self, "interaction_velocity_guard", None) is not None

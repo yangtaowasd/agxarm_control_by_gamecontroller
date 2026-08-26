@@ -1,5 +1,5 @@
 # Parameters intentionally shared by Nero and Piper-L.
-arm_keyboard_controller:
+"/**/arm_keyboard_controller":
   ros__parameters:
     control_rate: 100.0       # Hz
     mit_command_rate: 100.0   # Hz
@@ -13,6 +13,9 @@ arm_keyboard_controller:
     interaction_measured_joint_velocity_hard_limit: [2.5]
     interaction_measured_velocity_violation_cycles: 3
     interaction_joint_limit_margin: 0.03
+    interaction_feedback_timeout: 0.10  # s; SDK timestamp watchdog
+    # Maximum |dq| * cached-sample age allowed for MIT -> MOVE_J handover.
+    interaction_feedback_handover_max_displacement: 0.03  # rad
     cartesian_impedance_max_force: 10.0   # N, norm limit before J^T
     cartesian_impedance_max_torque: 4.0  # N.m, norm limit before J^T
     admittance_singularity_slow_threshold: 0.05
@@ -26,6 +29,6 @@ arm_keyboard_controller:
     firmware_probe_poll_period: 0.1   # s
     firmware_reconnect_delay: 0.5     # s; probe disconnect -> formal connect
 
-arm_momentum_observer:
+"/**/arm_momentum_observer":
   ros__parameters:
     momentum_observer_rate: 100.0  # Hz

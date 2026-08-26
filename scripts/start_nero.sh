@@ -14,6 +14,17 @@ NERO_MOUNT="$(
   "${SCRIPT_DIRECTORY}/select_nero_mount.sh" "$@"
 )"
 readonly NERO_MOUNT
+FORWARDED_ARGUMENTS=()
+for argument in "$@"; do
+  case "${argument}" in
+    device:=* | nero_mount:=*)
+      ;;
+    *)
+      FORWARDED_ARGUMENTS+=("${argument}")
+      ;;
+  esac
+done
+readonly FORWARDED_ARGUMENTS
 
 SOURCE_WORKSPACE_DIRECTORY="$(
   cd -- "${SCRIPT_DIRECTORY}/../../.." && pwd
@@ -41,10 +52,11 @@ set -u
 
 exec ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=nero \
+  arm_namespace:=nero \
   execute_motion:=true \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
   nero_mount:="${NERO_MOUNT}" \
   move_home_on_start:=false \
   reset_emergency_stop_on_start:=true \
-  "$@"
+  "${FORWARDED_ARGUMENTS[@]}"

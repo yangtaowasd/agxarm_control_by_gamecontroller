@@ -283,6 +283,10 @@ class InteractionRuntimeMixin:
             return self._fail_interaction_transition(
                 "planned joint mode was not confirmed after impedance exit"
             )
+        if not self.send_planned_hold(f"MIT exit hold ({reason})"):
+            return self._fail_interaction_transition(
+                "planned hold command failed after impedance exit"
+            )
         self._commit_interaction_mode("normal")
         self._complete_interaction_transition()
         self._check_interaction_mode_invariant()
@@ -293,7 +297,6 @@ class InteractionRuntimeMixin:
             controller=f"{backend}_impedance",
             reason=str(reason),
         )
-        self.send_target(f"MIT exit hold ({reason})")
         self._publish_interaction_state("mode_exit_complete")
         return True
 
@@ -449,7 +452,7 @@ class InteractionRuntimeMixin:
         if self.execute_motion and not self._external_wrench_is_fresh():
             self.get_logger().error(
                 "cannot enter admittance: momentum-observer wrench is stale; "
-                "check /arm_external_joint_torque"
+                f"check {self.external_torque_topic}"
             )
             return
         joints = (
@@ -540,6 +543,10 @@ class InteractionRuntimeMixin:
             return self._fail_interaction_transition(
                 "planned joint mode was not confirmed after admittance exit"
             )
+        if not self.send_planned_hold(f"admittance exit hold ({reason})"):
+            return self._fail_interaction_transition(
+                "planned hold command failed after admittance exit"
+            )
         self._commit_interaction_mode("normal")
         self._complete_interaction_transition()
         self.last_admittance_tick_time = None
@@ -552,7 +559,6 @@ class InteractionRuntimeMixin:
             self, "admittance_previous_control_mode", "joint"
         )
         self._check_interaction_mode_invariant()
-        self.send_target(f"admittance exit hold ({reason})")
         selected_mode = getattr(
             self,
             "admittance_mode",
@@ -607,7 +613,7 @@ class InteractionRuntimeMixin:
         if self.execute_motion and not self._external_wrench_is_fresh():
             self.get_logger().error(
                 "cannot enter hybrid: momentum-observer wrench is stale; "
-                "check /arm_external_joint_torque"
+                f"check {self.external_torque_topic}"
             )
             return
         joints = (
@@ -693,6 +699,10 @@ class InteractionRuntimeMixin:
             return self._fail_interaction_transition(
                 "planned joint mode was not confirmed after hybrid exit"
             )
+        if not self.send_planned_hold(f"hybrid exit hold ({reason})"):
+            return self._fail_interaction_transition(
+                "planned hold command failed after hybrid exit"
+            )
         self._commit_interaction_mode("normal")
         self._complete_interaction_transition()
         self.last_hybrid_tick_time = None
@@ -705,7 +715,6 @@ class InteractionRuntimeMixin:
             self, "hybrid_previous_control_mode", "joint"
         )
         self._check_interaction_mode_invariant()
-        self.send_target(f"hybrid exit hold ({reason})")
         self._publish_control_event(
             "controller_disabled",
             controller="hybrid_cartesian",

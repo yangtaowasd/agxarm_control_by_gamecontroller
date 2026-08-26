@@ -15,14 +15,15 @@ COMMON = {
     "can_interface": "can0",
     "execute_motion": "true",
     "disable_arm_on_shutdown": "false",
-    "dynamics_state_topic": "/arm_dynamics_state",
-    "external_torque_topic": "/arm_external_joint_torque",
-    "control_sample_topic": "/arm_control_sample",
-    "control_event_topic": "/arm_control_event",
-    "interaction_state_topic": "/arm/interaction_state",
-    "normal_mode_service": "/arm/set_normal_mode",
-    "impedance_mode_service": "/arm/set_impedance_mode",
-    "admittance_mode_service": "/arm/set_admittance_mode",
+    "keyboard_topic": "arm_keyboard_state",
+    "dynamics_state_topic": "arm_dynamics_state",
+    "external_torque_topic": "arm_external_joint_torque",
+    "control_sample_topic": "arm_control_sample",
+    "control_event_topic": "arm_control_event",
+    "interaction_state_topic": "arm/interaction_state",
+    "normal_mode_service": "arm/set_normal_mode",
+    "impedance_mode_service": "arm/set_impedance_mode",
+    "admittance_mode_service": "arm/set_admittance_mode",
     "joint_acc_timeout": "2.0",
     "position_mode_timeout": "2.0",
     "reset_emergency_stop_on_start": "false",
@@ -51,6 +52,7 @@ STARTUP = {
 MODELS = ("nero", "piper_l")
 USE_CONFIG = "__config__"
 USE_ROBOT_CONFIG = "__robot__"
+USE_ROBOT_NAMESPACE = "__robot__"
 ROBOT_CONFIG_FILENAMES = {
     "nero": "nero.yaml",
     "piper_l": "piper_l.yaml",
@@ -82,6 +84,8 @@ CONFIGURED_PARAMETERS = {
     "interaction_measured_joint_velocity_hard_limit",
     "interaction_measured_velocity_violation_cycles",
     "interaction_joint_limit_margin",
+    "interaction_feedback_timeout",
+    "interaction_feedback_handover_max_displacement",
     "cartesian_impedance_rotation_stiffness",
     "cartesian_impedance_base_z_rotation_stiffness",
     "cartesian_impedance_translation_stiffness",
@@ -142,6 +146,7 @@ CONFIGURED_PARAMETERS = {
     "velocity_filter_time_constant",
 }
 CONFIGURED_OBSERVER_PARAMETERS = {
+    "tool_configuration",
     "momentum_observer_rate",
     "momentum_observer_gain",
     "momentum_observer_max_period",
@@ -158,6 +163,11 @@ def _nodes(context):
     model = LaunchConfiguration("robot_model").perform(context).lower()
     if model not in MODELS:
         raise ValueError("robot_model must be nero or piper_l")
+    arm_namespace = LaunchConfiguration("arm_namespace").perform(
+        context
+    ).strip()
+    if arm_namespace == USE_ROBOT_NAMESPACE:
+        arm_namespace = model
     common_config_path = LaunchConfiguration("common_config").perform(
         context
     ).strip()
@@ -195,13 +205,20 @@ def _nodes(context):
         Node(
             package="agxarm_control_by_gamecontroller",
             executable="keyboard",
-            name="arm_keyboard_reader", output="screen",
-            parameters=[{"device": LaunchConfiguration("device")}],
+            name="arm_keyboard_reader",
+            namespace=arm_namespace,
+            output="screen",
+            parameters=[{
+                "device": LaunchConfiguration("device"),
+                "keyboard_topic": LaunchConfiguration("keyboard_topic"),
+            }],
         ),
         Node(
             package="agxarm_control_by_gamecontroller",
             executable="main.py",
-            name="arm_keyboard_controller", output="screen",
+            name="arm_keyboard_controller",
+            namespace=arm_namespace,
+            output="screen",
             parameters=[*parameter_files, controller_parameters],
         ),
     ]
@@ -237,6 +254,7 @@ def _nodes(context):
             package="agxarm_control_by_gamecontroller",
             executable="momentum_observer_node.py",
             name="arm_momentum_observer",
+            namespace=arm_namespace,
             output="screen",
             parameters=[*parameter_files, observer_parameters],
         ))
@@ -249,6 +267,7 @@ def _nodes(context):
             package="agxarm_control_by_gamecontroller",
             executable="experiment_recorder_node.py",
             name="arm_experiment_recorder",
+            namespace=arm_namespace,
             output="screen",
             parameters=[{
                 "sample_topic": LaunchConfiguration(
@@ -274,6 +293,7 @@ def _nodes(context):
 def generate_launch_description():
     arguments = {
         "robot_model": "nero",
+        "arm_namespace": USE_ROBOT_NAMESPACE,
         "device": "/dev/input/event3",
         "common_config": PathJoinSubstitution([
             FindPackageShare("agxarm_control_by_gamecontroller"),

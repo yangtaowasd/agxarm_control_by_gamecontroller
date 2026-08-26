@@ -9,6 +9,7 @@
 
 #undef None
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -31,6 +32,8 @@ public:
   : Node("keyboard_reader")
   {
     device_ = declare_parameter<std::string>("device", "/dev/input/event3");
+    topic_ = declare_parameter<std::string>(
+      "keyboard_topic", "arm_keyboard_state");
     configure_keys();
 
     if (device_ == "x11") {
@@ -63,7 +66,6 @@ public:
 private:
   void configure_keys()
   {
-    topic_ = "/arm_keyboard_state";
     period_ = 5ms;
     bindings_ = {
       {KEY_1, 0}, {KEY_2, 1}, {KEY_3, 2}, {KEY_4, 3},
@@ -107,17 +109,32 @@ private:
 
   void read_evdev_state()
   {
+    if (fd_ < 0) {
+      return;
+    }
     input_event event {};
     while (true) {
       const ssize_t bytes = read(fd_, &event, sizeof(event));
       if (bytes < 0) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
-          RCLCPP_ERROR(get_logger(), "Keyboard read failed: %s", std::strerror(errno));
+        if (errno == EINTR) {
+          continue;
         }
-        break;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          return;
+        }
+        latch_evdev_fault(
+          "keyboard read failed: " + std::string(std::strerror(errno)));
+        return;
+      }
+      if (bytes == 0) {
+        latch_evdev_fault("keyboard device disconnected (EOF)");
+        return;
       }
       if (bytes != static_cast<ssize_t>(sizeof(event))) {
-        break;
+        latch_evdev_fault(
+          "keyboard device returned a partial input event (" +
+          std::to_string(bytes) + " bytes)");
+        return;
       }
       if (event.type != EV_KEY) {
         continue;
@@ -126,6 +143,22 @@ private:
       if (binding != bindings_.end()) {
         states_[binding->second] = event.value == 0 ? 0 : 1;
       }
+    }
+  }
+
+  void latch_evdev_fault(const std::string & reason)
+  {
+    if (evdev_faulted_) {
+      return;
+    }
+    evdev_faulted_ = true;
+    std::fill(states_.begin(), states_.end(), 0);
+    RCLCPP_ERROR(
+      get_logger(), "%s; all keyboard commands are released",
+      reason.c_str());
+    if (fd_ >= 0) {
+      close(fd_);
+      fd_ = -1;
     }
   }
 
@@ -154,6 +187,7 @@ private:
   }
 
   int fd_ {-1};
+  bool evdev_faulted_ {false};
   Display * x_display_ {nullptr};
   std::string device_;
   std::string topic_;

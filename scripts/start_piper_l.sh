@@ -10,6 +10,13 @@ KEYBOARD_DEVICE="$(
   "${SCRIPT_DIRECTORY}/select_input_device.sh" "$@"
 )"
 readonly KEYBOARD_DEVICE
+FORWARDED_ARGUMENTS=()
+for argument in "$@"; do
+  if [[ "${argument}" != device:=* ]]; then
+    FORWARDED_ARGUMENTS+=("${argument}")
+  fi
+done
+readonly FORWARDED_ARGUMENTS
 
 SOURCE_WORKSPACE_DIRECTORY="$(
   cd -- "${SCRIPT_DIRECTORY}/../../.." && pwd
@@ -37,9 +44,10 @@ set -u
 
 exec ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
   robot_model:=piper_l \
+  arm_namespace:=piper_l \
   execute_motion:=true \
   can_interface:=can0 \
   device:="${KEYBOARD_DEVICE}" \
   move_home_on_start:=false \
   reset_emergency_stop_on_start:=true \
-  "$@"
+  "${FORWARDED_ARGUMENTS[@]}"

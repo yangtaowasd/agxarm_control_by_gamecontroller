@@ -59,11 +59,53 @@ def set_joint_acceleration_limits(
 
 def prepare_planned_joint_mode(arm, timeout, poll_period=0.05):
     """Enter and confirm CAN joint-position mode before the first target."""
+    try:
+        status_before_request = arm.get_arm_status()
+    except Exception:
+        status_before_request = None
+    timestamp_required = bool(
+        status_before_request is not None
+        and hasattr(status_before_request, "timestamp")
+    )
+    try:
+        status_timestamp = float(status_before_request.timestamp)
+    except (AttributeError, TypeError, ValueError):
+        status_timestamp = None
+    if status_timestamp is not None and (
+        not math.isfinite(status_timestamp) or status_timestamp <= 0.0
+    ):
+        status_timestamp = None
     arm.set_motion_mode(arm.OPTIONS.MOTION_MODE.J)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status = arm.get_arm_status()
         if status is not None and hasattr(status, "msg"):
+            has_timestamp = hasattr(status, "timestamp")
+            if has_timestamp:
+                try:
+                    current_timestamp = float(status.timestamp)
+                except (TypeError, ValueError):
+                    current_timestamp = math.nan
+                if (
+                    not math.isfinite(current_timestamp)
+                    or current_timestamp <= 0.0
+                ):
+                    time.sleep(poll_period)
+                    continue
+                if status_timestamp is None:
+                    # With no pre-request receive timestamp, the first cached
+                    # status only establishes a baseline. A later CAN update
+                    # must confirm that MOVE_J was observed after the request.
+                    status_timestamp = current_timestamp
+                    timestamp_required = True
+                    time.sleep(poll_period)
+                    continue
+                if current_timestamp <= status_timestamp:
+                    time.sleep(poll_period)
+                    continue
+            elif timestamp_required:
+                time.sleep(poll_period)
+                continue
             ctrl_mode = str(getattr(status.msg, "ctrl_mode", ""))
             move_mode = str(getattr(status.msg, "mode_feedback", ""))
             if "CAN_CTRL" in ctrl_mode and "MOVE_J" in move_mode:
@@ -78,20 +120,6 @@ def resolve_urdf_path(parameter_value, robot_model):
         return Path(parameter_value).expanduser().resolve()
 
     candidates = []
-    if robot_model == "nero":
-        try:
-            share = Path(get_package_share_directory("nero_screw_dynamics"))
-            candidates.append(
-                share / "agx_arm_urdf" / "nero" / "urdf"
-                / "nero_description.urdf"
-            )
-        except PackageNotFoundError:
-            pass
-        candidates.append(
-            Path(__file__).resolve().parents[3]
-            / "nero_screw_dynamics" / "agx_arm_urdf" / "nero" / "urdf"
-            / "nero_description.urdf"
-        )
     try:
         share = Path(get_package_share_directory(
             "agxarm_control_by_gamecontroller"

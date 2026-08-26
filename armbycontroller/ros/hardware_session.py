@@ -512,17 +512,25 @@ class HardwareSessionMixin:
     def read_motor_feedback(self):
         """Read one complete cached q/dq/motor-torque sample."""
         if not hasattr(self.arm, "get_motor_states"):
-            return None
+            return self._cached_motor_feedback()
         try:
+            joint_state = self.arm.get_joint_angles()
             positions = extract_joint_angles(
-                self.arm.get_joint_angles(), self.joint_count
+                joint_state, self.joint_count
             )
         except Exception:
-            return None
+            return self._cached_motor_feedback()
         if positions is None:
+            return self._cached_motor_feedback()
+        position = np.asarray(positions, dtype=float)
+        if (
+            position.shape != (self.joint_count,)
+            or not np.all(np.isfinite(position))
+        ):
             return None
         velocities = []
         torques = []
+        source_timestamps = [self._feedback_source_timestamp(joint_state)]
         for joint_index in range(1, self.joint_count + 1):
             try:
                 state = self.arm.get_motor_states(joint_index)
@@ -530,22 +538,153 @@ class HardwareSessionMixin:
                 velocity = float(getattr(message, "velocity"))
                 torque = float(getattr(message, "torque"))
             except Exception:
-                return None
+                return self._cached_motor_feedback()
             if not np.isfinite(velocity) or not np.isfinite(torque):
                 return None
             velocities.append(velocity)
             torques.append(torque)
-        position = np.asarray(positions, dtype=float)
-        velocity = self._select_feedback_velocity(
-            position, np.asarray(velocities, dtype=float)
+            source_timestamps.append(
+                self._feedback_source_timestamp(state)
+            )
+        now = time.monotonic()
+        received_at = self._feedback_bundle_received_at(
+            source_timestamps, now
         )
-        return MotorFeedback(
+        if received_at is None:
+            return self._cached_motor_feedback(now)
+        if received_at <= float(getattr(
+            self, "last_complete_motor_feedback_at", -math.inf
+        )):
+            return self._cached_motor_feedback(now)
+        velocity = self._select_feedback_velocity(
+            position, np.asarray(velocities, dtype=float), now
+        )
+        feedback = MotorFeedback(
             position=position,
             velocity=velocity,
             torque=np.asarray(torques, dtype=float),
         )
+        self.last_complete_motor_feedback = MotorFeedback(
+            position=feedback.position.copy(),
+            velocity=feedback.velocity.copy(),
+            torque=feedback.torque.copy(),
+        )
+        self.last_complete_motor_feedback_at = received_at
+        return feedback
 
-    def _select_feedback_velocity(self, positions, sdk_velocities):
+    @staticmethod
+    def _feedback_source_timestamp(source):
+        """Return a finite SDK receive timestamp, if the source exposes one."""
+        try:
+            timestamp = float(getattr(source, "timestamp"))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(timestamp) or timestamp <= 0.0:
+            return -math.inf
+        return timestamp
+
+    def _feedback_bundle_received_at(self, timestamps, now):
+        """Reject pyAgxArm cache entries whose CAN timestamps stop advancing."""
+        current = {
+            index: timestamp
+            for index, timestamp in enumerate(timestamps)
+            if timestamp is not None
+        }
+        if any(not math.isfinite(timestamp) for timestamp in current.values()):
+            return None
+        if not current:
+            # Compatibility for SDK fakes/older implementations without a
+            # receive timestamp. Completeness and finiteness are still checked.
+            return float(now)
+
+        previous = dict(getattr(self, "feedback_source_timestamps", {}))
+        if previous and current.keys() != previous.keys():
+            return None
+        if not previous:
+            # A positive SDK timestamp only proves that a cache entry exists.
+            # Require every timestamp-bearing source to advance at least once
+            # before treating the bundle as live CAN feedback.
+            self.feedback_source_timestamps = current
+            return None
+
+        if any(
+            timestamp < previous[index]
+            for index, timestamp in current.items()
+        ):
+            return None
+        if all(
+            timestamp > previous[index]
+            for index, timestamp in current.items()
+        ):
+            self.feedback_source_timestamps = current
+            return float(now)
+
+        received_at = float(getattr(
+            self, "last_complete_motor_feedback_at", -math.inf
+        ))
+        timeout = float(getattr(
+            self, "interaction_feedback_timeout", 0.1
+        ))
+        if float(now) - received_at > timeout:
+            return None
+        return received_at
+
+    def _cached_motor_feedback(self, now=None, extra_age=0.0):
+        """Copy the last complete sample while it remains time bounded."""
+        feedback = getattr(self, "last_complete_motor_feedback", None)
+        received_at = float(getattr(
+            self, "last_complete_motor_feedback_at", -math.inf
+        ))
+        checked_at = time.monotonic() if now is None else float(now)
+        maximum_age = float(getattr(
+            self, "interaction_feedback_timeout", 0.1
+        )) + float(extra_age)
+        age = checked_at - received_at
+        if (
+            feedback is None
+            or not math.isfinite(age)
+            or age < 0.0
+            or age > maximum_age
+        ):
+            return None
+        return MotorFeedback(
+            position=np.asarray(feedback.position, dtype=float).copy(),
+            velocity=np.asarray(feedback.velocity, dtype=float).copy(),
+            torque=np.asarray(feedback.torque, dtype=float).copy(),
+        )
+
+    def recent_motor_feedback(self, now=None):
+        """Return the bounded handover sample for leaving MIT control."""
+        # The watchdog is checked once per MIT cycle. Permit only one nominal
+        # cycle of scheduling slack so the last bounded sample can hand MIT
+        # control back to planned-position hold. Older samples still fail
+        # closed in _interaction_exit_joints().
+        command_rate = float(getattr(self, "mit_command_rate", 100.0))
+        checked_at = time.monotonic() if now is None else float(now)
+        feedback = self._cached_motor_feedback(
+            now=checked_at,
+            extra_age=1.0 / max(command_rate, 1.0),
+        )
+        if feedback is None:
+            return None
+        received_at = float(getattr(
+            self, "last_complete_motor_feedback_at", -math.inf
+        ))
+        age = checked_at - received_at
+        maximum_displacement = float(getattr(
+            self,
+            "interaction_feedback_handover_max_displacement",
+            0.03,
+        ))
+        estimated_displacement = np.abs(feedback.velocity) * age
+        if (
+            not np.all(np.isfinite(estimated_displacement))
+            or np.any(estimated_displacement > maximum_displacement)
+        ):
+            return None
+        return feedback
+
+    def _select_feedback_velocity(self, positions, sdk_velocities, now=None):
         """Use finite differences for Nero firmware with zero SDK speed."""
         estimate = (
             getattr(self, "robot_model", "") == "nero"
@@ -556,7 +695,7 @@ class HardwareSessionMixin:
             return np.asarray(sdk_velocities, dtype=float).copy()
 
         position = np.asarray(positions, dtype=float)
-        now = time.monotonic()
+        now = time.monotonic() if now is None else float(now)
         previous_position = getattr(
             self, "feedback_previous_position", None
         )
@@ -606,29 +745,43 @@ class HardwareSessionMixin:
             velocities.append(velocity)
         return np.asarray(velocities, dtype=float)
 
-    def send_target(self, reason):
+    def _send_position_target(self, reason, allow_interaction=False):
+        """Send one planned-position target and report transport success."""
         target = [float(value) for value in self.jog.target_joints]
         self.get_logger().info(
             f"{reason}: {[round(value, 4) for value in target]}",
             throttle_duration_sec=0.25,
         )
         if not self.execute_motion:
-            return
+            return True
         if (
             self.impedance_enabled
             or getattr(self, "admittance_enabled", False)
             or getattr(self, "hybrid_enabled", False)
-        ):
-            return
+        ) and not allow_interaction:
+            return False
         if not self.arm_ready:
             self.get_logger().warning(
                 "arm is not ready; command skipped", throttle_duration_sec=1.0
             )
-            return
+            return False
         try:
-            self.arm.move_j(target)
+            result = self.arm.move_j(target)
         except Exception as exc:
             self.get_logger().error(f"move_j failed: {exc}")
+            return False
+        if result is False:
+            self.get_logger().error("move_j failed: SDK returned false")
+            return False
+        return True
+
+    def send_target(self, reason):
+        """Send a normal planned-position command when it owns the arm."""
+        return self._send_position_target(reason)
+
+    def send_planned_hold(self, reason):
+        """Send the verified MOVE_J handover target during a mode exit."""
+        return self._send_position_target(reason, allow_interaction=True)
 
     def trigger_emergency_stop(self):
         self._sequential_home_active = False

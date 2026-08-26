@@ -38,6 +38,8 @@ class ControllerSettings:
     joint_acc_timeout: float
     position_mode_timeout: float
     keyboard_timeout: float
+    interaction_feedback_timeout: float
+    interaction_feedback_handover_max_displacement: float
     enable_timeout: float
     feedback_timeout: float
     move_home_on_start: bool
@@ -176,6 +178,12 @@ class ControllerSettings:
             joint_acc_timeout=float(value("joint_acc_timeout")),
             position_mode_timeout=float(value("position_mode_timeout")),
             keyboard_timeout=float(value("keyboard_timeout")),
+            interaction_feedback_timeout=float(
+                value("interaction_feedback_timeout")
+            ),
+            interaction_feedback_handover_max_displacement=float(
+                value("interaction_feedback_handover_max_displacement")
+            ),
             enable_timeout=float(value("enable_timeout")),
             feedback_timeout=float(value("feedback_timeout")),
             move_home_on_start=bool(value("move_home_on_start")),
@@ -272,6 +280,23 @@ class ControllerSettings:
             raise ValueError("pointing_roll_samples must be in [1, 72]")
         if self.keyboard_timeout <= 0.0:
             raise ValueError("keyboard_timeout must be > 0")
+        if (
+            not math.isfinite(self.interaction_feedback_timeout)
+            or self.interaction_feedback_timeout <= 0.0
+        ):
+            raise ValueError(
+                "interaction_feedback_timeout must be finite and > 0"
+            )
+        if (
+            not math.isfinite(
+                self.interaction_feedback_handover_max_displacement
+            )
+            or self.interaction_feedback_handover_max_displacement <= 0.0
+        ):
+            raise ValueError(
+                "interaction_feedback_handover_max_displacement must be "
+                "finite and > 0"
+            )
         if self.startup_home_timeout <= 0.0:
             raise ValueError("startup_home_timeout must be > 0")
         if self.startup_home_tolerance <= 0.0:

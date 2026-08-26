@@ -58,18 +58,19 @@ that Piper-L-specific reinforcement and uses isotropic
 stiffness is `70 N/m`; rotational and translational damping are respectively
 `0.24 N.m.s/rad` and `1.4 N.s/m`.
 
-Nero also supports an experimental, default-off, translation-only position-I
-return term for slowly removing residual pose error after a push. A guarded
-trial starts with `[0,0,0,2,2,2] N/(m.s)`. It is capped at `0.75 N`, leaks at
-`0.05 1/s`, and accumulates only within `0.02 m` of the target. Push/release
-hysteresis is `1.0/0.5 N` and `0.2/0.1 N.m`; stale observations pause it and
-re-arm the release gate, so accumulation cannot resume from the hysteresis
-band after an observation gap.
+Nero enables a deliberately weak six-axis leaky position-I return term for
+slowly removing residual pose error after a push. In `[Rx,Ry,Rz,X,Y,Z]` order,
+the default is `[0.1,0.1,0.1,0.2,0.2,0.2]`; rotational and translational units
+are respectively `N.m/(rad.s)` and `N/(m.s)`. Integral wrench is capped at
+`0.2 N.m` and `0.75 N`, leaks at `0.05 1/s`, and accumulates only within
+`0.05 rad` and `0.02 m` of the target. Push/release hysteresis is `1.0/0.5 N`
+and `0.2/0.1 N.m`; stale observations pause it and re-arm the release gate, so
+accumulation cannot resume from the hysteresis band after an observation gap.
 Wrench or joint-torque saturation applies a separate `0.1 1/s` decay rate
 (10 s time constant). Cartesian-target changes and impedance-mode reset clear
-the integral, while a nullspace-only reference change does not. Enable the
-trial explicitly with
-`cartesian_impedance_position_integral_gain: [0,0,0,2,2,2]`.
+the integral, while a nullspace-only reference change does not. The
+translation-only `[0,0,0,2,2,2]` value is a deliberately stronger explicit
+experiment, not the runtime default.
 
 Nero's seventh joint is controlled by a dynamically consistent nullspace
 impedance. Its defaults are `0.4 N.m/rad` stiffness and `0.1 N.m.s/rad`
@@ -100,11 +101,25 @@ estimated-total-torque slew limit (`interaction_torque_rate_limit`, default
 
 The launch file also starts a passive generalized-momentum observer. The
 controller reads one cached `q`, `qdot`, and motor-torque sample per 100 Hz
-cycle and publishes it on `/arm_dynamics_state` in every backend. Nero v111
+cycle and publishes it on `/<ns>/arm_dynamics_state` in every backend, where
+`<ns>` is `nero` or `piper_l`. Nero v111
 and v112 do not expose motor velocity through the current SDK, so `qdot` is a
 low-pass filtered finite difference of joint position for those profiles. A
 separate process subscribes to that stream and publishes estimated external
-joint torque in the `effort` field of `/arm_external_joint_torque`:
+joint torque in the `effort` field of `/<ns>/arm_external_joint_torque`:
+
+The main controller also checks the SDK receive timestamp of joint angles and
+every motor-state cache entry. A one-cycle SDK read failure reuses only the
+bounded recent complete sample. Every timestamp-bearing source must first be
+observed advancing, and each later bundle refresh waits for all sources to
+advance beyond the previously accepted bundle. Thus a pre-existing frozen SDK
+cache cannot enter MIT. If any timestamp then stops advancing for `0.10 s`, impedance stops issuing MIT
+commands and attempts normal planned-position hold at the last measured joints.
+That handoff sample is accepted for at most one additional nominal MIT period
+and only while `abs(qdot) * sample_age <= 0.03 rad` on every joint. MOVE_J must
+be confirmed by a fresh status update and the hold command must succeed before
+normal mode is published; otherwise the controller fails closed with the
+electronic stop.
 
 ```text
 p    = M(q) qdot
@@ -239,25 +254,28 @@ ControlInput(state, reference, wrench, timestamp, period)
 `hybrid_cartesian` are adapters registered with `ControlEngine`. The ROS
 node remains responsible for mode interlocks, feedback acquisition, command
 transmission, and emergency stop. Each executed cycle is published as schema
-version 1 JSON on `/arm_control_sample`; enable/disable and emergency-stop
-events are published on `/arm_control_event`.
+version 1 JSON on `/<ns>/arm_control_sample`; enable/disable and emergency-stop
+events are published on `/<ns>/arm_control_event`.
 
 The UI-facing interaction API is transport-neutral in
 `armbycontroller/api/interaction.py` and has thin ROS adapters. These standard
 `std_srvs/srv/Trigger` services set modes idempotently:
 
 ```bash
-ros2 service call /arm/set_normal_mode std_srvs/srv/Trigger '{}'
-ros2 service call /arm/set_impedance_mode std_srvs/srv/Trigger '{}'
-ros2 service call /arm/set_admittance_mode std_srvs/srv/Trigger '{}'
+ros2 service call /nero/arm/set_normal_mode std_srvs/srv/Trigger '{}'
+ros2 service call /nero/arm/set_impedance_mode std_srvs/srv/Trigger '{}'
+ros2 service call /nero/arm/set_admittance_mode std_srvs/srv/Trigger '{}'
 ```
+
+Use `/piper_l/arm/...` for Piper-L.
 
 Each response uses `success` plus a schema-v1 JSON `message` containing
 `requested_mode`, `active_mode`, `changed`, and a human-readable message.
 Cross-mode requests retain the normal-mode intermediate transition. There is
 deliberately no public hybrid-mode service. A transient-local schema-v1 JSON
-snapshot on `/arm/interaction_state` exposes the actual mode, public
-`available_modes`, configured service names, backend selections, readiness,
+snapshot on `/<ns>/arm/interaction_state` exposes the actual mode, public
+`available_modes`, resolved fully-qualified/remapped service names, backend
+selections, readiness,
 connection, emergency-stop, and dry-run state. It may report `hybrid` when the
 keyboard entered that mode, but `hybrid` is never listed as requestable.
 
@@ -286,10 +304,11 @@ it with:
 
 ```bash
 ros2 run agxarm_control_by_gamecontroller experiment_recorder_node.py --ros-args \
+  -r __ns:=/nero \
   -p experiment_name:=manual_comparison
-ros2 service call /arm_experiment_recorder/recording \
+ros2 service call /nero/arm_experiment_recorder/recording \
   std_srvs/srv/SetBool '{data: true}'
-ros2 service call /arm_experiment_recorder/recording \
+ros2 service call /nero/arm_experiment_recorder/recording \
   std_srvs/srv/SetBool '{data: false}'
 ```
 
@@ -318,19 +337,33 @@ Start the required robot directly:
 ./scripts/start_piper_l.sh
 ```
 
-The robot scripts configure CAN and do not automatically move home. The current
-Nero wrapper explicitly resets a latched electronic stop; inspect and support
-the arm before starting it. The Piper-L wrapper and direct launch retain the
-safer `reset_emergency_stop_on_start:=false` default unless explicitly
-overridden.
+The launch argument `arm_namespace` defaults to the selected `robot_model`.
+The wrappers pass it explicitly, so Nero nodes/topics/services are under
+`/nero/...` and Piper-L interfaces are under `/piper_l/...`. Direct launch can
+override it with `arm_namespace:=...`; an empty value restores the root
+namespace. Relative topic/service parameters follow the namespace, while an
+explicit absolute override intentionally bypasses it.
+
+The namespaces isolate DDS interfaces, not hardware buses. Both wrappers still
+default to `can0`; never run two hardware controllers against the same CAN
+interface unless the physical CAN topology is explicitly designed for it.
+
+The robot scripts configure CAN and do not automatically move home. Both the
+Nero and Piper-L wrappers explicitly request an electronic-stop reset; inspect
+and support the arm before starting either one. Direct `ros2 launch` retains
+`reset_emergency_stop_on_start:=false` unless explicitly overridden.
 CAN setup uses `sudo` when the current user is not root. The scripts use the
 interactive terminal to select either the X11 keyboard backend for NoMachine
 or a local `/dev/input/eventN` evdev keyboard. In non-interactive use they
 default to X11. Pass `device:=x11` or `device:=/dev/input/eventN` to skip the
 menu. Local evdev selection accepts `3`, `event3`, or `/dev/input/event3`;
-`device:=3` is also expanded to `/dev/input/event3`. Any launch setting can be
-overridden as a trailing argument, for example
-`./scripts/start_nero.sh reset_emergency_stop_on_start:=true`.
+`device:=3` is also expanded to `/dev/input/event3`. Other launch settings can
+be overridden as trailing arguments, for example
+`./scripts/start_nero.sh firmware:=v112`.
+The wrappers remove the original `device:=...` token after normalization, so it
+cannot overwrite the canonical string parameter. If an evdev device disconnects
+or returns EOF/partial data, the keyboard node latches the input fault, releases
+all 25 keys, and continues publishing zero state.
 
 ### Manual Nero static-friction check
 
@@ -354,18 +387,26 @@ manually; it is not installed as a launch/startup entry:
 
 The tested joint uses pure feedforward torque with `kp=kd=0`: no gravity,
 inertia, or Coriolis model term is commanded. The default positive/negative
-test advances in `0.005 N.m` plateaus, each held for at least `0.25 s`; it
-advances only after the `0.1 s` position-window speed is at most `0.01 rad/s`
-the MIT envelope is no longer slew-limited, and at least `0.15 s` of motor
-torque feedback has median absolute deviation no greater than `0.02 N.m`.
-This bounds the average ramp at `0.02 N.m/s`, stops at `2 N.m`, and detects
-breakaway at `0.2 deg`.
-Repeated reads of the same SDK cache entry are discarded by CAN-frame
-timestamp, so plateau stability requires genuinely refreshed feedback.
-At first motion it reports the last stable and first moving command levels,
-their midpoint and half-step uncertainty, plus a median of the preceding
-`0.2 s` motor-torque feedback. It then immediately sends 50 ms of
-zero-feedforward MIT damping/position hold and returns to the common test pose.
+test advances in `0.005 N.m` plateaus, each held for at least `0.25 s`. A
+plateau advances only after fitted acceleration is below its release threshold,
+the latest `0.15 s` position range is at most `0.005 deg`, the MIT envelope is
+no longer slew-limited, and at least `0.15 s` of motor-torque feedback has
+median absolute deviation no greater than `0.02 N.m`. This bounds the average
+ramp at `0.02 N.m/s` and stops at `2 N.m`. Repeated reads of the same SDK cache
+entry are discarded by CAN-frame timestamp, so plateau stability requires
+genuinely refreshed feedback.
+
+Before each direction, a zero-torque baseline raises the acceleration trigger
+above `max(0.05 rad/s^2, median(|a|)+6*MAD)`. Acceleration comes from a centered
+quadratic fit over a `0.12 s` position window with at least `0.08 s` and eight
+samples; adjacent-sample second differences are not used. Three consecutive
+same-direction trigger samples freeze the current torque plateau. Motion is
+recorded only when same-direction displacement reaches `0.01 deg` within
+`0.20 s`; otherwise the candidate expires as noise. At confirmation the script
+reports the last stable and trigger command levels, midpoint and half-step
+uncertainty, trigger acceleration, effective thresholds, and preceding
+`0.2 s` motor-torque median. It then immediately sends 50 ms of zero-feedforward
+MIT damping/position hold and returns to the common test pose.
 The motor torque is drive feedback rather than an independent calibrated
 torque sensor, so command-derived and feedback-derived results are both shown.
 The bidirectional half
@@ -381,18 +422,31 @@ After the formal v112 connection is enabled, the script waits up to `3 s` for
 complete joint-angle and motor-torque caches instead of treating an initial
 empty SDK read as a hardware failure.
 Because Nero v112 joint positions arrive in multiple asynchronous CAN frames,
-the speed guard uses a `0.1 s` position window instead of a raw `10 ms`
-difference. Errors name the triggering joint and measured windowed speed. The
-confirmation prompt prints the effective ramp, displacement threshold, and
-speed settings so an older copy of the script is immediately visible.
+breakaway uses the windowed quadratic acceleration fit. Windowed speed is not
+a breakaway or plateau-validity signal; it remains an independent `0.2 rad/s`
+hard safety guard and is checked before any result is accepted. A separate
+`5 rad/s^2` acceleration safety guard also remains active. The confirmation
+prompt prints the acceleration floor, `0.01 deg` confirmation, and both safety
+limits so an older copy of the script is immediately visible.
+Only a strictly advancing SDK joint-angle timestamp enters the velocity,
+acceleration, candidate, and plateau-stability windows. A repeated cache entry
+holds the current torque without advancing the ramp; a backward timestamp or
+more than `0.1 s` without a fresh sample stops the test. During the zero-torque
+baseline, the `0.01 deg` limit applies only to the tested joint. The low-gain
+held joints may settle within their existing `0.005 rad` safety bound and are
+then included in the re-anchored common reference pose. If joint feedback is
+declared untrusted, shutdown bypasses planned-position hold and requests the
+electronic E-stop; other failures must first prove two advancing joint samples
+before a measured-position hold is attempted.
 
 Results accumulate in `config/nero_static_friction.yaml` by default. A run is
 created after the explicit `TEST` confirmation, then atomically updated after
 firmware detection and after every completed direction; earlier joint results
 therefore survive Ctrl-C or a later safety failure. The versioned YAML keeps
 the run outcome, firmware, CAN interface, all effective parameters, selected
-joints, full reference pose, command breakaway bracket, motor-feedback median,
-and command-/feedback-derived bidirectional summaries. Within the newest
+joints, full reference pose, acceleration trigger/release thresholds, trigger
+acceleration, confirmation displacement, command breakaway bracket,
+motor-feedback median, and command-/feedback-derived summaries. Within the newest
 applicable run, the stable downstream value is
 `joints.JN.summary.recommended_static_friction_nm`, whose source is also
 stored. Use `--output PATH` to choose another YAML file. The default
@@ -418,11 +472,13 @@ colcon build --packages-up-to agxarm_control_by_gamecontroller
 source install/setup.bash
 ```
 
-The controller uses the PoE, analytic Jacobian, and RNEA implementation
-validated in `nero_screw_dynamics`. Nero URDF/Xacro files are resolved from
-that package first. Piper-L remains supported through the model bundled in
-`armbycontroller`. Both models use the same screw-theory IK/FK and
-inverse-dynamics module; `pytracik` is no longer required.
+The controller is self-contained: its PoE, analytic-Jacobian, CRBA, and RNEA
+implementation lives in `armbycontroller`, while the complete Nero, Piper-L,
+and Revo2 URDF/Xacro and mesh assets live in `agx_arm_urdf`. Runtime model
+resolution uses this package's installed share directory or source tree and
+does not depend on `nero_screw_dynamics`. Both robot models use the same
+screw-theory IK/FK and inverse-dynamics module; `pytracik` is no longer
+required.
 The dynamically consistent nullspace mass matrix uses one CRBA tree sweep
 instead of seven repeated inverse-dynamics calls on Nero. Cartesian impedance
 also caches target FK/Jacobian while the joint reference is unchanged; current
@@ -436,7 +492,9 @@ compatibility aliases have been removed.
 
 ## Unified keyboard control
 
-Both arms use `/arm_keyboard_state` and exactly the same keys:
+Both arms use the same relative `arm_keyboard_state` contract, resolved as
+`/nero/arm_keyboard_state` or `/piper_l/arm_keyboard_state`, and exactly the
+same keys:
 
 - `1` ... `7`: select joint; Piper-L ignores `7` because it has six joints
 - Joint mode: `A/D` decreases/increases the selected joint
@@ -493,6 +551,10 @@ shared controller/observer rates, default interaction backend, and firmware
 probe timing. Firmware configuration checks, tool, gravity/model compensation,
 joint gains, Cartesian gains, torque limits, trajectory limits, and observer
 tuning are explicit in each robot file.
+Each YAML node selector uses `/**/arm_keyboard_controller` or
+`/**/arm_momentum_observer`, so the same tuning applies below `/nero`,
+`/piper_l`, or an explicitly selected custom namespace. A root-only selector
+would silently leave a namespaced node on its declared fallback values.
 Nero and Piper-L admittance parameters are independent in their respective
 YAML files, including MIT gains, total-torque bounds, joint-velocity bounds,
 task weights, and DLS damping. Nero velocity, nullspace, and joint-selective
@@ -503,6 +565,12 @@ The Nero profile defaults to `nero_mount: side`, while `start_nero.sh` asks for
 mounting uses home `[0°,90°,0°,0°,0°,0°,0°]`; horizontal uses all zero.
 Side homing runs `J1→J2→J3→…`; horizontal homing runs
 `J2→J1→J3→J4→…`.
+The horizontal all-zero pose is just inside Nero's `0.72 m` Cartesian IK soft
+radial maximum (`0.7184 m` tool radius, about `1.6 mm` of radial headroom).
+Outward Cartesian jog is still rejected at the boundary, and full extension is
+independently close to a kinematic singularity. Planned homing remains valid;
+before Cartesian testing, use joint mode to move inward to a supported,
+non-singular pose.
 The profile also uses
 `tool_configuration: none`, so it loads the bare `nero_description.urdf`.
 The Piper-L profile independently uses `tool_configuration: gripper`.
@@ -514,8 +582,9 @@ signed correction independently to J2 and J4. Each YAML pair is ordered
 `+/-2 deg` transition band, `smoothstep` continuously blends both sides, so
 crossing zero cannot create a commanded-torque jump. The default scales
 `[1,1]` and biases `[0,0]` are deliberately neutral until supported static
-calibration exists. The same scheduled gravity is used by the controller and
-momentum observer; inertia and Coriolis terms are not rescaled. Final MIT
+calibration exists. The same scheduled gravity and an explicit
+`tool_configuration` launch override are used by the controller and momentum
+observer; inertia and Coriolis terms are not rescaled. Final MIT
 total-torque and torque-rate limits still apply after scheduling.
 
 Explicit launch arguments override both files. Use `common_config:=...` to
@@ -572,7 +641,7 @@ ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
 Inspect the observer output after entering MIT with `I`:
 
 ```bash
-ros2 topic echo /arm_external_joint_torque
+ros2 topic echo /piper_l/arm_external_joint_torque
 ```
 
 Dry run:
@@ -594,19 +663,22 @@ local `+Z` axis pointing toward `base_link -Z`; rotation around that axis is
 free. It retains ten verified states and pauses for two seconds after recovery.
 Acceleration limits are written and verified one joint at a time because the
 Piper S-V1.8-8 batch (`joint_index=255`) ACK path is unreliable.
-The controller also waits for `CAN_CTRL/MOVE_J` feedback before sending the
-first startup target so Piper does not discard it during a mode transition.
-Real-hardware launch preserves a latched electronic stop and the current joint
-position by default. Explicit automatic homing moves joints to zero strictly in
+The controller also waits for a fresh post-request `CAN_CTRL/MOVE_J` status
+update before sending the first startup target, so a frozen SDK cache cannot
+confirm the transition and Piper does not discard the target.
+Direct real-hardware launch preserves a latched electronic stop and the current
+joint position by default; both startup wrappers explicitly request reset.
+Explicit automatic homing moves joints to zero strictly in
 order and refuses to start if feedback is outside configured soft limits; it
 never disables joint limits. Only use it when the complete path to zero is
 clear. Any homing timeout triggers the electronic stop. `firmware:=auto` uses
 the two-stage hardware result. An explicit
 firmware argument is checked and reported, but the detected hardware profile
 wins for the formal connection; it remains the profile used by dry-run mode.
-If the arm reports a latched electronic emergency stop, normal startup refuses
-to move. After physically checking the arm, explicitly add
-`reset_emergency_stop_on_start:=true` to reset the controller before enabling.
+When direct launch keeps the `false` policy and the arm reports a latched
+electronic emergency stop, startup refuses to move. After physically checking
+the arm, explicitly pass `reset_emergency_stop_on_start:=true` to reset the
+controller before enabling.
 Initialization failures after an enable request actively disable the arm, and
 homing timeouts trigger the electronic stop. Graceful shutdown disconnects
 without sending `disable()` so another controller can take over. Set

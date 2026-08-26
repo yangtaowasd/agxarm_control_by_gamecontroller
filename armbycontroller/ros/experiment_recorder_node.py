@@ -19,8 +19,8 @@ class ExperimentRecorderNode(Node):
 
     def __init__(self):
         super().__init__("arm_experiment_recorder")
-        self.declare_parameter("sample_topic", "/arm_control_sample")
-        self.declare_parameter("event_topic", "/arm_control_event")
+        self.declare_parameter("sample_topic", "arm_control_sample")
+        self.declare_parameter("event_topic", "arm_control_event")
         self.declare_parameter(
             "output_directory",
             "~/.ros/agxarm_control_by_gamecontroller/experiments",

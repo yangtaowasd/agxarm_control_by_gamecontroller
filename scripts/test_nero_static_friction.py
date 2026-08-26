@@ -20,10 +20,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from armbycontroller.control import MitTorqueEnvelope  # noqa: E402
 from armbycontroller.experiment.static_friction import (  # noqa: E402
-    BreakawayMeasurement,
+    AccelerationBreakawayDetector,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
-    classify_motion,
+    acceleration_noise_thresholds,
+)
+from armbycontroller.experiment.static_friction import (  # noqa: E402
+    BreakawayMeasurement,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
     estimate_stiction,
@@ -53,6 +56,12 @@ from armbycontroller.experiment.static_friction import (  # noqa: E402
     wait_for_sample,
 )
 from armbycontroller.experiment.static_friction import (  # noqa: E402
+    WindowedAccelerationEstimator,
+)
+from armbycontroller.experiment.static_friction import (  # noqa: E402
+    WindowedPositionRange,
+)
+from armbycontroller.experiment.static_friction import (  # noqa: E402
     WindowedVelocityEstimator,
 )
 from armbycontroller.hardware import connect_arm_two_stage  # noqa: E402
@@ -74,16 +83,30 @@ BRAKE_CYCLES = 5
 BRAKE_PERIOD = 0.01
 VELOCITY_WINDOW = 0.1
 VELOCITY_MINIMUM_SPAN = 0.05
+ACCELERATION_WINDOW = 0.12
+ACCELERATION_MINIMUM_SPAN = 0.08
+ACCELERATION_MINIMUM_SAMPLES = 8
+ACCELERATION_BASELINE_DURATION = 0.8
+DEFAULT_ACCELERATION_THRESHOLD = 0.05
+DEFAULT_MAX_ACCELERATION = 5.0
+ACCELERATION_TRIGGER_CYCLES = 3
+ACCELERATION_CONFIRMATION_TIMEOUT = 0.2
 DEFAULT_TORQUE_STEP = 0.005
 MINIMUM_STEP_HOLD = 0.2
-STEP_SETTLE_SPEED = 0.01
+POSITION_SETTLE_WINDOW = 0.15
+STEP_SETTLE_POSITION_RANGE = math.radians(0.005)
 STEP_STABLE_CYCLES = 5
 STEP_TIMEOUT_MARGIN = 0.75
 TORQUE_FEEDBACK_WINDOW = 0.2
 TORQUE_FEEDBACK_MINIMUM_SPAN = 0.05
 TORQUE_FEEDBACK_SETTLE_SPAN = 0.15
 TORQUE_FEEDBACK_MAXIMUM_DEVIATION = 0.02
+JOINT_FEEDBACK_TIMEOUT = 0.1
 DEFAULT_OUTPUT = PROJECT_ROOT / "config" / "nero_static_friction.yaml"
+
+
+class JointAngleFeedbackError(RuntimeError):
+    """Joint-angle feedback cannot be trusted for a motion command."""
 
 
 def parse_args():
@@ -132,10 +155,33 @@ def parse_args():
     parser.add_argument(
         "--movement-threshold-deg",
         type=float,
-        default=0.2,
-        help="breakaway displacement in degrees (default: 0.2)",
+        default=0.01,
+        help=(
+            "displacement confirming an acceleration candidate in degrees "
+            "(default: 0.01)"
+        ),
     )
-    parser.add_argument("--max-speed", type=float, default=0.2)
+    parser.add_argument(
+        "--acceleration-threshold",
+        type=float,
+        default=DEFAULT_ACCELERATION_THRESHOLD,
+        help=(
+            "minimum breakaway acceleration in rad/s^2; zero-torque noise "
+            "may raise it (default: 0.05)"
+        ),
+    )
+    parser.add_argument(
+        "--max-acceleration",
+        type=float,
+        default=DEFAULT_MAX_ACCELERATION,
+        help="hard acceleration safety limit in rad/s^2 (default: 5.0)",
+    )
+    parser.add_argument(
+        "--max-speed",
+        type=float,
+        default=0.2,
+        help="hard speed safety limit only, in rad/s (default: 0.2)",
+    )
     parser.add_argument("--rate", type=float, default=100.0)
     args = parser.parse_args()
     try:
@@ -148,9 +194,19 @@ def parse_args():
         parser.error("--ramp-rate must be in (0, 1] N.m/s")
     if not 0.001 <= args.torque_step <= 0.05:
         parser.error("--torque-step must be in [0.001, 0.05] N.m")
-    if not 0.05 <= args.movement_threshold_deg <= 2.0:
+    if not 0.005 <= args.movement_threshold_deg <= 0.2:
         parser.error(
-            "--movement-threshold-deg must be in [0.05, 2.0] deg"
+            "--movement-threshold-deg must be in [0.005, 0.2] deg"
+        )
+    if not 0.05 <= args.acceleration_threshold <= 2.0:
+        parser.error(
+            "--acceleration-threshold must be in [0.05, 2.0] rad/s^2"
+        )
+    if not 0.5 <= args.max_acceleration <= 20.0:
+        parser.error("--max-acceleration must be in [0.5, 20] rad/s^2")
+    if args.acceleration_threshold >= args.max_acceleration:
+        parser.error(
+            "--acceleration-threshold must be below --max-acceleration"
         )
     if not 0.05 <= args.max_speed <= 1.0:
         parser.error("--max-speed must be in [0.05, 1.0] rad/s")
@@ -168,13 +224,126 @@ def parse_args():
     return args
 
 
-def read_positions(arm):
-    joints = extract_joint_angles(arm.get_joint_angles(), JOINT_COUNT)
+def read_position_sample(arm):
+    feedback = arm.get_joint_angles()
+    joints = extract_joint_angles(feedback, JOINT_COUNT)
     if joints is None or not np.all(np.isfinite(joints)):
-        raise RuntimeError(
+        raise JointAngleFeedbackError(
             "complete finite Nero joint feedback is unavailable"
         )
-    return np.asarray(joints, dtype=float)
+    try:
+        source_timestamp = float(getattr(feedback, "timestamp"))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise JointAngleFeedbackError(
+            "timestamped Nero joint-angle feedback is unavailable"
+        ) from error
+    if not math.isfinite(source_timestamp) or source_timestamp <= 0.0:
+        raise JointAngleFeedbackError(
+            "timestamped Nero joint-angle feedback is unavailable"
+        )
+    return np.asarray(joints, dtype=float), source_timestamp
+
+
+def read_positions(arm):
+    position, _ = read_position_sample(arm)
+    return position
+
+
+def wait_for_fresh_positions(
+    arm,
+    timeout=JOINT_FEEDBACK_TIMEOUT,
+    poll_period=0.005,
+):
+    """Require two strictly advancing SDK joint-angle timestamps."""
+    _, initial_timestamp = read_position_sample(arm)
+    deadline = time.monotonic() + float(timeout)
+    while time.monotonic() < deadline:
+        time.sleep(float(poll_period))
+        position, source_timestamp = read_position_sample(arm)
+        if source_timestamp < initial_timestamp:
+            raise JointAngleFeedbackError(
+                "joint-angle feedback timestamp moved backward"
+            )
+        if source_timestamp > initial_timestamp:
+            return position
+    raise JointAngleFeedbackError(
+        "joint-angle feedback timestamp did not advance before safe hold"
+    )
+
+
+class JointAngleFeedbackWatchdog:
+    """Accept only fresh SDK joint samples and time out stale caches."""
+
+    def __init__(self, joint_count, timeout=JOINT_FEEDBACK_TIMEOUT):
+        self.joint_count = int(joint_count)
+        self.timeout = float(timeout)
+        if (
+            self.joint_count <= 0
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0.0
+        ):
+            raise ValueError("joint-angle watchdog configuration is invalid")
+        self._source_origin = None
+        self._source_timestamp = None
+        self._advanced_at = None
+        self._position = None
+
+    @property
+    def position(self):
+        if self._position is None:
+            raise JointAngleFeedbackError(
+                "joint-angle watchdog has no sample"
+            )
+        return self._position.copy()
+
+    @property
+    def sample_time(self):
+        if self._source_timestamp is None:
+            raise JointAngleFeedbackError(
+                "joint-angle watchdog has no sample"
+            )
+        return self._source_timestamp - self._source_origin
+
+    def update(self, received_at, source_timestamp, position):
+        """Return true only when the source timestamp strictly advances."""
+        received_at = float(received_at)
+        source_timestamp = float(source_timestamp)
+        values = np.asarray(position, dtype=float)
+        if (
+            not math.isfinite(received_at)
+            or not math.isfinite(source_timestamp)
+            or source_timestamp <= 0.0
+            or values.shape != (self.joint_count,)
+            or not np.all(np.isfinite(values))
+        ):
+            raise JointAngleFeedbackError(
+                "joint-angle feedback sample is invalid"
+            )
+        if self._source_timestamp is None:
+            self._source_origin = source_timestamp
+            self._source_timestamp = source_timestamp
+            self._advanced_at = received_at
+            self._position = values.copy()
+            return False
+        if source_timestamp < self._source_timestamp:
+            raise JointAngleFeedbackError(
+                "joint-angle feedback timestamp moved backward"
+            )
+        if source_timestamp == self._source_timestamp:
+            if received_at - self._advanced_at > self.timeout:
+                raise JointAngleFeedbackError(
+                    "joint-angle feedback timestamp did not advance within "
+                    f"{self.timeout:.3f} s"
+                )
+            return False
+        if received_at - self._advanced_at > self.timeout:
+            raise JointAngleFeedbackError(
+                "joint-angle feedback arrived after the freshness timeout"
+            )
+        self._source_timestamp = source_timestamp
+        self._advanced_at = received_at
+        self._position = values.copy()
+        return True
 
 
 def read_motor_torque_sample(arm, joint_index):
@@ -243,11 +412,31 @@ def check_windowed_speed(velocity, maximum, context):
         )
 
 
+def check_windowed_acceleration(acceleration, maximum, context):
+    magnitudes = np.abs(np.asarray(acceleration, dtype=float))
+    joint = int(np.argmax(magnitudes))
+    if magnitudes[joint] > maximum:
+        raise RuntimeError(
+            f"J{joint + 1} windowed acceleration "
+            f"{magnitudes[joint]:.3f} rad/s^2 exceeded "
+            f"{maximum:.3f} rad/s^2 {context}; stopping"
+        )
+
+
 def make_velocity_estimator():
     return WindowedVelocityEstimator(
         JOINT_COUNT,
         window=VELOCITY_WINDOW,
         minimum_span=VELOCITY_MINIMUM_SPAN,
+    )
+
+
+def make_acceleration_estimator():
+    return WindowedAccelerationEstimator(
+        JOINT_COUNT,
+        window=ACCELERATION_WINDOW,
+        minimum_span=ACCELERATION_MINIMUM_SPAN,
+        minimum_samples=ACCELERATION_MINIMUM_SAMPLES,
     )
 
 
@@ -290,8 +479,22 @@ def send_mit(
     return result
 
 
-def restore_planned_pose(arm, position, timeout=3.0):
-    brake_reference = read_positions(arm)
+def restore_planned_pose(
+    arm,
+    position,
+    timeout=3.0,
+    brake_reference=None,
+):
+    if brake_reference is None:
+        brake_reference = wait_for_fresh_positions(arm)
+    brake_reference = np.asarray(brake_reference, dtype=float)
+    if (
+        brake_reference.shape != (JOINT_COUNT,)
+        or not np.all(np.isfinite(brake_reference))
+    ):
+        raise JointAngleFeedbackError(
+            "safe-hold brake reference is invalid"
+        )
     for _ in range(BRAKE_CYCLES):
         for index in range(JOINT_COUNT):
             arm.move_mit(
@@ -318,32 +521,68 @@ def restore_planned_pose(arm, position, timeout=3.0):
 
 def measure_direction(arm, limits, args, joint_number, direction):
     joint = joint_number - 1
-    reference = read_positions(arm)
+    reference, source_timestamp = read_position_sample(arm)
     check_position_safety(reference, limits)
-    previous = reference.copy()
-    previous_time = time.monotonic()
+    now = time.monotonic()
+    feedback_watchdog = JointAngleFeedbackWatchdog(JOINT_COUNT)
+    feedback_watchdog.update(now, source_timestamp, reference)
+    last_command_time = now
     velocity_estimator = make_velocity_estimator()
-    velocity_estimator.update(previous_time, previous)
+    acceleration_estimator = make_acceleration_estimator()
+    position_range = WindowedPositionRange(
+        JOINT_COUNT, window=POSITION_SETTLE_WINDOW
+    )
+    velocity = np.zeros(JOINT_COUNT)
+    acceleration = np.zeros(JOINT_COUNT)
     period = 1.0 / args.rate
     envelope = make_envelope(joint)
     envelope.reset(read_motor_torques(arm))
     zero_feedback = TorqueFeedbackWindow(TORQUE_FEEDBACK_WINDOW)
     time.sleep(period)
     settled_cycles = 0
-    settle_deadline = previous_time + 2.0
-    while settled_cycles < 5:
+    baseline_started = now
+    baseline_acceleration = []
+    settle_deadline = now + 3.0
+    while (
+        settled_cycles < STEP_STABLE_CYCLES
+        or time.monotonic() - baseline_started
+        < ACCELERATION_BASELINE_DURATION
+    ):
         if time.monotonic() >= settle_deadline:
-            raise RuntimeError("initial MIT torque did not settle in 2 s")
+            raise RuntimeError("initial acceleration baseline did not settle")
         now = time.monotonic()
-        position = read_positions(arm)
-        sample_period = max(now - previous_time, 1e-6)
-        velocity = np.asarray(velocity_estimator.update(now, position))
+        raw_position, source_timestamp = read_position_sample(arm)
+        fresh_position = feedback_watchdog.update(
+            now, source_timestamp, raw_position
+        )
+        position = feedback_watchdog.position
+        command_period = max(now - last_command_time, 1e-6)
+        if fresh_position:
+            sample_time = feedback_watchdog.sample_time
+            velocity = np.asarray(
+                velocity_estimator.update(sample_time, position)
+            )
+            acceleration = np.asarray(
+                acceleration_estimator.update(sample_time, position)
+            )
+            position_range.update(sample_time, position)
         check_position_safety(position, limits)
         check_windowed_speed(velocity, args.max_speed, "while settling")
-        if np.max(np.abs(position - reference)) > args.movement_threshold:
+        check_windowed_acceleration(
+            acceleration, args.max_acceleration, "while settling"
+        )
+        if abs(position[joint] - reference[joint]) > args.movement_threshold:
             raise RuntimeError(
-                "joint moved before the ramp; choose a pose with less "
+                "test joint moved before the ramp; choose a pose with less "
                 "gravity torque"
+            )
+        other_movement = np.abs(position - reference)
+        other_movement[joint] = 0.0
+        moving_joint = int(np.argmax(other_movement))
+        if other_movement[moving_joint] > OTHER_JOINT_MOVEMENT_LIMIT:
+            raise RuntimeError(
+                f"J{moving_joint + 1} moved too far while establishing "
+                "the baseline hold"
             )
         result = send_mit(
             arm,
@@ -353,22 +592,68 @@ def measure_direction(arm, limits, args, joint_number, direction):
             velocity,
             0.0,
             joint,
-            sample_period,
+            command_period,
         )
+        last_command_time = now
         feedback_timestamp, motor_torque = read_motor_torque_sample(
             arm, joint_number
         )
-        zero_feedback.add_if_new(feedback_timestamp, motor_torque)
-        settled_cycles = 0 if result.rate_limited else settled_cycles + 1
-        previous = position
-        previous_time = now
+        if fresh_position:
+            zero_feedback.add_if_new(feedback_timestamp, motor_torque)
+        if fresh_position and acceleration_estimator.ready:
+            baseline_acceleration.append(float(acceleration[joint]))
+        position_quiet = bool(
+            position_range.span >= 0.9 * POSITION_SETTLE_WINDOW
+            and position_range.peak_to_peak[joint]
+            <= STEP_SETTLE_POSITION_RANGE
+        )
+        if fresh_position:
+            settled_cycles = (
+                0
+                if result.rate_limited or not position_quiet
+                else settled_cycles + 1
+            )
         time.sleep(period)
 
-    reference = read_positions(arm)
-    previous = reference.copy()
-    previous_time = time.monotonic()
+    acceleration_on, acceleration_off = acceleration_noise_thresholds(
+        baseline_acceleration,
+        minimum_trigger=args.acceleration_threshold,
+    )
+    if acceleration_on >= args.max_acceleration:
+        raise RuntimeError(
+            "zero-torque acceleration noise leaves no safety margin: "
+            f"trigger={acceleration_on:.3f}, "
+            f"limit={args.max_acceleration:.3f} rad/s^2"
+        )
+    print(
+        f"J{joint_number} acceleration thresholds: "
+        f"on={acceleration_on:.3f}, off={acceleration_off:.3f} rad/s^2"
+    )
+
+    reference = feedback_watchdog.position
+    now = time.monotonic()
+    last_command_time = now
     velocity_estimator = make_velocity_estimator()
-    velocity_estimator.update(previous_time, previous)
+    acceleration_estimator = make_acceleration_estimator()
+    position_range = WindowedPositionRange(
+        JOINT_COUNT, window=POSITION_SETTLE_WINDOW
+    )
+    velocity = np.asarray(
+        velocity_estimator.update(feedback_watchdog.sample_time, reference)
+    )
+    acceleration = np.asarray(
+        acceleration_estimator.update(
+            feedback_watchdog.sample_time, reference
+        )
+    )
+    position_range.update(feedback_watchdog.sample_time, reference)
+    breakaway_detector = AccelerationBreakawayDetector(
+        direction=direction,
+        acceleration_threshold=acceleration_on,
+        movement_threshold=args.movement_threshold,
+        consecutive_cycles=ACCELERATION_TRIGGER_CYCLES,
+        confirmation_timeout=ACCELERATION_CONFIRMATION_TIMEOUT,
+    )
     time.sleep(period)
     next_report = time.monotonic()
     last_stable_torque = 0.0
@@ -390,12 +675,48 @@ def measure_direction(arm, limits, args, joint_number, direction):
         stable_cycles = 0
         while True:
             now = time.monotonic()
-            position = read_positions(arm)
-            sample_period = max(now - previous_time, 1e-6)
-            velocity = np.asarray(
-                velocity_estimator.update(now, position)
+            raw_position, source_timestamp = read_position_sample(arm)
+            fresh_position = feedback_watchdog.update(
+                now, source_timestamp, raw_position
             )
+            position = feedback_watchdog.position
+            command_period = max(now - last_command_time, 1e-6)
+            if fresh_position:
+                sample_time = feedback_watchdog.sample_time
+                velocity = np.asarray(
+                    velocity_estimator.update(sample_time, position)
+                )
+                acceleration = np.asarray(
+                    acceleration_estimator.update(sample_time, position)
+                )
+                position_range.update(sample_time, position)
             check_position_safety(position, limits)
+            # Speed is not a breakaway signal. It remains an independent hard
+            # guard and must run before a result can be accepted.
+            check_windowed_speed(
+                velocity, args.max_speed, "during step ramp"
+            )
+            check_windowed_acceleration(
+                acceleration,
+                args.max_acceleration,
+                "during step ramp",
+            )
+            if not fresh_position:
+                send_mit(
+                    arm,
+                    envelope,
+                    reference,
+                    position,
+                    velocity,
+                    last_applied_torque,
+                    joint,
+                    command_period,
+                )
+                last_command_time = now
+                sleep_time = period - (time.monotonic() - now)
+                if sleep_time > 0.0:
+                    time.sleep(sleep_time)
+                continue
             movement = np.abs(position - reference)
             movement[joint] = 0.0
             moving_joint = int(np.argmax(movement))
@@ -406,12 +727,10 @@ def measure_direction(arm, limits, args, joint_number, direction):
                     f"{OTHER_JOINT_MOVEMENT_LIMIT:.6f} rad"
                 )
             displacement = position[joint] - reference[joint]
-            motion = classify_motion(
+            motion = breakaway_detector.update(
+                now,
                 displacement,
-                direction,
-                args.movement_threshold,
-                velocity[joint],
-                args.max_speed,
+                acceleration[joint],
             )
             if motion == "breakaway":
                 if abs(last_applied_torque) <= abs(
@@ -437,6 +756,13 @@ def measure_direction(arm, limits, args, joint_number, direction):
                     feedback_median_torque=feedback_torque,
                     movement_rad=displacement,
                     reference_position_rad=tuple(reference.tolist()),
+                    trigger_acceleration_rad_s2=(
+                        breakaway_detector.trigger_acceleration
+                    ),
+                    acceleration_threshold_rad_s2=acceleration_on,
+                    acceleration_release_threshold_rad_s2=(
+                        acceleration_off
+                    ),
                 )
                 feedback_text = (
                     "unavailable"
@@ -452,6 +778,9 @@ def measure_direction(arm, limits, args, joint_number, direction):
                     f"{measurement.command_uncertainty:.4f} N.m, "
                     f"feedback_median={feedback_text} "
                     f"({feedback_source}), "
+                    f"acceleration="
+                    f"{breakaway_detector.trigger_acceleration:+.3f} "
+                    "rad/s^2, "
                     f"movement={math.degrees(displacement):+.3f} deg"
                 )
                 restore_planned_pose(arm, reference)
@@ -460,15 +789,11 @@ def measure_direction(arm, limits, args, joint_number, direction):
                 raise RuntimeError(
                     "test joint moved opposite to the applied torque"
                 )
-            if motion == "speed_limit":
-                check_windowed_speed(
-                    velocity, args.max_speed, "during step ramp"
+            if breakaway_detector.candidate and plateau_deadline is not None:
+                plateau_deadline = max(
+                    plateau_deadline,
+                    now + ACCELERATION_CONFIRMATION_TIMEOUT,
                 )
-            other_velocity = velocity.copy()
-            other_velocity[joint] = 0.0
-            check_windowed_speed(
-                other_velocity, args.max_speed, "during step ramp"
-            )
             if plateau_deadline is not None and now >= plateau_deadline:
                 feedback_deviation = (
                     feedback_window.median_absolute_deviation()
@@ -496,8 +821,9 @@ def measure_direction(arm, limits, args, joint_number, direction):
                 velocity,
                 target_torque,
                 joint,
-                sample_period,
+                command_period,
             )
+            last_command_time = now
             applied_torque = float(
                 result.command.estimated_torque[joint]
             )
@@ -511,6 +837,10 @@ def measure_direction(arm, limits, args, joint_number, direction):
                     tested_to_command_torque=applied_torque,
                     reference_position_rad=tuple(reference.tolist()),
                     reason="total_torque_limit",
+                    acceleration_threshold_rad_s2=acceleration_on,
+                    acceleration_release_threshold_rad_s2=(
+                        acceleration_off
+                    ),
                 )
             if plateau_started is None:
                 plateau_started = now
@@ -527,11 +857,16 @@ def measure_direction(arm, limits, args, joint_number, direction):
                 print(
                     f"  command={applied_torque:+.3f} N.m, "
                     f"feedback={motor_torque:+.3f} N.m, "
+                    f"acceleration={acceleration[joint]:+.3f} rad/s^2, "
                     f"movement={math.degrees(displacement):+.3f} deg"
                 )
                 next_report = now + 0.5
             if (
-                abs(velocity[joint]) <= STEP_SETTLE_SPEED
+                abs(acceleration[joint]) <= acceleration_off
+                and position_range.span >= 0.9 * POSITION_SETTLE_WINDOW
+                and position_range.peak_to_peak[joint]
+                <= STEP_SETTLE_POSITION_RANGE
+                and not breakaway_detector.candidate
                 and not result.rate_limited
                 and feedback_window.is_stable(
                     TORQUE_FEEDBACK_SETTLE_SPAN,
@@ -541,8 +876,6 @@ def measure_direction(arm, limits, args, joint_number, direction):
                 stable_cycles += 1
             else:
                 stable_cycles = 0
-            previous = position
-            previous_time = now
             if (
                 now - plateau_started >= args.step_hold
                 and stable_cycles >= STEP_STABLE_CYCLES
@@ -563,6 +896,8 @@ def measure_direction(arm, limits, args, joint_number, direction):
         tested_to_command_torque=last_stable_torque,
         reference_position_rad=tuple(reference.tolist()),
         reason="maximum_without_breakaway",
+        acceleration_threshold_rad_s2=acceleration_on,
+        acceleration_release_threshold_rad_s2=acceleration_off,
     )
 
 
@@ -585,16 +920,35 @@ def new_result_run(args):
         "selected_joints": list(args.joints),
         "requested_direction": args.direction,
         "parameters": {
+            "breakaway_detection": "acceleration_then_displacement",
             "maximum_command_torque_nm": args.max_torque,
             "maximum_average_ramp_nm_s": args.ramp_rate,
             "torque_step_nm": args.torque_step,
             "minimum_step_hold_s": args.step_hold,
-            "movement_threshold_deg": args.movement_threshold_deg,
-            "movement_threshold_rad": args.movement_threshold,
-            "maximum_speed_rad_s": args.max_speed,
+            "movement_confirmation_deg": args.movement_threshold_deg,
+            "movement_confirmation_rad": args.movement_threshold,
+            "minimum_acceleration_threshold_rad_s2": (
+                args.acceleration_threshold
+            ),
+            "maximum_acceleration_rad_s2": args.max_acceleration,
+            "maximum_speed_safety_rad_s": args.max_speed,
+            "joint_feedback_timeout_s": JOINT_FEEDBACK_TIMEOUT,
             "control_rate_hz": args.rate,
             "velocity_window_s": VELOCITY_WINDOW,
-            "step_settle_speed_rad_s": STEP_SETTLE_SPEED,
+            "acceleration_window_s": ACCELERATION_WINDOW,
+            "acceleration_minimum_span_s": ACCELERATION_MINIMUM_SPAN,
+            "acceleration_minimum_samples": ACCELERATION_MINIMUM_SAMPLES,
+            "acceleration_baseline_duration_s": (
+                ACCELERATION_BASELINE_DURATION
+            ),
+            "acceleration_trigger_cycles": ACCELERATION_TRIGGER_CYCLES,
+            "acceleration_confirmation_timeout_s": (
+                ACCELERATION_CONFIRMATION_TIMEOUT
+            ),
+            "step_settle_position_window_s": POSITION_SETTLE_WINDOW,
+            "step_settle_position_range_rad": (
+                STEP_SETTLE_POSITION_RANGE
+            ),
             "torque_feedback_window_s": TORQUE_FEEDBACK_WINDOW,
             "torque_feedback_settle_span_s": TORQUE_FEEDBACK_SETTLE_SPAN,
             "torque_feedback_maximum_mad_nm": (
@@ -705,9 +1059,12 @@ def confirm_test(args):
         f"max_average_ramp={args.ramp_rate:.3f} N.m/s, "
         f"step={args.torque_step:.3f} N.m, "
         f"hold>={args.step_hold:.3f} s, "
-        f"breakaway={args.movement_threshold_deg:.3f} deg, "
-        f"speed_limit={args.max_speed:.3f} rad/s over "
+        f"acceleration_floor={args.acceleration_threshold:.3f} rad/s^2, "
+        f"confirm={args.movement_threshold_deg:.3f} deg, "
+        f"acceleration_limit={args.max_acceleration:.3f} rad/s^2, "
+        f"speed_safety_limit={args.max_speed:.3f} rad/s over "
         f"{VELOCITY_WINDOW:.3f} s, "
+        f"joint_feedback_timeout={JOINT_FEEDBACK_TIMEOUT:.3f} s, "
         f"torque_feedback_median={TORQUE_FEEDBACK_WINDOW:.3f} s, "
         f"feedback_MAD<="
         f"{TORQUE_FEEDBACK_MAXIMUM_DEVIATION:.3f} N.m\n"
@@ -746,17 +1103,25 @@ def connect_nero(can_interface):
         raise
 
 
+def request_e_stop(arm, reason):
+    print(f"{reason}; requesting E-stop", file=sys.stderr)
+    try:
+        arm.electronic_emergency_stop()
+    except Exception as stop_error:
+        print(f"E-stop request failed: {stop_error}", file=sys.stderr)
+
+
 def safe_planned_hold(arm):
     try:
-        position = read_positions(arm)
-        restore_planned_pose(arm, position)
+        position = wait_for_fresh_positions(arm)
+        restore_planned_pose(
+            arm,
+            position,
+            brake_reference=position,
+        )
         print("restored planned-position hold at the measured joints")
     except Exception as error:
-        print(f"safe hold failed: {error}; requesting E-stop", file=sys.stderr)
-        try:
-            arm.electronic_emergency_stop()
-        except Exception as stop_error:
-            print(f"E-stop request failed: {stop_error}", file=sys.stderr)
+        request_e_stop(arm, f"safe hold failed: {error}")
 
 
 def main():
@@ -764,6 +1129,7 @@ def main():
     connection = None
     store = None
     run = None
+    joint_feedback_trusted = True
     try:
         confirm_test(args)
         store = StaticFrictionResultStore(args.output)
@@ -864,12 +1230,20 @@ def main():
         best_effort_persist(store, run, outcome="interrupted")
         return 130
     except Exception as error:
+        if isinstance(error, JointAngleFeedbackError):
+            joint_feedback_trusted = False
         print(f"ERROR: {error}", file=sys.stderr)
         best_effort_persist(store, run, outcome="error", error=error)
         return 1
     finally:
         if connection is not None:
-            safe_planned_hold(connection.arm)
+            if joint_feedback_trusted:
+                safe_planned_hold(connection.arm)
+            else:
+                request_e_stop(
+                    connection.arm,
+                    "joint-angle feedback is untrusted",
+                )
             try:
                 connection.arm.disconnect()
             except Exception as error:

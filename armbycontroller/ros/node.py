@@ -717,6 +717,9 @@ class ArmKeyboardController(
         self.feedback_previous_position = None
         self.feedback_previous_velocity = np.zeros(self.joint_count)
         self.feedback_previous_time = None
+        self.feedback_source_timestamps = {}
+        self.last_complete_motor_feedback = None
+        self.last_complete_motor_feedback_at = -math.inf
         self.latest_external_wrench = np.zeros(6)
         self.latest_external_wrench_received_at = -math.inf
         self.latest_external_wrench_source_time = -math.inf

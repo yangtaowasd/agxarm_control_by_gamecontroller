@@ -62,10 +62,10 @@ class MomentumObserverNode(Node):
             "nero_horizontal_gravity_j4_bias_nm", [0.0, 0.0]
         )
         self.declare_parameter(
-            "dynamics_state_topic", "/arm_dynamics_state"
+            "dynamics_state_topic", "arm_dynamics_state"
         )
         self.declare_parameter(
-            "external_torque_topic", "/arm_external_joint_torque"
+            "external_torque_topic", "arm_external_joint_torque"
         )
         self.declare_parameter("momentum_observer_rate", 100.0)
         self.declare_parameter(

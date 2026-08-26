@@ -1,5 +1,5 @@
 # Nero-only parameters for the current side-mounted bare arm.
-arm_keyboard_controller:
+"/**/arm_keyboard_controller":
   ros__parameters:
     firmware: auto
     nero_mount: side
@@ -8,6 +8,9 @@ arm_keyboard_controller:
     # pyAgxArm v111/v112 reports zero motor velocity; estimate dq from q.
     nero_velocity_estimation_enabled: true
     velocity_filter_time_constant: 0.03  # s
+
+    # Preserve the physical 0.7374482 m reach while setting the IK soft edge.
+    workspace_outer_margin: 0.0174482  # m -> soft maximum 0.72 m
 
     mit_kp: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     mit_kd: [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
@@ -37,11 +40,10 @@ arm_keyboard_controller:
     cartesian_impedance_translation_stiffness: 70.0
     cartesian_impedance_rotation_damping: 0.24
     cartesian_impedance_translation_damping: 1.4
-    # Experimental Cartesian position-I return, disabled by default. Spatial
-    # order is [Rx, Ry, Rz, X, Y, Z]. For a guarded trial, use translation
-    # gains [0, 0, 0, 2, 2, 2]. It accumulates only near the target, after the
-    # observer wrench crosses the release threshold, and is bounded to 0.75 N.
-    cartesian_impedance_position_integral_gain: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # Weak six-axis leaky position-I return. Spatial order is
+    # [Rx, Ry, Rz, X, Y, Z]. It accumulates only near the target, after the
+    # observer wrench crosses the release threshold, and is norm bounded.
+    cartesian_impedance_position_integral_gain: [0.1, 0.1, 0.1, 0.2, 0.2, 0.2]
     cartesian_impedance_position_integral_deadband: [0.0, 0.0, 0.0, 0.001, 0.001, 0.001]
     cartesian_impedance_position_integral_max_rotation_error: 0.05
     cartesian_impedance_position_integral_max_translation_error: 0.02
@@ -97,7 +99,7 @@ arm_keyboard_controller:
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 
-arm_momentum_observer:
+"/**/arm_momentum_observer":
   ros__parameters:
     nero_mount: side
     tool_configuration: none

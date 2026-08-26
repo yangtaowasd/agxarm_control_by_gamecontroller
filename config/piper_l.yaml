@@ -1,5 +1,5 @@
 # Piper-L-only parameters for the arm with its standard gripper.
-arm_keyboard_controller:
+"/**/arm_keyboard_controller":
   ros__parameters:
     firmware: auto
     tool_configuration: gripper
@@ -43,7 +43,7 @@ arm_keyboard_controller:
     mit_trajectory_max_acceleration: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     mit_trajectory_max_jerk: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
 
-arm_momentum_observer:
+"/**/arm_momentum_observer":
   ros__parameters:
     tool_configuration: gripper
     gravity_vector: [0.0, 0.0, -9.80665]

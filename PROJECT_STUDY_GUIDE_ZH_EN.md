@@ -25,6 +25,14 @@ and repository directory share the name `agxarm_control_by_gamecontroller`;
 Therefore, `colcon --packages-select`, `ros2 launch`, and `ros2 run` use the
 former, while Python imports use the latter.
 
+项目自带 Nero、Piper-L 和 Revo2 的完整 URDF/Xacro 与 mesh，并在
+`armbycontroller` 内实现 PoE、雅可比、CRBA 和 RNEA。运行时只解析本包安装目录
+或源码树中的 `agx_arm_urdf`，不依赖 `nero_screw_dynamics`。 / The project
+ships the complete Nero, Piper-L, and Revo2 URDF/Xacro and mesh assets and
+implements PoE, Jacobian, CRBA, and RNEA inside `armbycontroller`. Runtime
+model resolution uses only this package's installed `agx_arm_urdf` or source
+tree and does not depend on `nero_screw_dynamics`.
+
 当前阶段已把纯数学核心接入 `mit_tick()` 和 AGX MIT/CAN。默认
 `impedance_backend:=cartesian`；设为 `joint` 可以保留旧关节 MIT 作为对照。
 导纳下游采用已验证 `nero_admittance_mit` 的受限旋量 Jacobian 速度 IK 与实测状态重锚定 MIT
@@ -85,14 +93,17 @@ F_c   = Kx e_x + Dx (xdot_d - xdot) + F_I
 tau_x = Jg(q)^T F_c
 ```
 
-Nero 支持一个默认关闭、刻意很弱的平移位置积分试验，用于慢慢消除摩擦、死区和
-模型偏差留下的回正误差；它不是恒力控制器。积分状态直接用附加 wrench 表示，
-并带泄漏、死区、近目标门控、推/松手滞回和范数上限： / Nero supports a
-default-off, deliberately weak translational position-integral experiment for
-slowly removing residual return error from friction, deadband, and model
-mismatch; it is not a constant-force controller. The state is stored directly
-as an additive wrench and has leak, deadband, near-target gating, push/release
-hysteresis, and norm limits:
+Nero 默认启用一个刻意很弱的六维衰减位置积分，用于慢慢消除摩擦、死区和模型
+偏差留下的回正误差；它不是恒力控制器。空间顺序为 `[Rx,Ry,Rz,X,Y,Z]`，默认
+增益为 `[0.1,0.1,0.1,0.2,0.2,0.2]`，旋转/平移单位分别为
+`N·m/(rad·s)` 与 `N/(m·s)`。积分状态直接用附加 wrench 表示，并带泄漏、死区、
+近目标门控、推/松手滞回和范数上限： / Nero enables a deliberately weak
+six-dimensional leaky position integral by default to slowly remove residual
+return error from friction, deadband, and model mismatch; it is not a
+constant-force controller. Spatial order is `[Rx,Ry,Rz,X,Y,Z]`, with default
+gain `[0.1,0.1,0.1,0.2,0.2,0.2]` in rotational `N·m/(rad·s)` and translational
+`N/(m·s)` units. The state is stored directly as an additive wrench and has
+leak, deadband, near-target gating, push/release hysteresis, and norm limits:
 
 ```text
 e_eff = deadband(e_x)
@@ -255,6 +266,13 @@ This relation applies to redundant and non-redundant arms. It does not require
 `J^-1`, so it does not directly introduce an inverse singularity.
 
 ### 5.4 URDF 动力学支撑 / URDF dynamics support
+
+Nero、Piper-L 和 Revo2 的模型资源位于仓库根目录 `agx_arm_urdf/`，并由
+`CMakeLists.txt` 复制到本包 share 目录。默认解析不访问其他工作区包；显式
+`urdf_path` 仍具有最高优先级。 / Nero, Piper-L, and Revo2 model assets live
+under the repository-root `agx_arm_urdf/` and are copied into this package's
+share directory by `CMakeLists.txt`. Default resolution does not access
+another workspace package; an explicit `urdf_path` still has highest priority.
 
 当前公式核心把零期望加速度代入逆动力学：
 
@@ -583,7 +601,9 @@ surface-normal estimation remains outside this controller.
 [`docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md`](docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md)。 /
 See [`docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md`](docs/ROS_NODE_AND_ARCHITECTURE_ZH_EN.md)
 for the actual ROS topic/service graph, main-process module architecture, and
-one-cycle sequence diagram.
+one-cycle sequence diagram. 下文的 `<ns>` 表示机器人 DDS 命名空间：Nero 为
+`nero`，Piper-L 为 `piper_l`。 / `<ns>` below denotes the per-robot DDS
+namespace: `nero` for Nero and `piper_l` for Piper-L.
 
 ```text
 Keyboard / IK reference       measured q/qdot/tau       observer wrench
@@ -606,7 +626,7 @@ Keyboard / IK reference       measured q/qdot/tau       observer wrench
                        |                                               |
                ROS/AGX hardware adapter                       control_sample
                        |                                               |
-                  pyAgxArm / CAN                     /arm_control_sample (JSON)
+                  pyAgxArm / CAN                /<ns>/arm_control_sample (JSON)
                                                                        |
                                                           experiment recorder
                                                                        |
@@ -719,9 +739,9 @@ profile is used.
 12. 每个轴发送 `move_mit(kp=0,kd=0,t_ff=tau_cmd)`。 / Send each axis with
     `move_mit(kp=0,kd=0,t_ff=tau_cmd)`.
 13. 控制器每个 100 Hz 周期读取一次 SDK 缓存的 `q/qdot/tau_motor`，并发布
-    `/arm_dynamics_state`；该流在 planned、阻抗、导纳和混合模式都存在。 / Once per
+    `/<ns>/arm_dynamics_state`；该流在 planned、阻抗、导纳和混合模式都存在。 / Once per
     100 Hz cycle, the controller reads cached SDK `q/qdot/tau_motor` and
-    publishes `/arm_dynamics_state`; the stream exists in planned, impedance,
+    publishes `/<ns>/arm_dynamics_state`; the stream exists in planned, impedance,
     admittance, and hybrid modes.
 14. 独立观测器进程只订阅该 topic；它不连接 CAN，也不再次读取机械臂。 / The
     separate observer process only subscribes to that topic; it neither
@@ -730,8 +750,8 @@ profile is used.
     `tau_motor[k-1]`，ROS 调度延迟不参与 `dt`。 / The observer integrates every
     timestamped sample; interval `[t_{k-1},t_k]` uses the preceding cycle's
     measured `tau_motor[k-1]`, so ROS scheduling delay does not enter `dt`.
-15. 观测器发布 `/arm_external_joint_torque`；`JointState.effort` 是 `r`，单位
-    N·m。 / The observer publishes `/arm_external_joint_torque`; its
+15. 观测器发布 `/<ns>/arm_external_joint_torque`；`JointState.effort` 是 `r`，单位
+    N·m。 / The observer publishes `/<ns>/arm_external_joint_torque`; its
     `JointState.effort` is `r` in N·m.
 16. 任一机械臂导纳或混合开启时，共享笛卡尔任务几何使用
     `tau_ext=J_g^T F_ext` 的阻尼最小二乘解估计 `F_ext`。`zero_force` 积分
@@ -757,22 +777,27 @@ profile is used.
     `q_ref=q_measured+dq_ref*dt`, then sends `move_mit` with low `kp/kd`, model
     gravity feedforward, and an estimated-total-torque limit.
 18. 每个实际执行的 controller 周期将同一 `ControlInput` 与 `ControlResult` 合并
-    为 schema v1 `Control Sample`，发布到 `/arm_control_sample`；缺失反馈使用
-    validity flag，不写 NaN。 / Every executed controller cycle combines the
-    same `ControlInput` and `ControlResult` into a schema-v1 Control Sample on
-    `/arm_control_sample`; missing feedback uses validity flags, never NaN.
+    为 schema v1 `Control Sample`，发布到 `/<ns>/arm_control_sample`，且永不写 NaN。
+    活跃阻抗所需反馈超时后不再继续生成样本或 MIT 力矩，而是切回普通模式。 /
+    Every executed controller cycle combines the same `ControlInput` and
+    `ControlResult` into a schema-v1 Control Sample on
+    `/<ns>/arm_control_sample`, never writing NaN. When feedback required by
+    active impedance times out, it stops producing MIT torque/samples and
+    returns to normal mode.
 19. controller 使能、退出和急停作为离散 `Control Event` 发布到
-    `/arm_control_event`。 / Controller enable, exit, and emergency stop are
-    published as discrete Control Events on `/arm_control_event`.
+    `/<ns>/arm_control_event`。 / Controller enable, exit, and emergency stop are
+    published as discrete Control Events on `/<ns>/arm_control_event`.
 20. 传输无关的 `InteractionModeInterface` 将外部 `normal/impedance/admittance`
     请求规范化为幂等 set-mode 操作，并强制跨模式先提交 `normal`；ROS adapter
     通过三个 `std_srvs/Trigger` 服务接入，并把 schema-v1 状态发布到
-    `/arm/interaction_state`。公开能力不包含 `hybrid`。 / The
+    `/<ns>/arm/interaction_state`；其中 `mode_services` 是经 namespace/remap 解析后的
+    完整服务名。公开能力不包含 `hybrid`。 / The
     transport-neutral `InteractionModeInterface` normalizes external
     `normal/impedance/admittance` requests into idempotent set-mode operations
     and commits `normal` before every cross-mode transition. Thin ROS adapters
     expose three `std_srvs/Trigger` services and publish schema-v1 state on
-    `/arm/interaction_state`; public capabilities exclude `hybrid`.
+    `/<ns>/arm/interaction_state`; `mode_services` contains resolved
+    fully-qualified/remapped names, and public capabilities exclude `hybrid`.
 21. 可选 recorder 进程订阅两个 JSON topic，流式写入 `samples.jsonl` 和
     `events.jsonl`；启动/收尾原子写 `manifest.json` 与 `summary.json`。 /
     The optional recorder process subscribes to both JSON topics, streams
@@ -801,12 +826,13 @@ profile is used.
 | `armbycontroller/control/smith_predictor.py` | 严格实现 `y_hat=y+y0-yd` 的离散状态空间 Smith 预估器；尚未接入控制周期 / Discrete state-space Smith predictor implementing `y_hat=y+y0-yd`; not yet wired into the control cycle |
 | `armbycontroller/friction/stribeck.py` | 逐关节经典静态 Stribeck 摩擦公式、标量广播和物理参数校验 / Per-joint classical static Stribeck equation, scalar broadcasting, and physical-parameter validation |
 | `armbycontroller/experiment/core.py` | `ExperimentRun` 生命周期、汇总指标、sink interface、Memory/JSONL adapter / Experiment lifecycle, metrics, sink interface, and Memory/JSONL adapters |
-| `armbycontroller/experiment/static_friction.py` | 关节测试顺序、反馈门控力矩阶梯、窗口估速/反馈中位数、静摩擦估计和原子 YAML 结果存储 / Hardware-free joint ordering, feedback-gated torque steps, windowed speed/feedback median, stiction estimation, and atomic YAML result storage |
+| `armbycontroller/experiment/static_friction.py` | 关节测试顺序、反馈门控力矩阶梯、窗口二次拟合加速度、加速度候选/位移确认、反馈中位数、静摩擦估计和原子 YAML 存储 / Hardware-free joint ordering, feedback-gated torque steps, windowed quadratic acceleration, acceleration-candidate/displacement confirmation, feedback median, stiction estimation, and atomic YAML storage |
 | `armbycontroller/hardware/connection.py` | Nero/Piper-L 共用的 DEFAULT 探测、版本映射和不中断使能的第二条 profile 连接 / Shared DEFAULT probe, version mapping, and profile-specific second connection without interrupting enable |
 | `armbycontroller/hardware/feedback.py` | 无副作用的 SDK 关节反馈归一化、完整性提取和 Nero 低通差分速度估计 / Side-effect-free SDK joint-feedback normalization, completeness extraction, and filtered Nero velocity estimation |
 | `armbycontroller/modeling/lie.py` | 共享 SO(3)/SE(3) 指数、对数、空间误差旋量、伴随矩阵和空间向量原语 / Shared SO(3)/SE(3) exponentials, logarithms, space-error twist, adjoint, and spatial-vector primitives |
 | `armbycontroller/modeling/gravity_schedule.py` | Nero 平置 J2/J4 正负区 `scale+bias` 平滑调度，以及只替换重力分量的动力学模型包装 / Smooth signed J2/J4 `scale+bias` scheduling for horizontal Nero and a dynamics-model decorator that replaces gravity only |
 | `armbycontroller/modeling/screw_model.py` | URDF PoE FK、空间雅可比、RNEA 逆动力学和一次树回扫 CRBA 质量矩阵 / URDF PoE FK, space Jacobian, RNEA inverse dynamics, and one-sweep CRBA mass matrix |
+| `agx_arm_urdf/` | 本包自带的 Nero、Piper-L、Revo2 URDF/Xacro 与可视化 mesh；安装后位于本包 share 目录 / Package-owned Nero, Piper-L, and Revo2 URDF/Xacro and visualization meshes, installed into this package's share directory |
 | `armbycontroller/ik/screw.py` | 完整 SE(3) 姿态 IK 与导纳用受限旋量 Jacobian 速度 IK，共享 PoE 模型 / Full-SE(3) pose IK and bounded screw-Jacobian velocity IK for admittance over one PoE model |
 | `armbycontroller/ik/core.py` | IK 创建、目标增量和控制器共享工具；唯一工厂是 `create_screw_solver` / IK construction, target increments, and shared controller helpers; `create_screw_solver` is the sole factory |
 | `armbycontroller/teleop/keyboard.py` | 与传输无关的固定 25 键协议、边沿检测和限位内 Keyboard Control Intent / Transport-independent fixed 25-key protocol, edge detection, and limit-safe Keyboard Control Intent |
@@ -820,7 +846,7 @@ profile is used.
 | `armbycontroller/ros/hardware_session.py` | 两阶段连接、启动安全、反馈归一化、SDK 命令、急停和退出断开 / Two-stage connection, startup safety, normalized feedback, SDK commands, emergency stop, and shutdown disconnect |
 | `armbycontroller/ros/control_cycle.py` | 键盘周期调度、四类 MIT tick、笛卡尔目标与单周期唯一命令所有者 / Keyboard-cycle dispatch, four MIT ticks, Cartesian targets, and one command owner per cycle |
 | `armbycontroller/observers/momentum.py` | 无 ROS/CAN 的纯广义动量观测器 / ROS/CAN-free generalized-momentum observer |
-| `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/arm_dynamics_state`; publishes external torque without controlling the arm |
+| `armbycontroller/ros/momentum_observer_node.py` | 只订阅 `/<ns>/arm_dynamics_state` 的独立 ROS adapter；发布外力矩但不控制机械臂 / Separate ROS adapter that only subscribes to `/<ns>/arm_dynamics_state`; publishes external torque without controlling the arm |
 | `armbycontroller/ros/experiment_recorder_node.py` | 可选独立记录进程；订阅 sample/event、提供 recording service、不访问 CAN / Optional recorder process; subscribes to samples/events, exposes recording service, and never accesses CAN |
 | `config/common.yaml` | 两种机械臂共用的周期、默认 backend 和固件探测时序 / Rates, default backend, and firmware-probe timing shared by both arms |
 | `config/nero.yaml` | Nero 独立固件、裸臂、侧装、速度估计、7 轴零空间、J2/J3/J4 混合姿态、两种导纳和观测器参数 / Nero-only firmware, bare-arm side mount, velocity estimation, seven-axis nullspace, J2/J3/J4 hybrid posture, both admittance modes, and observer parameters |
@@ -834,9 +860,10 @@ profile is used.
 | `test/test_cartesian_admittance.py` | 抗漂移柔顺零力、阻力平衡、旋转向量、边界和重置契约 / Anti-drift soft-zero-force, resistive-equilibrium, rotation-vector, bound, and reset contracts |
 | `test/test_control_interface.py` | 四种交互模式的共用 interface、命令、sample schema 和互锁契约 / Shared interface, command, sample-schema, and interlock contracts for four interaction modes |
 | `test/test_hybrid_control.py` | 任务顺序、互补选择、导纳目标力投影和阻抗/导纳输出解耦契约 / Task ordering, complementary selection, desired-wrench projection, and impedance/admittance output-decoupling contracts |
-| `test/test_experiment.py` | manifest、JSONL、事件顺序和汇总指标契约 / Manifest, JSONL, event-order, and summary-metric contracts |
+| `test/test_experiment.py` | manifest、JSONL、事件顺序、静摩擦加速度起动检测和汇总指标契约 / Manifest, JSONL, event-order, static-friction acceleration-breakaway, and summary-metric contracts |
 | `test/test_hardware_connection.py` | 两次连接顺序、探测连接保活、数据保存和版本到 profile 映射契约 / Two-connection ordering, retained probe, saved data, and version-to-profile mapping contracts |
-| `scripts/test_nero_static_friction.py` | 手动运行的 Nero 单关节准静态双向纯力矩测试；测试轴 `kp=kd=0`，不加入重力、惯性或科氏模型项 / Manually run Nero single-joint quasi-static bidirectional pure-torque test; the tested joint uses `kp=kd=0` with no gravity, inertia, or Coriolis model term |
+| `test/test_keyboard_disconnect.py` | FIFO 驱动的真实 evdev 断连回归：按键清零并持续发布释放状态 / FIFO-driven real evdev disconnect regression for latched key release |
+| `scripts/test_nero_static_friction.py` | 手动运行的 Nero 单关节准静态双向纯力矩测试；以窗口加速度候选和 `0.01°` 位移确认起动，速度仅作硬安全保护 / Manually run Nero single-joint quasi-static bidirectional pure-torque test using a windowed-acceleration candidate plus `0.01 deg` displacement confirmation; speed is safety-only |
 
 用户要求排除 `ros/`、`ik/`、`impedance/` 后的详细文件分类，见
 `docs/file_map/README_ZH_EN.md` 及其五个分类子文档。 / For the requested
@@ -857,6 +884,8 @@ implementation.
 
 | 量 / Quantity | 形状 / Shape | 单位 / Units | 当前默认 / Current default |
 | --- | --- | --- | --- |
+| `arm_namespace` (launch) | string | — | `__robot__`，解析为 `nero` 或 `piper_l`；封装脚本显式传入同名值 / resolves to `nero` or `piper_l`; wrappers pass the same value explicitly |
+| `keyboard_topic` | string | — | 相对名 `arm_keyboard_state`，解析为 `/<ns>/arm_keyboard_state` / relative name resolved below `/<ns>` |
 | `firmware` | string | — | `auto`；实机检测结果优先，显式值仅作配置检查与干跑 profile / detected hardware wins; explicit value is a configuration check and dry-run profile |
 | `firmware_probe_timeout` | scalar | s | `5.0`；第一阶段取得固件数据的总时限 / total stage-one firmware-data deadline |
 | `firmware_probe_poll_period` | scalar | s | `0.1`；无数据时的查询间隔 / retry interval while data is absent |
@@ -869,6 +898,8 @@ implementation.
 | `interaction_measured_joint_velocity_hard_limit` | 1 or n | rad/s | Nero=`2.8`; Piper-L=`2.5` per joint；任一 `I/O/H` 模式单周期立即急停 / immediate one-cycle stop in every I/O/H mode |
 | `interaction_measured_velocity_violation_cycles` | scalar | cycles | `3`；持续速度超限去抖 / sustained-speed debounce |
 | `interaction_joint_limit_margin` | scalar | rad | `0.03`；所有 MIT 周期的实测位置容差，也是导纳/混合预测恢复带 / measured-position tolerance for all MIT cycles and predictive recovery band for admittance/hybrid |
+| `interaction_feedback_timeout` | scalar | s | `0.10`；SDK 关节角和每轴电机状态源时间戳停止推进后的阻抗退出时限 / impedance exit deadline when any SDK source timestamp stops advancing |
+| `interaction_feedback_handover_max_displacement` | scalar | rad | `0.03`；反馈丢失交接时 `abs(qdot) * sample_age` 的逐关节上限，超限则急停 / per-joint `abs(qdot) * sample_age` bound for feedback-loss handover; exceeding it E-stops |
 | `cartesian_impedance_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`；Piper-L=`0.4`，基座 X/Y 旋转 / base-frame X/Y rotation |
 | `cartesian_impedance_base_z_rotation_stiffness` | scalar | N·m/rad | Nero=`1.9`（无补强 / isotropic）；Piper-L=`4.0`（基座 Z 补强 / reinforced） |
 | `cartesian_impedance_translation_stiffness` | scalar | N/m | Nero=`70.0`; Piper-L=`10.0` |
@@ -876,7 +907,7 @@ implementation.
 | `cartesian_impedance_translation_damping` | scalar | N·s/m | Nero=`1.4`; Piper-L=`0.8` |
 | `cartesian_impedance_max_force` | scalar | N | `10.0`；`Jg^T` 前的平移力向量范数上限 / translational-force norm limit before `Jg^T` |
 | `cartesian_impedance_max_torque` | scalar | N·m | `4.0`；`Jg^T` 前的旋转力矩向量范数上限 / rotational-torque norm limit before `Jg^T` |
-| `cartesian_impedance_position_integral_gain` | 6 | N·m/(rad·s), N/(m·s) | `0`，默认关闭；Nero 平移试验建议 `[0,0,0,2,2,2]` / default off; suggested Nero translation trial value |
+| `cartesian_impedance_position_integral_gain` | 6 | N·m/(rad·s), N/(m·s) | Nero=`[0.1,0.1,0.1,0.2,0.2,0.2]`，弱六维默认；`[0,0,0,2,2,2]` 仅为显式高增益平移试验 / weak six-axis Nero default; translation-only value is an explicit high-gain trial |
 | `cartesian_impedance_position_integral_deadband` | 6 | rad, m | Nero=`[0,0,0,0.001,0.001,0.001]` / Nero translational deadband |
 | `cartesian_impedance_position_integral_max_rotation_error` | scalar | rad | `0.05`；超过则暂停累积 / pause above this error |
 | `cartesian_impedance_position_integral_max_translation_error` | scalar | m | `0.02`；超过则暂停累积 / pause above this error |
@@ -895,6 +926,7 @@ implementation.
 | `cartesian_impedance_joint_posture_damping` | 1 or n | N·m·s/rad | Nero=`[0,0.08,0.08,0.12,0,0,0]`; Piper-L=`0` |
 | `cartesian_impedance_model_scale` | 1 or n | — | `1.0`，范围 `[0,1]`，逐关节缩放 `Cqdot+g` / per-joint scale for `Cqdot+g` |
 | `nero_mount` | string | — | YAML=`side`（横置，home=`[0°,90°,0°,0°,0°,0°,0°]`，顺序 J1→J2→J3…）；`horizontal`（平置，home=全零，顺序 J2→J1→J3→J4…） / `side`: J2 home at 90° in joint order; `horizontal`: all-zero home with J2 first |
+| `workspace_outer_margin` | scalar | m | Nero=`0.0174482`，由物理最大 `0.7374482` 得 soft max=`0.72`；声明/Piper-L 默认=`0.10` / Nero-specific margin gives 0.72 m soft maximum; declared/Piper-L default is 0.10 m |
 | `nero_horizontal_gravity_schedule_enabled` | bool | — | `true`；仅 `nero_mount=horizontal` 生效 / active only for horizontal Nero |
 | `nero_horizontal_gravity_transition_angle` | scalar | rad | `0.0349066`（2°），范围 0.5°–15° / smoothstep half-width |
 | `nero_horizontal_gravity_j2_scale` | 2 | — | `[1,1]`，顺序 `[q2<0,q2>0]`，每项范围 `[0,2]` / signed J2 model scales |
@@ -905,7 +937,7 @@ implementation.
 | `nero_velocity_estimation_enabled` | bool | — | `true`，仅 v111/v112 / v111/v112 only |
 | `velocity_filter_time_constant` | scalar | s | `0.03`，一阶低通差分 / first-order filtered finite difference |
 | `mit_command_rate` | scalar | Hz | `100.0` |
-| `dynamics_state_topic` | string | — | `/arm_dynamics_state`; `effort=tau_motor` |
+| `dynamics_state_topic` | string | — | 相对名 `arm_dynamics_state` → `/<ns>/arm_dynamics_state`; `effort=tau_motor` |
 | `momentum_observer_enabled` | bool | — | `true`，只启动/停止独立观测进程 / only starts/stops the separate observer process |
 | `momentum_observer_rate` | scalar | Hz | `100.0`，预期输入频率；计算由每条输入消息触发 / expected input rate; every input message triggers an update |
 | `momentum_observer_gain` | 1 or n | 1/s | `10.0` |
@@ -914,7 +946,7 @@ implementation.
 | Stribeck `v_s`, `b`, `alpha` | 1 or n | rad/s, N·m·s/rad, — | 无运行默认；`v_s>0`, `b>=0`, `alpha>0` / no runtime default |
 | Smith `A,B,C,D` | matrices | discrete model dependent | 无运行默认；必须是同一采样周期的离散标称模型 / no runtime default; one discrete nominal model at a common sample period |
 | Smith `delay_samples` | scalar | samples | 无运行默认；非负整数纯延迟 / no runtime default; nonnegative integer pure delay |
-| `external_torque_topic` | string | — | `/arm_external_joint_torque`；`effort` 为 N·m / `effort` is N·m |
+| `external_torque_topic` | string | — | 相对名 `arm_external_joint_torque` → `/<ns>/arm_external_joint_torque`；`effort` 为 N·m / `effort` is N·m |
 | `admittance_mode` | string | — | Nero=`zero_force`; Piper-L=`resistive` |
 | `admittance_virtual_mass` | 6 | N·m·s²/rad, kg | Nero=`[0.2,0.2,0.2,2,2,2]`; Piper-L=`[0.12,0.12,0.12,1.5,1.5,1.5]` |
 | `admittance_zero_force_damping` | 6 | N·m·s/rad, N·s/m | Nero=`[2,2,2,18,18,18]`; Piper-L=`[0.8,0.8,0.8,8,8,8]` |
@@ -931,7 +963,7 @@ implementation.
 | `admittance_wrench_dls_damping` | scalar | — | `0.05` |
 | `admittance_wrench_timeout` | scalar | s | `0.10`; stale or source-stamped-old wrench exits admittance/hybrid to measured-position hold |
 | `move_home_on_start` | bool | — | `false`; startup never moves home unless explicitly requested |
-| `reset_emergency_stop_on_start` | bool | — | `false`; a latched electronic stop requires explicit operator reset |
+| `reset_emergency_stop_on_start` | bool | — | direct-launch default=`false`; both Nero/Piper-L wrappers explicitly pass `true` |
 | `disable_arm_on_shutdown` | bool | — | `false`; graceful shutdown disconnects without sending `disable()` so an external controller can take over |
 | `admittance_mit_kp` | n | N·m/rad | Nero=`[0.32,0.24,0.32,0.24,0.32,0.28,0.28]`; Piper-L=`[0.3,0.5,0.5,0.5,1.0,0.3]` |
 | `admittance_mit_kd` | n | N·m·s/rad | Nero=`0.08`; Piper-L=`0.01` per joint |
@@ -947,12 +979,12 @@ implementation.
 | `hybrid_desired_wrench` | 6 | N·m, N | `[0,0,0,0,0,0]` in `[Mx,My,Mz,Fx,Fy,Fz]` order; only selected admittance axes apply |
 | `desired_twist` | `6` | rad/s, m/s | 由连续参考的 `Jg(q_ref) qdot_ref` 生成 / generated as `Jg(q_ref) qdot_ref` |
 | `gravity` | `3` | m/s² | 由已有 URDF model 配置 / Existing URDF-model configuration |
-| `control_sample_topic` | string | — | `/arm_control_sample`; schema-v1 JSON `std_msgs/String` |
-| `control_event_topic` | string | — | `/arm_control_event`; JSON `std_msgs/String` |
-| `interaction_state_topic` | string | — | `/arm/interaction_state`; transient-local schema-v1 JSON `std_msgs/String`，供 UI 读取当前状态 / current UI-facing state |
-| `normal_mode_service` | string | — | `/arm/set_normal_mode`; idempotent `std_srvs/srv/Trigger` |
-| `impedance_mode_service` | string | — | `/arm/set_impedance_mode`; idempotent `std_srvs/srv/Trigger` |
-| `admittance_mode_service` | string | — | `/arm/set_admittance_mode`; idempotent `std_srvs/srv/Trigger` |
+| `control_sample_topic` | string | — | 相对名 `arm_control_sample` → `/<ns>/arm_control_sample`; schema-v1 JSON `std_msgs/String` |
+| `control_event_topic` | string | — | 相对名 `arm_control_event` → `/<ns>/arm_control_event`; JSON `std_msgs/String` |
+| `interaction_state_topic` | string | — | 相对名 `arm/interaction_state` → `/<ns>/arm/interaction_state`; transient-local schema-v1 JSON `std_msgs/String` |
+| `normal_mode_service` | string | — | 相对名 `arm/set_normal_mode` → `/<ns>/arm/set_normal_mode`; idempotent `std_srvs/srv/Trigger` |
+| `impedance_mode_service` | string | — | 相对名 `arm/set_impedance_mode` → `/<ns>/arm/set_impedance_mode`; idempotent `std_srvs/srv/Trigger` |
+| `admittance_mode_service` | string | — | 相对名 `arm/set_admittance_mode` → `/<ns>/arm/set_admittance_mode`; idempotent `std_srvs/srv/Trigger` |
 | `experiment_recording_enabled` | bool | — | `false`; 是否启动独立 recorder / whether to launch the separate recorder |
 | `experiment_output_directory` | path | — | `~/.ros/agxarm_control_by_gamecontroller/experiments` |
 | `experiment_name` | string | — | `manual_control` |
@@ -988,6 +1020,16 @@ launch 参数显式传值时优先于两层 YAML。`can_interface`、`execute_mo
 common. Explicit same-name launch values take precedence over both YAML
 layers. `can_interface`, `execute_motion`, topics, and process switches remain
 launch-managed.
+
+三个配置文件用 `/**/arm_keyboard_controller` 和
+`/**/arm_momentum_observer` 选择节点，使同一参数层同时匹配 `/nero`、
+`/piper_l` 和自定义命名空间。不能退回无通配符的根节点选择器，否则 ROS 2 会静默
+忽略该参数块，并让命名空间节点使用参数声明默认值。 / All three files select
+nodes through `/**/arm_keyboard_controller` and
+`/**/arm_momentum_observer`, allowing the same layers to match `/nero`,
+`/piper_l`, and custom namespaces. A root-only selector must not be restored:
+ROS 2 would silently ignore that block and leave the namespaced node on its
+declared fallback values.
 
 旋转刚度向量按基座坐标系组成
 `[K_rx, K_ry, K_rz]=[K_rotation, K_rotation, K_base_z]`。Piper-L 独立提高
@@ -1034,23 +1076,24 @@ in joint space before the total torque clip.
   包络；奇异停止阈值也不能替代物理急停。 / Cartesian wrench norm limits act
   before `Jg^T` but do not replace the downstream per-joint total-torque/rate
   envelope; the singularity stop threshold does not replace a physical E-stop.
-- 位置积分默认关闭，也不是无界理想积分器。Nero 平移试验建议从
-  `Ki=2 N/(m·s)` 开始，附加力限制为 `0.75 N`。大推力、误差超过 `0.02 m`、
-  观测失效、wrench 饱和或关节总力矩饱和都会阻止继续蓄能；观测失效还会重新
-  锁定松手门控，恢复后必须再次低于松手阈值。饱和时已有状态按 10 s 时间常数
-  衰减。笛卡尔目标变化和模式进入/退出清零，但仅零空间关节参考
-  变化不会误清零。动量观测值不是经标定的力传感器读数，因此这些门限不能作为
-  碰撞安全认证。 / Position integration is default-off and is not an
-  unbounded ideal integrator. A Nero translation trial should start at
-  `Ki=2 N/(m·s)`, capped at `0.75 N`. A large push, error above `0.02 m`, stale
-  observation, wrench saturation, or total-joint-torque saturation prevents
-  further accumulation. A stale observation also re-arms the release gate, so
-  the wrench must fall below the release thresholds again after recovery.
-  Existing state decays with a 10 s time constant while saturated.
-  Cartesian-target and mode changes clear it, while a nullspace-
-  only joint-reference change does not. The momentum-observer estimate is not
-  a calibrated force sensor, so these gates are not certified collision
-  limits.
+- Nero 默认启用的弱六维衰减积分不是无界理想积分器；旋转/平移增益分别只有
+  `0.1 N·m/(rad·s)` 与 `0.2 N/(m·s)`，附加 wrench 范数限制为 `0.2 N·m` 和
+  `0.75 N`。大推力、旋转/平移误差超过 `0.05 rad/0.02 m`、观测失效、wrench
+  饱和或关节总力矩饱和都会阻止继续蓄能；观测失效还会重新锁定松手门控，恢复后
+  必须再次低于松手阈值。饱和时已有状态按 10 s 时间常数衰减。笛卡尔目标变化和
+  模式进入/退出清零，但仅零空间关节参考变化不会误清零。`[0,0,0,2,2,2]` 是显式
+  高增益平移实验，不是默认值。动量观测值不是经标定的力传感器读数，因此这些门限
+  不能作为碰撞安全认证。 / Nero's default weak six-axis leaky integral is not
+  an unbounded ideal integrator. Rotation/translation gains are only
+  `0.1 N·m/(rad·s)` and `0.2 N/(m·s)`, with additive wrench norm caps of
+  `0.2 N·m` and `0.75 N`. A large push, rotation/translation error above
+  `0.05 rad/0.02 m`, stale observation, wrench saturation, or total-joint-torque
+  saturation prevents further accumulation. A stale observation re-arms the
+  release gate, and existing state decays with a 10 s time constant while
+  saturated. Cartesian-target and mode changes clear it, while a nullspace-only
+  joint-reference change does not. `[0,0,0,2,2,2]` is an explicit high-gain
+  translation experiment, not the default. The observer estimate is not a
+  calibrated force sensor, so these gates are not certified collision limits.
 - Nero 零空间增益必须非负，且零空间力矩也计入同一个 ±8 N·m 总力矩上限。 /
   Nero nullspace gains must be nonnegative, and nullspace torque shares the
   same ±8 N·m total-torque envelope.
@@ -1098,31 +1141,52 @@ in joint space before the total torque clip.
 - 静摩擦脚本不加入启动项，只能从源码手动运行，并要求普通控制器完全停止、无
   负载、测试轴处于重力矩尽量小的姿态、工作区清空且物理急停可触及。测试轴使用
   `kp=kd=0` 的纯前馈力矩，不加入重力、惯性或科氏模型项；正反向同姿态半差近似
-  消除恒定重力/驱动偏置。它默认每档增加 `0.005 N·m`、至少保持 `0.25 s`，仅在
-  `0.1 s` 窗口速度不超过 `0.01 rad/s` 且 MIT 包络不再限制力矩变化时进入下一
-  档；同时要求电机力矩反馈至少覆盖 `0.15 s`，其中位绝对偏差不超过
-  `0.02 N·m`；SDK 缓存时间戳相同的重复读取不计入样本。平均增加率不超过
-  `0.02 N·m/s`，在 `2 N·m` 停止。它同时监视 `0.2°`
-  起动位移、`0.2 rad/s` 速度、`0.05 rad`
+  消除恒定重力/驱动偏置。它默认每档增加 `0.005 N·m`、至少保持 `0.25 s`。每个
+  方向先采集 `0.8 s` 零力矩加速度基线；以 `0.12 s` 位置窗口、至少 `0.08 s/8`
+  样本的中心二次拟合估计加速度，不使用相邻样本二阶差分。连续 3 周期超过
+  `max(0.05 rad/s², median(|a|)+6 MAD)` 后冻结当前力矩档，并在 `0.20 s` 内以
+  同向 `0.01°` 位移确认起动，否则作为噪声取消。进入下一档要求加速度低于
+  自适应释放门限、最近 `0.15 s` 位置峰峰值不超过 `0.005°`、MIT 包络不再限制
+  力矩变化，并且电机力矩反馈至少覆盖 `0.15 s`、中位绝对偏差不超过
+  `0.02 N·m`。平均增加率不超过 `0.02 N·m/s`，在 `2 N·m` 停止。窗口速度不参与
+  起动或档位有效性判定，只作为独立 `0.2 rad/s` 硬安全线，并在接受结果前检查；
+  另有 `5 rad/s²` 加速度安全线。它还监视 `0.05 rad`
   限位余量、其他轴 `0.005 rad` 位移、±`8 N·m` 估算总力矩和 `20 N·m/s` 总力矩
-  变化率。任一边界失败即回到
+  变化率。只有严格递增的 SDK 关节角时间戳才会更新加速度、候选和档位稳定计数；
+  重复缓存只维持当前力矩而不升档，时间戳回退或 `0.1 s` 未刷新立即停止。基线中
+  `0.01°` 仅限制被测轴；其余低增益保持轴可在 `0.005 rad` 边界内稳定，随后共同
+  重锚。关节反馈一旦失信，收尾不再使用缓存位置，而是直接请求电子急停；其他异常
+  也必须先确认两帧时间戳严格递增，才可尝试实测位置保持。任一边界失败即回到
   实测位置保持；若保持恢复失败则请求电子急停。该结果是当前姿态下的近似起动
   力矩，不是标定证书。 / The static-friction script may run only with the
   normal controller fully stopped, no payload, the tested axis near a
   low-gravity-torque pose, a clear workspace, and the physical E-stop
   reachable. The tested axis uses pure feedforward torque with `kp=kd=0` and
   no gravity, inertia, or Coriolis model term; the same-pose bidirectional half
-  difference approximately removes constant gravity/drive bias. By default it
-  advances in `0.005 N.m` plateaus held for at least `0.25 s`, and advances
-  only when `0.1 s` windowed speed is at most `0.01 rad/s` and the MIT envelope
-  is no longer slew-limited, with at least `0.15 s` of motor-torque feedback
-  whose median absolute deviation is at most `0.02 N.m`; repeated SDK-cache
-  reads with the same timestamp do not count as samples. The average increase
-  is at most `0.02 N.m/s` up
-  to `2 N.m`; it guards `0.2 deg` breakaway
-  displacement, `0.2 rad/s` speed, a `0.05 rad` limit
+  difference approximately removes constant gravity/drive bias. Each direction
+  starts with a `0.8 s` zero-torque baseline. Acceleration is obtained by a
+  centered quadratic fit over a `0.12 s` position window with at least
+  `0.08 s/8` samples, not adjacent-sample second differences. Three consecutive
+  samples above `max(0.05 rad/s^2, median(|a|)+6 MAD)` freeze the current torque
+  plateau; same-direction `0.01 deg` displacement must confirm it within
+  `0.20 s`, otherwise it expires as noise. A plateau advances only when
+  acceleration is below its adaptive release threshold, the latest `0.15 s`
+  position range is at most `0.005 deg`, the MIT envelope is no longer
+  slew-limited, and at least `0.15 s` of motor-torque feedback has median
+  absolute deviation at most `0.02 N.m`. The average increase is at most
+  `0.02 N.m/s` up to `2 N.m`. Windowed speed is not a breakaway or plateau
+  signal; it is an independent `0.2 rad/s` hard guard checked before accepting
+  a result, alongside a `5 rad/s^2` acceleration guard, a `0.05 rad` limit
   margin, `0.005 rad` motion on other joints, ±`8 N.m` estimated total torque,
-  and a `20 N.m/s` total-torque slew limit. Any failure restores a
+  and a `20 N.m/s` total-torque slew limit. Only strictly advancing SDK
+  joint-angle timestamps update acceleration, candidates, or plateau stability.
+  A repeated cache holds the current torque without advancing the ramp; a
+  backward timestamp or `0.1 s` without refresh stops the test. During the
+  baseline, `0.01 deg` applies only to the tested joint; low-gain held joints
+  may settle inside `0.005 rad` before the common pose is re-anchored. Once
+  joint feedback is untrusted, shutdown bypasses cached-position hold and
+  requests E-stop directly. Other failures require two strictly advancing
+  joint samples before measured-position hold is attempted. Any failure restores a
   measured-position hold; failure to restore
   hold requests electronic E-stop. The output is an approximate breakaway
   result at one pose, not a calibration certificate.
@@ -1131,15 +1195,15 @@ in joint space before the total torque clip.
   formal profile connection, the script waits up to `3 s` each for complete
   joint-angle and motor-torque caches, so a not-yet-arrived first v112 frame is
   not misclassified as a feedback failure.
-  Nero v112 的关节位置由 J1/2、J3/4、J5/6、J7 多帧异步 CAN 缓存拼接；静摩擦
-  脚本因此使用 `0.1 s` 窗口估速，而不是用相邻 `10 ms` 读取直接差分。超速错误
-  报告具体关节、窗口速度和上限；确认提示也打印本次实际爬升率、位移阈值和速度
-  窗口，便于识别旧脚本。 / Nero v112 joint positions are assembled from
-  asynchronous J1/2, J3/4, J5/6, and J7 CAN caches. The static-friction script
-  therefore estimates speed over a `0.1 s` window instead of differentiating
-  adjacent `10 ms` reads. An overspeed error names the joint, windowed speed,
-  and limit; the confirmation prompt prints the effective ramp, displacement,
-  and speed-window settings so an old script is visible.
+  Nero v112 的关节位置由 J1/2、J3/4、J5/6、J7 多帧异步 CAN 缓存拼接；窗口二次
+  拟合与 3 周期候选去抖共同抑制单帧量化跳变。窗口估速仍存在，但只用于硬安全
+  停止。确认提示打印本次加速度门限下界、`0.01°` 确认值和速度/加速度安全线，
+  便于识别旧脚本。 / Nero v112 joint positions are assembled from asynchronous
+  J1/2, J3/4, J5/6, and J7 CAN caches. The windowed quadratic fit and three-cycle
+  candidate debounce suppress one-frame quantization jumps. Windowed speed is
+  retained only for hard safety. The confirmation prompt prints the acceleration
+  floor, `0.01 deg` confirmation, and speed/acceleration guards so an old script
+  is visible.
   每档还保存最近 `0.2 s` 电机力矩反馈的中位数。起动结果报告“上一稳定档—首次
   运动档”的命令区间、中点和半档不确定度，并同时报告反馈中位数；正反方向完成
   后分别计算命令侧和反馈侧静摩擦/零偏。电机力矩来自驱动反馈而非独立标定力矩
@@ -1173,8 +1237,8 @@ in joint space before the total torque clip.
   added to impedance torque and remains available for diagnostics and
   admittance input.
 - 观测器进程禁止访问 SDK/CAN；输入只能来自控制器复用的 100 Hz
-  `/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
-  its only input is the controller's reused 100 Hz `/arm_dynamics_state`
+  `/<ns>/arm_dynamics_state`。 / The observer process must not access the SDK/CAN;
+  its only input is the controller's reused 100 Hz `/<ns>/arm_dynamics_state`
   stream.
 - `I/O/H` 是互锁切换，不是三个 controller 叠加：纯导纳、纯阻抗和混合各自运行
   一份 MIT 输出；
@@ -1185,13 +1249,35 @@ in joint space before the total torque clip.
   restore normal planned-position control and hold the current position before
   entering its target; requesting two or three modes together leaves the
   current mode unchanged.
-- MIT 退出必须取得新的完整 `q/dq/torque` 样本，绝不回退到历史关节目标。硬件
-  模式确认期间 `interaction_transitioning=true`，不发送控制命令；确认失败会锁存
-  `interaction_fault_reason` 并触发电子急停。 / MIT exit requires a fresh,
-  complete `q/dq/torque` sample and never falls back to an old joint target.
-  Control output is suppressed while `interaction_transitioning=true`; an
-  unconfirmed hardware handoff latches `interaction_fault_reason` and triggers
-  the electronic stop.
+- 主控制器同时检查关节角和每个电机状态的 pyAgxArm 源时间戳；单次 SDK 读取异常
+  只复用 `0.10 s` 窗口内的最后完整 `q/dq/torque`。带时间戳的每个源必须先被
+  观察到至少推进一次，之后也只有全部源均超过上一完整 bundle 时才刷新控制样本，
+  因此启动前遗留的冻结 SDK 缓存不能进入 MIT。任一源停止推进超过该时限时，
+  阻抗立即停止 MIT 输出并尝试以最后实测关节切回普通 planned-position。handoff
+  样本最多额外允许一个名义 MIT 周期的调度余量，且逐关节必须满足
+  `abs(qdot) * sample_age <= 0.03 rad`，绝不回退到历史关节目标。硬件模式确认期间
+  `interaction_transitioning=true`；MOVE_J 必须由请求后的新状态确认，持位命令成功后
+  才提交 normal。样本过旧、位移不确定度超限、模式未确认或持位发送失败都会锁存
+  `interaction_fault_reason` 并触发电子急停，不能宣称已进入 normal。 / The main
+  controller checks source timestamps on joint angles and every pyAgxArm motor
+  state. Every timestamp-bearing source must first be observed advancing, and
+  later control bundles refresh only after all sources pass the last accepted
+  bundle, so a pre-existing frozen SDK cache cannot enter MIT. A single SDK read error reuses
+  only the last complete `q/dq/torque` inside the `0.10 s` window. If any source stops advancing beyond it,
+  impedance stops MIT output and attempts planned-position handoff at the last
+  measured joints. That handoff sample receives at most one nominal MIT period
+  of scheduling slack, must satisfy per-joint
+  `abs(qdot) * sample_age <= 0.03 rad`, and never falls back to an old joint
+  target. Output is suppressed while `interaction_transitioning=true`; a fresh
+  post-request status must confirm MOVE_J, and the planned hold must succeed
+  before normal is committed. Any failed guard latches
+  `interaction_fault_reason`, triggers the electronic stop, and cannot claim
+  normal mode.
+- evdev 键盘的 EOF、短读或致命读取错误会锁存输入故障、关闭 fd、清零 25 个键，并
+  持续发布全零；`EINTR` 重试，`EAGAIN/EWOULDBLOCK` 只是正常的暂无事件。 /
+  Evdev EOF, partial reads, or fatal read errors latch an input fault, close the
+  fd, clear all 25 keys, and keep publishing zero; `EINTR` retries and
+  `EAGAIN/EWOULDBLOCK` only mean no event is currently available.
 - 导纳/混合只消费时效窗口内且源时间戳递增的 wrench。超过 `0.10 s` 时退出到实测
   位置保持，不再用零向量伪装有效测量。 / Admittance and hybrid consume only
   wrench samples inside the freshness window with increasing source timestamps.
@@ -1294,8 +1380,8 @@ in joint space before the total torque clip.
   combines contact, friction, backlash, payload error, torque-tracking error,
   and encoder noise; before validation it is neither pure contact torque nor
   a safe collision threshold.
-- `/arm_dynamics_state.effort` 是 SDK 电机状态中的力矩估计，不是六维力/力矩
-  传感器测量，也不是硬件同步采样。 / `/arm_dynamics_state.effort` is the
+- `/<ns>/arm_dynamics_state.effort` 是 SDK 电机状态中的力矩估计，不是六维力/力矩
+  传感器测量，也不是硬件同步采样。 / `/<ns>/arm_dynamics_state.effort` is the
   SDK motor-state torque estimate, not a six-axis force/torque-sensor reading
   or a hardware-synchronous sample.
 - Nero v111/v112 的 SDK 速度字段固定为零；控制器现在以位置有限差分和 `0.03 s`
@@ -1347,7 +1433,7 @@ in joint space before the total torque clip.
 - 任务空间阻抗和 IK 目标生成必须解耦，慢 IK 不能阻塞力矩刷新。 / Task
   impedance and IK target generation must be decoupled so slow IK cannot block
   torque refresh.
-- `/arm_control_sample` 在控制进程内进行 JSON 序列化；磁盘写入在独立进程，但
+- `/<ns>/arm_control_sample` 在控制进程内进行 JSON 序列化；磁盘写入在独立进程，但
   Python 序列化和 ROS publish 仍会增加非硬实时循环的负载。 / Control samples
   are JSON-serialized in the control process. Disk writes are separate, but
   Python serialization and ROS publication still add load to the non-real-time
@@ -1370,9 +1456,15 @@ in joint space before the total torque clip.
 cd /home/yang/demo_ws
 source /opt/ros/humble/setup.bash
 python3 -m pip install "modern_robotics>=1.1.1"
-colcon build --packages-select agxarm_control_by_gamecontroller --symlink-install
+colcon build --packages-select agxarm_control_by_gamecontroller
 source install/setup.bash
 ```
+
+该命令执行普通复制安装；删除 `build/` 后，已安装的 Python、URDF 和 mesh 仍然可用。
+本包无需先构建或安装 `nero_screw_dynamics`。 / This command performs a
+regular copied install. Installed Python, URDF, and mesh files remain usable
+after `build/` is removed. `nero_screw_dynamics` does not need to be built or
+installed first.
 
 ### 配置文件 / Configuration file
 
@@ -1384,6 +1476,14 @@ replace parameter declarations: the node still must declare names,
 type/dynamic-type descriptors, and defaults for runs without YAML. Therefore
 `config/*.yaml` remains value configuration and `ros/parameters.py` remains
 the Controller Parameter Surface; neither implements control behavior.
+
+配置文件的节点键采用 `/**/arm_keyboard_controller` 与
+`/**/arm_momentum_observer`。这是 `arm_namespace` 的必要配套：它让 Nero、
+Piper-L 及自定义 namespace 都得到同一 common/robot 参数层，并保留显式 launch
+参数的最高优先级。 / Configuration node keys use
+`/**/arm_keyboard_controller` and `/**/arm_momentum_observer`. This is required
+by `arm_namespace`: Nero, Piper-L, and custom namespaces receive the same
+common/robot layers while explicit launch arguments retain highest priority.
 
 launch 先加载 `config/common.yaml`，再根据 `robot_model` 只加载
 `config/nero.yaml` 或 `config/piper_l.yaml`。common 只含共用周期、默认 backend
@@ -1402,13 +1502,44 @@ J2/J3/J4 hybrid-posture gains exist only in Nero.
 Explicit launch arguments have highest priority. `common_config` and
 `controller_config` can replace the respective layers.
 
+`arm_namespace` 的特殊默认值 `__robot__` 在 launch 展开时解析为当前
+`robot_model`。因此 Nero 的节点、topic 和 service 位于 `/nero/...`，Piper-L
+位于 `/piper_l/...`；两个启动脚本也显式传入对应值。所有接口默认参数都是相对
+名，因而跟随命名空间；只有显式绝对名覆盖才会绕过隔离。命名空间只隔离
+ROS/DDS endpoint，不会隔离默认的 `can0`，不能据此让两个硬件控制器争用同一
+CAN interface。 / The special `arm_namespace=__robot__` default resolves to
+`robot_model`, placing Nero interfaces below `/nero/...` and Piper-L
+interfaces below `/piper_l/...`; both wrapper scripts pass those values
+explicitly. Interface defaults are relative names and follow the namespace;
+only an explicit absolute override bypasses it. This isolates ROS/DDS
+endpoints, not the default `can0`: do not let two hardware controllers contend
+for the same CAN interface.
+
+Nero 平置全零 home 的工具半径约为 `0.7184 m`，位于 Nero 专属 Cartesian IK soft
+workspace 上限 `0.72 m` 内，但径向余量只有约 `1.6 mm`。继续向外的 Cartesian jog
+会被 workspace guard 拒绝，而且全伸展奇异性是独立风险；planned sequential home
+仍有效，笛卡尔测试前应先在关节模式向内移动到有支撑、非奇异的安全位姿。该软
+上限来自物理最大臂展 `0.7374482 m` 减 Nero 专属 `0.0174482 m` outer margin，未
+修改 Piper-L/声明的 `0.10 m` 默认。 / Nero's horizontal all-zero home has a
+tool radius of about `0.7184 m`, inside the Nero-specific `0.72 m` Cartesian IK
+soft maximum but with only about `1.6 mm` radial headroom. Further outward jog
+is rejected, and full-extension singularity remains an independent risk.
+Planned sequential home remains valid; move inward in joint mode to a supported,
+nonsingular pose before Cartesian testing. The bound is physical maximum
+`0.7374482 m` minus Nero's `0.0174482 m` outer margin; Piper-L/the declared
+`0.10 m` default is unchanged.
+
 Nero 文件对应当前侧装、无手机械臂，显式设置 `tool_configuration=none`；
-Piper-L 文件独立设置 `tool_configuration=gripper`。实机启动时，两种机械臂都会先
+Piper-L 文件独立设置 `tool_configuration=gripper`。launch 中显式覆盖该参数时，
+同一值会同时传给主控制器和动量观测器，避免两边载荷模型不一致。实机启动时，
+两种机械臂都会先
 用 `default` profile 连接、enable 并保存数据，保持该连接，再以检测 profile 建立
 第二条正式连接；例如 Nero
 `1.11 -> v111`、Piper-L `S-V1.8-8 -> v188`。`firmware=auto` 不再使用静态版本
 猜测。 / Nero explicitly uses `tool_configuration=none`; Piper-L independently
-uses `tool_configuration=gripper`. On hardware, both arms first connect with
+uses `tool_configuration=gripper`. An explicit launch override is passed to
+both the main controller and momentum observer, keeping their payload models
+identical. On hardware, both arms first connect with
 the `default` profile, enable, save the returned data, keep that connection,
 and open a second connection with the detected profile; examples are Nero `1.11 -> v111` and Piper-L
 `S-V1.8-8 -> v188`. `firmware=auto` no longer guesses a static version.
@@ -1467,16 +1598,18 @@ still pass through normal automatically. `success` is the standard service
 field and `message` contains schema-v1 JSON. Hybrid has no public service.
 
 ```bash
-ros2 service call /arm/set_normal_mode std_srvs/srv/Trigger '{}'
-ros2 service call /arm/set_impedance_mode std_srvs/srv/Trigger '{}'
-ros2 service call /arm/set_admittance_mode std_srvs/srv/Trigger '{}'
-ros2 topic echo /arm/interaction_state
+ros2 service call /nero/arm/set_normal_mode std_srvs/srv/Trigger '{}'
+ros2 service call /nero/arm/set_impedance_mode std_srvs/srv/Trigger '{}'
+ros2 service call /nero/arm/set_admittance_mode std_srvs/srv/Trigger '{}'
+ros2 topic echo /nero/arm/interaction_state
 ```
 
-`/arm/interaction_state` 使用 reliable + transient-local QoS；后启动的 UI 也会
+Piper-L 将以上 `/nero` 换成 `/piper_l`。`/<ns>/arm/interaction_state` 使用
+reliable + transient-local QoS；后启动的 UI 也会
 收到最近快照。`available_modes` 是可请求能力，固定不含 `hybrid`；
 `interaction_mode` 是实机真实状态，因此键盘按 `H` 后可报告 `hybrid`。 /
-`/arm/interaction_state` uses reliable, transient-local QoS so a UI started
+Use `/piper_l` instead of `/nero` for Piper-L.
+`/<ns>/arm/interaction_state` uses reliable, transient-local QoS so a UI started
 later receives the latest snapshot. `available_modes` lists requestable
 capabilities and never includes `hybrid`; `interaction_mode` reports the real
 robot state and may therefore show keyboard-entered `hybrid`.
@@ -1505,10 +1638,12 @@ ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
 <run-id>/summary.json
 ```
 
-单独启动 recorder 时，通过 `/arm_experiment_recorder/recording` 的
+单独启动 recorder 时，先用 `-r __ns:=/nero`（或 `/piper_l`）设置命名空间，再通过
+`/<ns>/arm_experiment_recorder/recording` 的
 `std_srvs/srv/SetBool` 开始/结束。`false` 收尾时才写 `summary.json`；急停事件会
 写入 `events.jsonl`，但不会由 recorder 自己触发急停。 / When the recorder is
-started independently, use `/arm_experiment_recorder/recording`
+started independently, first set `-r __ns:=/nero` (or `/piper_l`), then use
+`/<ns>/arm_experiment_recorder/recording`
 (`std_srvs/srv/SetBool`) to start/stop. `summary.json` is written when `false`
 closes the run. Emergency-stop events are recorded in `events.jsonl`; the
 recorder never initiates an emergency stop.
@@ -1546,12 +1681,17 @@ ros2 launch agxarm_control_by_gamecontroller keyboard_control.launch.py \
 
 使用 `scripts/start_nero.sh` 或 `scripts/start_piper_l.sh` 选择本地键盘时，设备
 输入可写为编号 `3`、事件名 `event3` 或完整路径 `/dev/input/event3`；启动脚本
-会统一解析为完整设备路径。命令行简写 `device:=3` 也采用同一规则。 / When
+会统一解析为完整设备路径。命令行简写 `device:=3` 也采用同一规则；两个脚本随后
+过滤原始 `device:=...`，只传一次规范化字符串，避免简写重新覆盖。evdev 断连后
+读取器锁存故障并持续发布全按键释放状态。 / When
 selecting a local keyboard through `scripts/start_nero.sh` or
 `scripts/start_piper_l.sh`, the device may be entered as event number `3`, event
 name `event3`, or full path `/dev/input/event3`; the startup script normalizes
 all forms to the full device path. The `device:=3` command-line shorthand uses
-the same rule.
+the same rule. Both wrappers then remove every original `device:=...` token and
+pass the canonical string exactly once, so a shorthand cannot overwrite it.
+If evdev later disconnects, the reader latches the fault and continuously
+publishes an all-keys-released state.
 
 `scripts/start_nero.sh` 会先选择键盘输入，最后询问安装姿态：`1` 为横置 `side`，home 是
 `[0°,90°,0°,0°,0°,0°,0°]`、顺序 J1→J2→J3→…；`2` 为平置
@@ -1587,43 +1727,77 @@ cd /home/yang/demo_ws/src/agxarm_control_by_gamecontroller
 ```
 
 测试轴采用 `kp=kd=0` 的纯前馈力矩，不计算重力、惯性或科氏补偿。默认每档增加
-`0.005 N·m` 并至少保持 `0.25 s`；只有 `0.1 s` 窗口速度不超过 `0.01 rad/s`
-、MIT 力矩包络已稳定，而且至少 `0.15 s` 电机力矩反馈的中位绝对偏差不超过
-`0.02 N·m` 时才进入下一档，因此平均增加率不超过 `0.02 N·m/s`，到
-`2 N·m` 最长约需 100 秒/方向。`0.2°` 位移判据避免把微小反馈抖动当成起动。
-刚起动时记录上一稳定档与首次运动档，以中点作为命令估计、半档作为不确定度，并
-报告起动前最近 `0.2 s` 电机反馈力矩中位数；随后先发送 50 ms 零前馈 MIT 阻尼/
-位置保持，再切回规划模式，使惯性与科氏影响尽可能小。默认执行正、反两个方向，结果按
+`0.005 N·m` 并至少保持 `0.25 s`。每个方向先采集 `0.8 s` 零力矩数据；在最近
+`0.12 s` 位置上做中心二次拟合，至少需要 `0.08 s` 和 8 个样本，以二次项直接
+得到加速度。加速度起动门限为
+`a_on=max(0.05 rad/s², median(|a|)+6 MAD)`，释放/稳定门限为
+`a_off=max(0.02 rad/s², median(|a|)+3 MAD)`。同向加速度连续 3 周期超过
+`a_on` 后锁存且冻结当前力矩档；若 `0.20 s` 内同向位移达到 `0.01°`，确认起动并
+立即制动，否则候选作为噪声失效。只有 `|a|<=a_off`、最近 `0.15 s` 位置峰峰值
+不超过 `0.005°`、MIT 力矩包络已稳定，而且至少 `0.15 s` 电机力矩反馈的中位
+绝对偏差不超过 `0.02 N·m` 时才进入下一档，因此平均增加率不超过
+`0.02 N·m/s`，到 `2 N·m` 最长约需 100 秒/方向。窗口速度不参与起动检测或档位
+稳定，只保留为独立 `0.2 rad/s` 安全停止线；另有 `5 rad/s²` 加速度安全线，两者
+均在接受起动结果前检查。只有严格递增的 SDK 关节角时间戳才更新估计器、候选或
+档位稳定计数；重复缓存只维持当前力矩，`0.1 s` 未刷新或时间戳回退立即停止。
+基线的 `0.01°` 只约束被测轴，其他低增益保持轴可在 `0.005 rad` 安全界内稳定，
+随后以稳定后的全关节位置重锚。反馈失信时直接请求电子急停；其他异常也必须确认
+两帧严格递增的关节角反馈后才尝试实测位置保持。记录包含上一稳定档与触发档、中点、半档不确定度、触发
+加速度、有效 `a_on/a_off` 和最近 `0.2 s` 电机反馈力矩中位数；随后先发送 50 ms
+零前馈 MIT 阻尼/位置保持，再切回规划模式，使惯性与科氏影响尽可能小。默认执行
+正、反两个方向，结果按
 `tau_s=(tau_positive-tau_negative)/2` 估计静摩擦，并报告
 `(tau_positive+tau_negative)/2` 零偏；零偏包含当前姿态的恒定重力和驱动
-偏置。使用 `--help` 查看有界的爬升率、最大力矩、位移阈值和采样率选项。 /
+偏置。使用 `--help` 查看有界的爬升率、最大力矩、加速度门限、安全上限、位移确认
+和采样率选项。 /
 The tested joint uses pure feedforward torque with `kp=kd=0`; no gravity,
 inertia, or Coriolis compensation is computed. By default torque advances in
-`0.005 N.m` plateaus held for at least `0.25 s`. It advances only when `0.1 s`
-windowed speed is at most `0.01 rad/s`, the MIT envelope has settled, and at
-least `0.15 s` of motor-torque feedback has median absolute deviation no more
-than `0.02 N.m`, so the
-average increase stays at or below `0.02 N.m/s` and reaching `2 N.m` takes up
-to about 100 seconds per direction. The `0.2 deg` criterion avoids mistaking
-small feedback jitter for breakaway. First motion records the last-stable and
-first-moving command levels, uses their midpoint with half-step uncertainty,
-and reports the median of the latest `0.2 s` pre-motion motor-torque feedback.
-It is followed by 50 ms of zero-feedforward MIT damping/position hold before
+`0.005 N.m` plateaus held for at least `0.25 s`. Each direction begins with a
+`0.8 s` zero-torque baseline. A centered quadratic fit over the latest `0.12 s`
+of positions, with at least `0.08 s` and eight samples, obtains acceleration
+from its quadratic term. The trigger is
+`a_on=max(0.05 rad/s^2, median(|a|)+6 MAD)` and the release/stability threshold
+is `a_off=max(0.02 rad/s^2, median(|a|)+3 MAD)`. Three consecutive
+same-direction samples above `a_on` latch a candidate and freeze the current
+torque plateau. Same-direction `0.01 deg` displacement must confirm it within
+`0.20 s`; otherwise it expires as noise. A plateau advances only with
+`|a|<=a_off`, at most `0.005 deg` position range over `0.15 s`, a settled MIT
+envelope, and at least `0.15 s` of motor feedback whose median absolute
+deviation is at most `0.02 N.m`. The average increase stays at or below
+`0.02 N.m/s`, so reaching `2 N.m` takes up to about 100 seconds per direction.
+Windowed speed is not used for breakaway or plateau stability; it remains an
+independent `0.2 rad/s` safety stop, alongside a `5 rad/s^2` acceleration stop,
+and both run before a result is accepted. Only a strictly advancing SDK
+joint-angle timestamp updates the estimators, candidate, or plateau-stability
+count. Repeated cache reads hold the current torque; a backward timestamp or
+`0.1 s` without refresh stops the test. During the baseline, `0.01 deg` limits
+only the tested joint; low-gain held joints may settle within the `0.005 rad`
+safety bound before the complete pose is re-anchored. Untrusted joint feedback
+requests E-stop directly; other failures require two advancing joint samples
+before measured-position hold. A result stores the last-stable and
+trigger plateaus, midpoint, half-step uncertainty, trigger acceleration,
+effective `a_on/a_off`, confirmation displacement, and latest `0.2 s`
+pre-motion motor-torque median. It is followed by 50 ms of zero-feedforward MIT
+damping/position hold before
 switching to planned mode. This minimizes inertial and Coriolis effects. The
 default runs both directions and estimates stiction as
 `tau_s=(tau_positive-tau_negative)/2`, and reports
 `(tau_positive+tau_negative)/2` as the zero offset, which includes constant
-gravity and drive bias at the current pose. Use `--help` for bounded ramp
-rate, torque-step, maximum-torque, movement-threshold-in-degrees, and
-sample-rate options.
+gravity and drive bias at the current pose. Use `--help` for bounded ramp rate,
+torque step, maximum torque, acceleration thresholds/safety limits,
+movement confirmation, and sample rate.
 默认在确认后创建/更新 `config/nero_static_friction.yaml`。YAML schema v1 的根包含
-`robot_model`、明确单位和 `runs`；每个 run 通过 `run_id` 原位更新而非重复追加。
+`robot_model`、含 `rad/s²` 加速度在内的明确单位和 `runs`；每个 run 通过 `run_id`
+原位更新而非重复追加。每个方向记录检测方法、有效加速度触发/释放门限、触发加速度
+与确认位移。
 正向完成即落盘，负向完成后补充 `summary`，其中
 `recommended_static_friction_nm` 是供后续控制读取的命令区间中点结果。 /
 After confirmation the default `config/nero_static_friction.yaml` is created or
-updated. Schema v1 contains the robot model, explicit units, and `runs`; one
-run is replaced by `run_id` rather than duplicated. Positive completion is
-saved immediately, and negative completion adds the `summary`, whose
+updated. Schema v1 contains the robot model, explicit units including
+`rad/s^2` acceleration, and `runs`; one run is replaced by `run_id` rather than
+duplicated. Each direction records the detection method, effective acceleration
+trigger/release thresholds, trigger acceleration, and confirmation displacement.
+Positive completion is saved immediately, and negative completion adds the `summary`, whose
 `recommended_static_friction_nm` is the command-bracket result intended for
 downstream control.
 
@@ -1658,7 +1832,7 @@ without Piper-L's base-Z reinforcement and adds unprojected outer-loop
 `[0.5,0.5,0.6] N·m/rad` posture springs on J2/J3/J4.
 
 Nero 默认 `admittance_mode=zero_force`。保持机械臂受支撑，确认
-`/arm_external_joint_torque` 新鲜后按 `O` 捕获锚定位姿并进入抗漂移柔顺零力；
+`/nero/arm_external_joint_torque` 新鲜后按 `O` 捕获锚定位姿并进入抗漂移柔顺零力；
 默认平移 deadband 与虚拟摩擦分别为 `0.25 N`、`0.35 N`，且有 `5 N/m` 弱保持，
 因此约小于 `0.6 N` 的静态模型残差不会开始移动；
 下游从同一 PoE 模型取得旋量 Jacobian、构造工具几何 Jacobian，再由受限加权
@@ -1670,7 +1844,7 @@ DLS 生成 `dq_ref`，并用验证包同值低增益 MIT 跟踪；共享 Model C
 若要验证带阻力且松手回中的版本，在启动命令末尾追加
 `admittance_mode:=resistive`。 / Nero defaults to
 `admittance_mode=zero_force`. With the arm supported and a fresh
-`/arm_external_joint_torque`, press `O` to capture the anchor and enter
+`/nero/arm_external_joint_torque`, press `O` to capture the anchor and enter
 anti-drift soft zero force. The default translational deadband and virtual
 friction are `0.25 N` and `0.35 N`, with weak `5 N/m` holding; a static model
 residual below roughly `0.6 N` therefore does not initiate motion. Downstream,
@@ -1737,9 +1911,9 @@ base-frame-Z admittance plus five-axis impedance hybrid. Every switch among
 the target. `P`, manual jog, and home are locked while admittance or hybrid is
 active.
 
-实机按 `O` 或 `H` 前必须已有新鲜的 `/arm_external_joint_torque`（默认不超过
+实机按 `O` 或 `H` 前必须已有新鲜的 `/<ns>/arm_external_joint_torque`（默认不超过
 `0.10 s`）；否则控制器拒绝进入并提示检查该 topic。 / Before pressing `O` or
-`H` on hardware, `/arm_external_joint_torque` must be fresh (no older than
+`H` on hardware, `/<ns>/arm_external_joint_torque` must be fresh (no older than
 `0.10 s` by default); otherwise entry is rejected with a topic diagnostic.
 
 两个实机命令都会默认启动 100 Hz 被动动量观测器。进入 MIT 后查看： / Both
@@ -1747,7 +1921,8 @@ hardware commands start the passive 100 Hz momentum observer by default.
 After entering MIT, inspect:
 
 ```bash
-ros2 topic echo /arm_external_joint_torque
+ros2 topic echo /nero/arm_external_joint_torque
+# Piper-L: ros2 topic echo /piper_l/arm_external_joint_torque
 ```
 
 若只想运行控制器，启动参数追加 `momentum_observer_enabled:=false`。 / Add
@@ -1765,17 +1940,20 @@ On hardware, only a `<robot> ready` line means `arm_ready=true`. A CAN,
 enable, mode, or feedback initialization failure prints `motion unavailable`
 and disables keyboard motion commands.
 
-默认 `reset_emergency_stop_on_start=false`：检测到锁存电子急停时启动保持失能。
+直接 launch 的声明默认 `reset_emergency_stop_on_start=false`：检测到锁存电子急停时
+启动保持失能。
 检查机械臂和故障原因后，操作者可在单次命令中显式传入 `true`；初始化在使能后
-失败会主动 `disable()`，回零超时则触发电子急停。 / The default is
-`reset_emergency_stop_on_start=false`: startup remains disabled when an
+失败会主动 `disable()`，回零超时则触发电子急停。 / The declared direct-launch
+default is `reset_emergency_stop_on_start=false`:
+startup remains disabled when an
 electronic stop is latched. After inspection, an operator may explicitly pass
 `true` for one launch. Initialization failures after enable actively call
 `disable()`, while a homing timeout triggers the electronic stop.
-当前 `start_nero.sh` 封装脚本显式传入 `true`，因此运行脚本前必须先检查机械臂和
-故障原因；直接 `ros2 launch` 仍使用上述 `false` 默认值。 / The current
-`start_nero.sh` wrapper explicitly passes `true`, so inspect the arm and fault
-cause before running it; direct `ros2 launch` retains the `false` default.
+当前 `start_nero.sh` 和 `start_piper_l.sh` 两个封装脚本都显式传入 `true`，因此运行
+任一脚本前必须先检查机械臂和故障原因；直接 `ros2 launch` 仍使用上述 `false`
+默认值。 / Both current wrappers, `start_nero.sh` and `start_piper_l.sh`,
+explicitly pass `true`, so inspect the arm and fault cause before running either
+one; direct `ros2 launch` retains the `false` default.
 
 平置启动时应同时看到控制器日志
 `Nero horizontal gravity scheduling active` 和观测器日志
@@ -1788,14 +1966,27 @@ cause before running it; direct `ros2 launch` retains the `false` default.
 the logs appear while torque remains identical to raw URDF gravity.
 
 UI 服务返回 `success=false` 时，先解析 response `message` 中的 schema-v1 JSON，
-再查看 `/arm/interaction_state` 的 `interaction_mode`、`arm_ready`、
+再查看 `/<ns>/arm/interaction_state` 的 `interaction_mode`、`arm_ready`、
 `emergency_stopped` 和 `reason`。服务拒绝不会绕过原有 preflight、反馈完整性、
 wrench freshness 或 normal 中间态。 / When a UI service returns
 `success=false`, parse the schema-v1 JSON in response `message`, then inspect
 `interaction_mode`, `arm_ready`, `emergency_stopped`, and `reason` on
-`/arm/interaction_state`. A rejected service never bypasses the existing
+`/<ns>/arm/interaction_state`. A rejected service never bypasses the existing
 preflight, feedback-completeness, wrench-freshness, or normal-intermediate
 checks.
+
+`mode_services` 应显示 `/nero/arm/...` 或 `/piper_l/arm/...`（也反映 remap 后的
+名字），而不是裸的相对 `arm/...`。若日志出现 `impedance feedback lost`，检查 SDK
+关节角和各电机状态的 `timestamp` 是否持续增加；控制器会尝试回到普通保持，若最后
+完整样本已超过 `0.10 s + 1/mit_command_rate`、`abs(qdot)*sample_age` 超过
+`0.03 rad`、MOVE_J 无法由新状态确认或持位命令失败，则按设计急停。 /
+`mode_services` should show `/nero/arm/...` or `/piper_l/arm/...` and reflect
+remaps, rather than bare relative `arm/...` names. On `impedance feedback lost`,
+check that the SDK joint-angle and every motor-state timestamp continue to
+advance. The controller attempts normal hold; it intentionally E-stops if the
+last complete sample is older than `0.10 s + 1/mit_command_rate`, per-joint
+`abs(qdot)*sample_age` exceeds `0.03 rad`, MOVE_J lacks a fresh confirmation,
+or the planned hold command fails.
 
 1. `T` 是否为合法 SE(3)。 / Is `T` valid SE(3)?
 2. `J_s` 是否为 `6×n` 且顺序为 `[角; 线]`。 / Is `J_s` `6×n` and ordered
@@ -1839,10 +2030,10 @@ checks.
     `external_wrench_unavailable` and re-arm `position_integral_push_active`;
     and saturation should report a
     `position_integral_decay_rate` of `0.1 s^-1`.
-12. `/arm_dynamics_state` 是否约为 100 Hz，实验 `summary.period.mean` 是否接近
+12. `/<ns>/arm_dynamics_state` 是否约为 100 Hz，实验 `summary.period.mean` 是否接近
     `0.01 s`；Nero v111/v112 的 `velocity` 是否为位置差分估计，其余 profile
     是否来自 SDK。 / Is
-    `/arm_dynamics_state` near 100 Hz, with finite-difference `velocity` for
+    `/<ns>/arm_dynamics_state` near 100 Hz, with finite-difference `velocity` for
     Nero v111/v112 and SDK velocity for other profiles, and is experiment
     `summary.period.mean` near `0.01 s`?
 12. 静止无接触时，残差是否稳定但可能存在摩擦/模型偏置；接触时符号是否符合关节
@@ -1855,14 +2046,14 @@ checks.
     admittance, and hybrid mutually exclusive; after `H`, does the sample show
     `hybrid` with default mask `[0,0,0,0,0,1]`; and after `I`, is normal
     planned-position hold committed before MIT impedance enters?
-14. `/arm_control_sample` 的 `interaction_mode` 是否明确为
+14. `/<ns>/arm_control_sample` 的 `interaction_mode` 是否明确为
     `admittance_zero_force` 或 `admittance_resistive`；前者松手后是否停止在新
-    偏置，后者是否回到锚点。 / Does `/arm_control_sample` identify
+    偏置，后者是否回到锚点。 / Does `/<ns>/arm_control_sample` identify
     `admittance_zero_force` or `admittance_resistive`; does the former settle
     at its new offset while the latter returns to the anchor?
-15. `ros2 topic echo /arm_control_sample` 是否显示所选 controller、相同周期的
+15. `ros2 topic echo /<ns>/arm_control_sample` 是否显示所选 controller、相同周期的
     state/reference/command 和 `schema_version: 1`。 / Does
-    `/arm_control_sample` show the selected controller, same-cycle
+    `/<ns>/arm_control_sample` show the selected controller, same-cycle
     state/reference/command, and `schema_version: 1`?
 16. recorder status 是否给出唯一 run directory；正常收尾后四个文件是否存在，
     `summary.sample_count` 是否等于 `samples.jsonl` 行数。 / Does recorder
@@ -1960,10 +2151,11 @@ checks.
     `S_a=diag(0,0,0,0,0,1)`, verify `S_i=I-S_a` and `S_a S_i=0`, and explain
     why translational Z is the sixth rather than third component in this
     project.
-12. 显式启用 Nero 平移位置积分 `2 N/(m·s)`，依次模拟 `1.2 N -> 0.8 N ->
+12. 将 Nero 积分显式覆盖为仅平移的高增益 `2 N/(m·s)` 试验，依次模拟 `1.2 N -> 0.8 N ->
     0.4 N` 推力和 wrench 饱和，验证控制器依次处于推动、滞回、松手状态，仅最后
     一种未饱和周期会累积；附加力不超过 `0.75 N`，饱和衰减时间常数为 10 s。 /
-    Explicitly enable Nero translation position integration at `2 N/(m·s)`;
+    Explicitly override Nero with a translation-only high-gain integral trial
+    at `2 N/(m·s)`;
     simulate `1.2 N -> 0.8 N -> 0.4 N` followed by wrench saturation, and
     verify pushed, hysteresis, then released states. Only the released,
     unsaturated case may accumulate; additive force stays below `0.75 N` and
