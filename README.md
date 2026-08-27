@@ -1,3 +1,7 @@
+#此项目即将废弃
+
+
+
 # agxarm_control_by_gamecontroller
 
 ROS 2 control for AGX Nero, Piper-L, and a Revo2 hand. Nero and Piper-L share
